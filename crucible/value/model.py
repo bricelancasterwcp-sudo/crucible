@@ -14,9 +14,11 @@ two are structurally compatible (the loop calls ``value.score(node)`` and nothin
 v0 is deliberately untrained: :class:`ConstantValue` returns the SAME score for every node.
 Ordering by a constant is a no-op tie-break, which is exactly the honest baseline for
 slice-2 -- the search's execution budget and REx posterior do the real work, and S3 will
-swap in a trained scorer against this measured floor rather than a guessed one. The one live
-wire is :meth:`ConstantValue.update`: a no-op that increments an observable counter, so S3
-can prove the training hook is actually called by the loop before it makes it learn anything.
+swap in a trained scorer against this measured floor rather than a guessed one. Only
+:meth:`ConstantValue.score` is wired into the loop today, where it orders candidates under the
+REx prior; :meth:`ConstantValue.update` is the training-hook *interface* plus an observable
+counter, but the search loop does NOT call it yet -- S3 will add the ``value.update(...)`` call
+when it wires value training on.
 """
 from __future__ import annotations
 

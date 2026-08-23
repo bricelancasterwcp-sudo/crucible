@@ -2,6 +2,7 @@
 name = "crucible"
 version = "0.0.1"
 description = "Research spike: small frozen proposer + structured memory + verify-by-execution search"
+license = {text = "MIT"}
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "cosmic-ray>=8.7",

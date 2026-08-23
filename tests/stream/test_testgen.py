@@ -34,3 +34,20 @@ def test_render_is_deterministic_and_collectable_shape():
     second, _ = render_tests("unit_x", "add", inputs, exp, prefix="v", atol=0)
     assert first == second
     assert "parametrize" not in first and "fixture" not in first and "import *" not in first
+
+
+IDENT = "def ident(x):\n    return x\n"
+
+
+def test_unrenderable_inputs_are_dropped_with_reason():
+    # The arguments are rendered as a literal too, so an input the test file's namespace
+    # cannot evaluate (inf, nan) would raise NameError there -- classified as a *failure*,
+    # i.e. blamed on the unit. Drop it at the source instead (ruling R-T7-2).
+    inputs = [[1.0], [float("inf")], [float("nan")]]
+    exp = [Expected(0, True, "1.0", None), Expected(1, True, "1.0", None), Expected(2, True, "1.0", None)]
+    src, dropped = render_tests("unit_x", "ident", inputs, exp, prefix="v", atol=0)
+    assert dropped == [("v1", "no-roundtrip"), ("v2", "no-roundtrip")]
+    assert "def test_v0" in src and "def test_v1" not in src and "def test_v2" not in src
+    assert "inf" not in src and "nan" not in src
+    r = run_tests("unit_x", IDENT, src)
+    assert r.all_passed and set(r.passed) == {"test_v0"}

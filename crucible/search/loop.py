@@ -21,10 +21,13 @@ mutation-checked test:
 4. *A fully-passing node stops the search.* Reward ``1.0`` on the visible suite is a
    verified-visible submission; there is nothing left to refine.
 
-REx (Thompson sampling) ranks the *unexecuted* frontier by a value heuristic. A candidate is
-a deterministic function of its text, so a node is executed at most once (dedup by node id)
-and its arm is retired the moment it is run -- otherwise a high-posterior executed arm could
-starve the frontier and spin the loop without ever charging.
+REx (Thompson sampling) ranks the arms -- unexecuted candidates by a value-heuristic prior, and
+executed candidates by their reward posterior ``Beta(alpha+reward, beta+1-reward)``. A candidate
+is a deterministic function of its text, so a node is executed at most once (dedup by node id):
+``select`` re-picking an already-executed node means *refine it* (expand its children), and a
+close-to-passing node -- higher reward, higher posterior -- is thus re-picked and refined before
+a hopeless one (ruling R-S2-T7-1). Each node is executed once and expanded at most once, then
+dropped, so the loop stays bounded (see :func:`_budget_loop`).
 
 ``Value`` is declared here as a minimal protocol because Task 8 (``crucible/value/model.py``)
 may not be committed yet; that task supplies the concrete ``ConstantValue``. Anything with a
@@ -113,16 +116,19 @@ def _feedback(report: TestReport) -> str:
     return "\n".join(lines)
 
 
-def _retire(rex: RexScheduler, arm_id: str) -> None:
-    """Drop a spent arm so REx never re-selects it.
+def _drop(ctx: "_Ctx", node_id: str) -> None:
+    """Remove a spent node from the live pool -- from both ``pending`` and REx, kept in lockstep.
 
-    An executed node is a measurement already taken; an infra-skipped node produced no verdict.
-    Neither should be selected again -- re-running a deterministic candidate only burns loop
-    iterations, and a high-posterior executed arm could out-sample and starve the unexecuted
-    frontier. Thompson arms are independent, so removing one never perturbs the others. REx ships
-    ``add_arm``/``select``/``update`` and no remove, so the loop owns this arm-lifecycle step.
+    A node is dropped when it is spent: an infra-skipped node (no verdict) the moment it is run,
+    or an executed node once it has ALSO been expanded (executed and refined: nothing more to do).
+    An executed-but-unexpanded node is *not* dropped -- it stays so its updated Beta posterior
+    keeps competing in ``select`` (a close-to-passing node is re-picked and refined preferentially).
+    Thompson arms are independent, so removing one never perturbs the others' posteriors. REx ships
+    ``add_arm``/``select``/``update`` and no remove, so the loop owns this arm-lifecycle step
+    (``_arms`` is REx's own registry; ``pending`` mirrors it exactly).
     """
-    rex._arms.pop(arm_id, None)
+    ctx.pending.pop(node_id, None)
+    ctx.rex._arms.pop(node_id, None)
 
 
 @dataclass
@@ -171,33 +177,51 @@ def _expand(ctx: _Ctx, node: Node) -> None:
         _add_candidate(ctx, cand, node.node_id, depth + 1)
 
 
+def _execute(ctx: _Ctx, meter: BudgetMeter, node: Node) -> int:
+    """Run one unexecuted node; return how many charged executions it added (0 or 1).
+
+    Infra (no verdict): dropped, NOT charged, NOT REx-updated (rule 3). A measurement: charged,
+    its report applied, and its reward folded into the arm's ``Beta(alpha+reward, beta+1-reward)``.
+    The node is KEPT in the pool so that updated posterior competes in later ``select`` calls --
+    the canonical REx-over-the-refinement-tree behaviour (ruling R-S2-T7-1): a close-to-passing
+    node earns a higher posterior and is re-picked, and thus refined, before a hopeless one.
+    """
+    report = run(ctx.unit, node.candidate.text, None,
+                 per_test_timeout_s=ctx.per_test_timeout_s, wall_cap_s=ctx.wall_cap_s)
+    if report.infra_error is not None:
+        _drop(ctx, node.node_id)
+        return 0
+    meter.charge(report)
+    node.apply_report(report)
+    ctx.rex.update(node.node_id, node.visible_reward())   # posterior now competes in future select
+    return 1
+
+
 def _budget_loop(ctx: _Ctx, k: int) -> int:
     """Spend at most ``k`` charged executions; return the number actually charged.
 
-    Selection, execution, and the four honest-measurement rules live here (see module docs).
+    ``select`` returns a live arm. An UNEXECUTED arm is executed and KEPT (its posterior stays in
+    play). An already-EXECUTED arm is refined -- ``_expand`` adds its children as new arms, then the
+    parent is dropped (executed and expanded: done). The four honest-measurement rules: the free
+    symptom is charged elsewhere (never here); ``meter.check`` makes ``k`` a hard ceiling; infra is
+    not counted/charged/updated (in ``_execute``); a full visible pass stops the search.
     """
     meter = BudgetMeter(k)
     charged = 0
     while ctx.pending:
         try:
-            meter.check()                       # rule 2: k is a hard ceiling, never breached
+            meter.check()                        # rule 2: k is a hard ceiling, never breached
         except BudgetExhausted:
             break
-        node = ctx.pending.pop(ctx.rex.select())
-        report = run(ctx.unit, node.candidate.text, None,
-                     per_test_timeout_s=ctx.per_test_timeout_s, wall_cap_s=ctx.wall_cap_s)
-        if report.infra_error is not None:
-            _retire(ctx.rex, node.node_id)      # rule 3: no verdict -> not charged, not updated
-            continue
-        meter.charge(report)
-        charged += 1
-        node.apply_report(report)
-        reward = node.visible_reward()
-        ctx.rex.update(node.node_id, reward)    # update the arm, then retire the spent node
-        _retire(ctx.rex, node.node_id)
-        if reward >= 1.0:
-            break                               # rule 4: a full visible pass stops the search
-        _expand(ctx, node)
+        node_id = ctx.rex.select()
+        node = ctx.pending[node_id]
+        if node.report is None:                  # unexecuted -> execute, keep its posterior live
+            charged += _execute(ctx, meter, node)
+            if node.report is not None and node.visible_reward() >= 1.0:
+                break                            # rule 4: a full visible pass stops the search
+        else:                                    # already executed -> refine it, then retire it
+            _expand(ctx, node)
+            _drop(ctx, node_id)
     return charged
 
 

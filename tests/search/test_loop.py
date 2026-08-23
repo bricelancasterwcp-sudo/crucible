@@ -21,7 +21,7 @@ import pytest
 from crucible.run.types import Candidate
 from crucible.sandbox.report import TestReport
 from crucible.search import loop as loop_mod
-from crucible.search.loop import search
+from crucible.search.loop import SearchResult, search
 from crucible.search.rex import RexScheduler
 from crucible.stream.units import Unit, sha256_text
 
@@ -171,3 +171,71 @@ def test_infra_error_is_not_charged_or_rex_updated(monkeypatch):
         p for p in calls if p != unit.module_src and p != state["infra_patch"]
     )
     assert sha256_text(good_patch) in updated
+
+
+# --- Fix round 1 (R-S2-T7-1): the reward posterior drives refinement order ---
+
+# A_HALF passes test_v0 only (visible_reward 0.5); B_ZERO fails both (0.0). Both are distinct from
+# the buggy root module, so neither dedups against it. Reports are canned (monkeypatched run) so a
+# 200-seed sweep is instant AND fully deterministic (every REx draw is seeded).
+A_HALF = "def add(a, b):\n    return 3 if (a, b) == (1, 2) else 0\n"
+B_ZERO = "# b\n" + BUG
+
+
+class OrderProbeProposer:
+    """Seeds A and B; on every refinement returns A/B again (deduped), recording expansion order.
+
+    A refinement prompt carries the parent's still-failing tests, so the feedback text names which
+    node is being expanded: A -> ``still failing: test_v1``; B -> ``still failing: test_v0, test_v1``.
+    """
+
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.expand_order: list[str] = []
+
+    def generate(self, prompt, *, n, seed, max_tokens=1024, temperature=0.7):
+        if "still failing:" in prompt:
+            label = "B" if "still failing: test_v0, test_v1" in prompt else "A"
+            if label not in self.expand_order:
+                self.expand_order.append(label)
+        return [Candidate(A_HALF, None, 0.0), Candidate(B_ZERO, None, 0.0)]
+
+
+def _canned_run(u, patch, subset, **kw):
+    if patch == A_HALF:
+        return TestReport(("test_v0",), ("test_v1",), (), (), 0.0, None)   # visible_reward 0.5
+    return TestReport((), ("test_v0", "test_v1"), (), (), 0.0, None)        # visible_reward 0.0
+
+
+def _a_expanded_before_b(order: list[str]) -> bool:
+    if "A" not in order:
+        return False
+    if "B" not in order:
+        return True
+    return order.index("A") < order.index("B")
+
+
+@pytest.mark.timeout(120)
+def test_posterior_drives_refinement_order(monkeypatch):
+    # Canned reports -> no sandbox, instant + deterministic. value is constant, so REx priors are
+    # identical across arms and any ordering signal comes purely from the reward posterior.
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    unit = _unit()
+    n_seeds = 200
+    a_first = 0
+    for s in range(n_seeds):
+        probe = OrderProbeProposer()
+        search(unit, probe, ConstantValue(0.0), seed=s, k=8, width=2)
+        assert len(probe.expand_order) == 2          # both nodes get refined
+        if _a_expanded_before_b(probe.expand_order):
+            a_first += 1
+    # A (reward 0.5) earns the higher posterior, so it is re-picked -- and thus refined -- before
+    # B (0.0) in a strong majority. Measured deterministically: real 0.730 vs retire-on-execute
+    # (inert posterior) 0.555, so this threshold passes the real loop and fails the inert mutant.
+    assert a_first / n_seeds >= 0.70
+
+
+def test_search_result_round_trip():
+    r = SearchResult("def f():\n    pass\n", "abc123", 0.5, 3, True, 7, "believed", 0.42)
+    assert SearchResult.from_dict(r.to_dict()) == r

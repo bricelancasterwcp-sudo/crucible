@@ -1351,6 +1351,8 @@ EOF
 ```
 Expected: ≥ 8 units; any drops have a named reason. If MBPP units drop with `canonical-fails-*` because their solutions import `math`/`re`/numpy at module level and the oracle driver cannot import them — inspect `reason`; numpy is installed in the venv so it should be available inside the sandbox (same interpreter). Record anything surprising in `docs/CARRIED-DEBT.md` under S1 → Process lessons.
 
+> **Amended after Task 8 implementation + review (rulings R-T8-1..3 in the SDD ledger):** `build_unit` catches `OracleError` and `ValueError` from `compute_expected`/`render_tests` and returns `Dropped(uid, "oracle-error:<detail>")` / `Dropped(uid, "render-error:…")` (an escaping exception would kill the `build_units` thread pool); `build_units` returns units and dropped in RECORD order (as `pool.map` yields) — the trailing `units.sort`/`dropped.sort` of the Step 2 code are NOT shipped (lexicographic `unit_id` order puts `HumanEval/10` before `HumanEval/2`; Tasks 13/16 sort what they need themselves). `test_build.py` has 11 tests: the brief's 4 plus seeded-sampling content, record-order, oracle-error drop, render-error drop, and one test each for `visible-too-slow`, `no-visible-tests` and `canonical-fails-hidden` (a real sandbox run whose canonical misbehaves only on the seed-0 hidden sample).
+
 ---
 
 ### Task 9: Operator families (`stream/families.py`)

@@ -174,7 +174,7 @@ rung (cu128) — no cu129/cu130/nightly/llama.cpp fallback needed. Every value b
 | Server startup time (s) | ~145 s (weights 3.2 s + profiling/warmup ~32 s + KV-cache init and CUDA-graph capture) |
 | VRAM used while serving Qwen3.5-2B (GiB) | **9.58 GiB** at `--gpu-memory-utilization 0.6` (weights alone 4.32 GiB, bf16); ~6 GiB free |
 | tok/s @ 256-token completion, Qwen3.5-2B | **138.5 tok/s** (single request, temp 0.7, 256/256 tokens) |
-| tok/s @ 256-token completion, Qwen3.5-9B | `n/a this run` — 9B bf16 ~18 GiB > 16 GiB card; needs a quantized load (GGUF via llama.cpp — blocked on `nvcc`; or a vLLM AWQ/GPTQ). Deferred — **not an S1 exit criterion**. |
+| tok/s @ 256-token completion, Qwen3.5-9B | **57.6 tok/s** (median of 3; runs 49.7/57.6/57.6) — served as **`lovedheart/Qwen3.5-9B-FP8`** (Apache-2.0, FP8-dynamic, Blackwell-native) via vLLM, `--enforce-eager --gpu-memory-utilization 0.90 --max-model-len 4096`, identity-asserted as `Qwen/Qwen3.5-9B`. 14.2 GiB VRAM (12.2 GiB FP8 weights). **eager mode** (CUDA-graph capture OOMs alongside 12 GiB weights on the 16 GiB card) ⇒ a conservative lower bound. bf16 9B (~18 GiB) does not fit; GGUF path stays blocked on `nvcc`. Baseline ratio: 2B bf16 138.5 / 9B-FP8 57.6 ≈ **2.4× slower**. |
 | n-best + logprobs present in a completion? | **Yes** — an `n=2` request returned 2 choices, each with `logprobs.token_logprobs` populated |
 | LoRA attach + fwd/bwd + save OK? | **Yes** — rank-16 LoRA on 12 modules (attn q/k/v/o + MLP up/gate/down + Qwen3.5 `in_proj_*`), **16.82 M** trainable params (0.886 %), fwd/bwd loss 0.697, peak **4.54 GiB**, saved to `runs/lora-smoke/` |
 | Adapter-active generation sample | local (peft): `def add(a, b):\n    return a + b\ndef subtract(a, b):\n   ` -- served (vLLM `model=smoke`): ` a + b\n\ndef subtract(a, b):\n   ` |
@@ -200,4 +200,4 @@ rung (cu128) — no cu129/cu130/nightly/llama.cpp fallback needed. Every value b
 - [x] A server (vLLM 0.27.1) serves Qwen3.5-2B with n-best + logprobs, identity-asserted.
 - [x] The LoRA-attach decision is recorded -- **proposer = Qwen3.5-2B**.
 
-Remaining (NOT an S1 exit): Qwen3.5-9B baseline tok/s needs a quantized load to fit the 16 GiB card.
+Baseline complete: Qwen3.5-9B served as FP8 (57.6 tok/s eager) for the tok/s comparison. Nothing S1 remains open on serving.

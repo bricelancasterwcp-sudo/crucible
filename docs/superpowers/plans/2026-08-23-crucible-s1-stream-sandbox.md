@@ -156,7 +156,7 @@ def test_package_imports():
 """crucible — research spike on learning-in-the-loop AI (see docs/superpowers/specs)."""
 __version__ = "0.0.1"
 ```
-Empty `__init__.py` for `sandbox/`, `stream/`, `proposer/`.
+Empty `__init__.py` for `sandbox/`, `stream/`, `proposer/`. **Also** create empty `tests/__init__.py`, `tests/sandbox/__init__.py`, `tests/stream/__init__.py`, `tests/proposer/__init__.py` — Task 15's tests import a helper from `tests.stream.test_compose`, which needs the tests tree to be a package.
 
 - [ ] **Step 4: Run the tests**
 
@@ -740,8 +740,8 @@ Run this once to write fixtures:
 import gzip, json, pathlib
 he = [{"task_id":"HumanEval/0","entry_point":"add2","atol":0,"contract":"",
        "prompt":"def add2(a: int, b: int) -> int:\n    \"\"\"Return a plus b.\"\"\"\n",
-       "canonical_solution":"    return a + b\n","test":"",
-       "base_input":[[1,2],[0,0],[-1,1]],"plus_input":[[10,20],[5,5],[100,-1],[3,4]]},
+       "canonical_solution":"    if a > b:\n        return a + b\n    return b + a\n","test":"",
+       "base_input":[[1,2],[0,0],[-1,1],[3,1]],"plus_input":[[10,20],[5,5],[100,-1],[3,4]]},
       {"task_id":"HumanEval/1","entry_point":"is_pos","atol":0,"contract":"",
        "prompt":"def is_pos(x: float) -> bool:\n    \"\"\"True if x > 0.\"\"\"\n",
        "canonical_solution":"    if x > 0:\n        return True\n    return False\n","test":"",
@@ -1225,7 +1225,7 @@ def test_build_unit_humaneval_is_deterministic_and_self_checked():
     u1 = build_unit(rec, seed=0, max_hidden=2)
     u2 = build_unit(rec, seed=0, max_hidden=2)
     assert isinstance(u1, Unit) and u1 == u2
-    assert u1.module_name == "unit_humaneval_0" and u1.n_visible == 3 and u1.n_hidden == 2
+    assert u1.module_name == "unit_humaneval_0" and u1.n_visible == 4 and u1.n_hidden == 2
     assert '"""' not in u1.module_src and "return a + b" in u1.module_src
 
 def test_build_unit_mbpp_strips_prompt_docstring():
@@ -1233,10 +1233,13 @@ def test_build_unit_mbpp_strips_prompt_docstring():
     u = build_unit(rec, seed=0)
     assert isinstance(u, Unit) and "Return first element" not in u.module_src and u.n_visible == 2
 
-def test_broken_canonical_is_dropped_with_reason():
-    rec = dict(_recs("mini_humaneval.jsonl.gz")[0]); rec["canonical_solution"] = "    return a - b\n"
+def test_nondeterministic_canonical_is_dropped_with_reason():
+    # The oracle derives expected values FROM the canonical, so a merely-wrong canonical is self-consistent
+    # and cannot be detected here. What the self-check catches is a canonical whose outputs differ between
+    # the oracle process and the pytest process: pid-dependent output does exactly that, deterministically.
+    rec = dict(_recs("mini_humaneval.jsonl.gz")[0]); rec["canonical_solution"] = "    import os\n    return os.getpid()\n"
     d = build_unit(rec, seed=0)
-    assert isinstance(d, Dropped) and d.reason.startswith("canonical-fails")
+    assert isinstance(d, Dropped) and d.reason.startswith("canonical-fails-visible")
 
 def test_build_units_partitions_units_and_dropped():
     recs = _recs("mini_humaneval.jsonl.gz") + _recs("mini_mbpp.jsonl.gz")
@@ -2396,18 +2399,23 @@ def _recs():
             out += [json.loads(l) for l in fh]
     return out
 
-def test_build_stream_is_deterministic_and_prechecks_pass(tmp_path):
-    cfg = BuildConfig(seed=0, C=1, n_nov=1, per_family=3, max_hidden=2, jobs=2)
+def test_build_stream_is_deterministic_and_structural_prechecks_pass(tmp_path):
+    # n_nov=0 so all three fixture units are class units (is_pos has BOOL+SDL, add2 has ARITH ⇒ C=2 is reachable).
+    cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=3, max_hidden=2, jobs=2)
     d1 = build_stream(cfg, tmp_path / "a", recs=_recs(), log=lambda *a: None)
     d2 = build_stream(cfg, tmp_path / "b", recs=_recs(), log=lambda *a: None)
     m1, m2 = store.read_manifest(d1), store.read_manifest(d2)
-    assert m1.stream_hash == m2.stream_hash and len(m1.tasks) == 3
+    assert m1.stream_hash == m2.stream_hash and len(m1.tasks) == 4
     from crucible.stream.precheck import precheck
     units = {u: store.read_unit(d1, u) for u in m1.unit_ids}
-    assert precheck(m1, units).ok
+    rep = precheck(m1, units)
+    by = {c.name: c for c in rep.checks}
+    # The statistical bands are meaningless at n=2; the structural checks must hold at any size.
+    for name in ("family-distribution-identical", "novel-disjoint", "distinct-sites", "counts-named"):
+        assert by[name].passed, by[name]
 
 def test_smoke_reports_all_killed(tmp_path):
-    cfg = BuildConfig(seed=0, C=1, n_nov=1, per_family=3, max_hidden=2, jobs=2)
+    cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=3, max_hidden=2, jobs=2)
     d = build_stream(cfg, tmp_path, recs=_recs(), log=lambda *a: None)
     res = smoke(d, n=3, log=lambda *a: None)
     assert res["ran"] == 3 and res["killed"] == 3 and res["infra"] == 0
@@ -2658,13 +2666,14 @@ def _get(url: str, timeout_s: float):
 
 def probe(base_url: str, timeout_s: float = 5.0) -> ServedIdentity:
     base = base_url.rstrip("/")
-    v = _get(f"{base}/v1/models", timeout_s)
-    if v and v.get("data"):
-        return ServedIdentity("vllm", v["data"][0]["id"], {"n_models": len(v["data"])})
+    # llama.cpp ALSO serves /v1/models (OpenAI-compatible), so its own /props must be checked first.
     p = _get(f"{base}/props", timeout_s)
     if p and (p.get("model_path") or p.get("default_generation_settings", {}).get("model")):
         model = p.get("model_path") or p["default_generation_settings"]["model"]
         return ServedIdentity("llamacpp", model, {k: p[k] for k in ("total_slots",) if k in p})
+    v = _get(f"{base}/v1/models", timeout_s)
+    if v and v.get("data"):
+        return ServedIdentity("vllm", v["data"][0]["id"], {"n_models": len(v["data"])})
     raise IdentityMismatch(f"no recognisable server at {base_url}")
 
 

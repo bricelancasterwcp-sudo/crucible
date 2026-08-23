@@ -6,3 +6,4 @@ runs/
 models/
 *.gguf
 *.safetensors
+.superpowers/

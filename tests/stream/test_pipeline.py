@@ -56,3 +56,46 @@ def test_smoke_counts_a_surviving_mutant_as_not_killed(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "run_tests", lambda *a, **k: survivor)
     res = smoke(d, n=1, log=lambda *a: None)
     assert res["killed"] == 0 and res["not_killed"] == 1 and res["infra"] == 0
+
+
+def test_dropped_dict_round_trips():
+    # Dropped crosses a file boundary (build_dropped.jsonl), so it carries the same
+    # to_dict/from_dict pair every persisted dataclass in the store does.
+    from crucible.stream.build import Dropped
+    d = Dropped("HumanEval/42", "canonical-syntax:invalid syntax")
+    assert Dropped.from_dict(d.to_dict()) == d
+    assert d.to_dict() == {"unit_id": "HumanEval/42", "reason": "canonical-syntax:invalid syntax"}
+
+
+def test_build_stream_persists_build_time_unit_drops(tmp_path):
+    # A canonical that does not compile is dropped at build time; its identity must reach
+    # disk as provenance, not survive only as dropped={N} in the build log. build_dropped.jsonl
+    # is parallel to validations.jsonl: every drop is NAMED.
+    from crucible.stream.build import Dropped
+    recs = _recs()
+    bad = dict(recs[0]); bad["task_id"] = "HumanEval/9999"; bad["canonical_solution"] = "    return a -\n"
+    cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=3, max_hidden=2, jobs=2)
+    d = build_stream(cfg, tmp_path, recs=recs + [bad], log=lambda *a: None)
+
+    assert (d / "build_dropped.jsonl").exists()
+    dropped = store.read_build_dropped(d)
+    assert [x.unit_id for x in dropped] == ["HumanEval/9999"]
+    assert dropped[0].reason.startswith("canonical-syntax:")
+    # Round-trips to the same list[Dropped] on re-read, and the dropped unit is not a unit.
+    assert store.read_build_dropped(d) == dropped
+    assert all(isinstance(x, Dropped) for x in dropped)
+    assert "HumanEval/9999" not in store.read_manifest(d).unit_ids
+
+
+def test_build_time_drops_do_not_change_stream_hash(tmp_path):
+    # The hash covers seed/C/n_nov/rung/surviving-unit src_hashes/tasks -- never the drops.
+    # A non-compiling canonical never becomes a unit, so the surviving units are identical
+    # with or without it appended, and so is the stream_hash.
+    recs = _recs()
+    bad = dict(recs[0]); bad["task_id"] = "HumanEval/9999"; bad["canonical_solution"] = "    return a -\n"
+    cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=3, max_hidden=2, jobs=2)
+    clean = build_stream(cfg, tmp_path / "clean", recs=recs, log=lambda *a: None)
+    withdrop = build_stream(cfg, tmp_path / "withdrop", recs=recs + [bad], log=lambda *a: None)
+    assert store.read_manifest(clean).stream_hash == store.read_manifest(withdrop).stream_hash
+    assert store.read_build_dropped(clean) == []
+    assert [x.unit_id for x in store.read_build_dropped(withdrop)] == ["HumanEval/9999"]

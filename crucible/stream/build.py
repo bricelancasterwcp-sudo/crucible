@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import random
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Callable
 
 from ..sandbox.runner import run_tests
@@ -73,6 +73,15 @@ class Dropped:
 
     unit_id: str
     reason: str
+
+    def to_dict(self) -> dict:
+        """JSON-ready form -- both fields are plain strings, so it is a flat mapping."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Dropped":
+        """Inverse of :meth:`to_dict`; a build_dropped.jsonl line becomes a ``Dropped`` again."""
+        return cls(**d)
 
 
 def _select_hidden(rec: dict, seed: int, max_hidden: int) -> list[list]:

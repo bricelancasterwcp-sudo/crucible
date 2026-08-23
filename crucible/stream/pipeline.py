@@ -76,14 +76,22 @@ def _limit(recs: list[dict], cfg: BuildConfig) -> list[dict]:
     return [recs[i] for i in idx]
 
 
-def _write_atomic(out_root: Path, manifest, units, mutants, validations) -> Path:
-    """Stage a fresh stream and ``os.replace`` it into place; overwrite an existing one."""
+def _write_atomic(out_root: Path, manifest, units, mutants, validations, dropped) -> Path:
+    """Stage a fresh stream and ``os.replace`` it into place; overwrite an existing one.
+
+    ``build_dropped.jsonl`` (the named build-time unit drops) is written INTO the staged
+    dir before the rename, so it lands atomically with the rest of the stream -- and into
+    the final dir on the content-addressed early-return path, so both paths carry it.
+    """
     d_final = store.stream_dir(out_root, manifest)
     if d_final.exists():                                     # content-addressed: same bytes already here
-        return store.write_stream(out_root, manifest, units, mutants, validations)
+        d = store.write_stream(out_root, manifest, units, mutants, validations)
+        store.write_build_dropped(d, dropped)
+        return d
     staging = Path(out_root) / f".staging-{os.getpid()}-{manifest.stream_hash[:12]}"
     try:
         produced = store.write_stream(staging, manifest, units, mutants, validations)
+        store.write_build_dropped(produced, dropped)         # into the staged dir, before the rename
         os.replace(produced, d_final)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -105,7 +113,7 @@ def build_stream(cfg: BuildConfig, out_root: Path, *, recs: list[dict] | None = 
         mutants.update({m.key: m for m in ms}); validations += vs
         log(f"{u.unit_id}: specs={len(specs)} mutants={len(ms)} valid={sum(v.valid for v in vs)}")
     manifest = compose(units, validated, seed=cfg.seed, C=cfg.C, n_nov=cfg.n_nov, rung=cfg.rung)
-    d = _write_atomic(out_root, manifest, units, mutants, validations)
+    d = _write_atomic(out_root, manifest, units, mutants, validations, dropped)
     rep = precheck(manifest, {u.unit_id: u for u in units})
     log(f"precheck ok={rep.ok} failing={[c.name for c in rep.checks if not c.passed]}")
     log(f"stream {manifest.stream_hash[:12]} tasks={len(manifest.tasks)} counts={manifest.counts} -> {d}")

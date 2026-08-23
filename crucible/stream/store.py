@@ -22,6 +22,13 @@ provenance for the exclusions Task 13 counts: an ``equivalent`` mutant that is w
 down is a measurement, one that is dropped is indistinguishable from a mutant nobody
 made. It is JSONL rather than a JSON array so the file stays appendable and greppable.
 
+*``build_dropped.jsonl`` names the records that never became units.* Same argument as the
+invalid validations, one stage earlier: a canonical that would not compile, failed its own
+visible self-check or oracle-errored is provenance about *which* inputs the instrument could
+not measure, and "dropped 7" in a log throws that identity away. It is written at the same
+atomic seam as the rest of the stream (see ``pipeline._write_atomic``) in ``build_units``'
+record order, never sorted, so it does not leak caller order and does not touch ``stream_hash``.
+
 Text IO is pinned to UTF-8 everywhere. The default would be the locale's encoding, which
 would make the bytes on disk -- and so a re-read of a content-hashed source -- depend on
 the environment that happened to write them.
@@ -31,6 +38,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .build import Dropped
 from .compose import StreamManifest
 from .mutants import Mutant
 from .units import Unit, module_name_for
@@ -95,3 +103,30 @@ def read_validations(d: Path) -> list[Validation]:
     """Every verdict in the stream, in write order -- the invalid ones included."""
     with open(Path(d) / "validations.jsonl", encoding="utf-8") as fh:
         return [Validation.from_dict(json.loads(line)) for line in fh if line.strip()]
+
+
+def write_build_dropped(d: Path, dropped: list[Dropped]) -> None:
+    """Write the build-time unit drops as provenance, one JSON object per line.
+
+    Parallel to ``validations.jsonl``: a canonical that could not become a unit (does not
+    compile, fails its own visible self-check, oracle-errored) is NAMED on disk by id and
+    reason, not discarded to a ``dropped={N}`` count in the build log. Order is
+    ``build_units``' record order -- the caller's list is written as-is, never sorted --
+    so the file is deterministic and traces straight back to the records.
+    """
+    with open(Path(d) / "build_dropped.jsonl", "w", encoding="utf-8") as fh:
+        for x in dropped:
+            fh.write(json.dumps(x.to_dict(), sort_keys=True) + "\n")
+
+
+def read_build_dropped(d: Path) -> list[Dropped]:
+    """Every build-time unit drop in the stream, in write order.
+
+    Backward-compatible: a stream written before this file existed simply has no drops,
+    so a missing file reads as an empty list rather than an error.
+    """
+    path = Path(d) / "build_dropped.jsonl"
+    if not path.exists():
+        return []
+    with open(path, encoding="utf-8") as fh:
+        return [Dropped.from_dict(json.loads(line)) for line in fh if line.strip()]

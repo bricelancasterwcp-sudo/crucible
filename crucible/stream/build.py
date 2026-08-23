@@ -17,7 +17,7 @@ self-check cannot catch is a canonical that is merely *wrong*: the oracle derive
 expectations from it, so wrong-but-deterministic is self-consistent by construction.
 That limit is real and is not papered over here.
 
-*Nothing raises out of ``build_unit``.* ``build_units`` maps it across a
+*A failed unit comes back as a drop, not as an exception.* ``build_units`` maps it across a
 ``ThreadPoolExecutor``; an exception escaping one record aborts the map and throws away
 every other record's completed work. So the two failures the pipeline can legitimately
 hand back -- an oracle driver that produced no result, a render that was handed

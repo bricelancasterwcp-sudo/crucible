@@ -2,6 +2,7 @@ import gzip
 import json
 import pathlib
 
+from crucible.sandbox.runner import run_tests as real_run_tests
 from crucible.stream import build as build_mod
 from crucible.stream.build import Dropped, build_unit, build_units
 from crucible.stream.oracle import OracleError
@@ -70,6 +71,51 @@ def test_render_failure_is_dropped_not_raised(monkeypatch):
     monkeypatch.setattr(build_mod, "render_tests", boom)
     d = build_unit(_recs("mini_humaneval.jsonl.gz")[0], seed=0)
     assert isinstance(d, Dropped) and d.reason.startswith("render-error:")
+
+
+def test_visible_suite_too_slow_for_the_canonical_is_dropped(monkeypatch):
+    # The cap exists so a unit that cannot be run against K mutants inside the per-unit
+    # budget is dropped up front, rather than blowing the wall cap later where it would
+    # read as a hang the mutant caused. No fixture is slow, so the cap is moved instead.
+    monkeypatch.setattr(build_mod, "MAX_CANONICAL_VISIBLE_WALL_S", 0.0)
+    d = build_unit(_recs("mini_humaneval.jsonl.gz")[0], seed=0, max_hidden=2)
+    assert isinstance(d, Dropped) and d.reason.startswith("visible-too-slow:")
+
+
+def test_unit_with_no_renderable_visible_inputs_is_dropped_before_running_anything(monkeypatch):
+    # An empty visible file collects no tests, which the runner correctly calls an
+    # infra_error -- so the guard has to fire *before* run_tests, or the unit is blamed
+    # for something only the renderer did. Hence the "run_tests was never called" half.
+    real_render = build_mod.render_tests
+    calls = []
+
+    def render(module_name, entry_point, inputs, expected, *, prefix, atol):
+        if prefix == "v":
+            return "", [(f"v{i}", "no-roundtrip") for i in range(len(inputs))]
+        return real_render(module_name, entry_point, inputs, expected, prefix=prefix, atol=atol)
+
+    def run(*args, **kwargs):
+        calls.append(args)
+        return real_run_tests(*args, **kwargs)
+
+    monkeypatch.setattr(build_mod, "render_tests", render)
+    monkeypatch.setattr(build_mod, "run_tests", run)
+    d = build_unit(_recs("mini_humaneval.jsonl.gz")[0], seed=0, max_hidden=2)
+    assert isinstance(d, Dropped) and d.reason == "no-visible-tests"
+    assert calls == []
+
+
+def test_canonical_failing_only_the_hidden_tests_is_dropped_with_reason():
+    # Visible passes, hidden does not. At seed 0 / max_hidden 2 the sampled hidden inputs
+    # are [10, 20] and [3, 4] and none of the four base inputs is either, so this
+    # pid-dependent canonical is caught only by the hidden half of the self-check.
+    rec = dict(_recs("mini_humaneval.jsonl.gz")[0])
+    rec["canonical_solution"] = ("    import os\n"
+                                 "    if [a, b] in ([10, 20], [3, 4]):\n"
+                                 "        return os.getpid()\n"
+                                 "    return a + b\n")
+    d = build_unit(rec, seed=0, max_hidden=2)
+    assert isinstance(d, Dropped) and d.reason.startswith("canonical-fails-hidden:")
 
 
 def test_build_units_partitions_units_and_dropped():

@@ -1196,6 +1196,8 @@ def render_tests(module_name: str, entry_point: str, inputs: list[list], expecte
 
 - [ ] **Step 6: Run → `2 passed`. Mutation check: in `render_tests`, make `if not e.ok:` into `if False:`; purge; expect the first test FAILS (test_v1 present / dropped wrong). Restore; rerun green. Commit** — `git add crucible/stream/testgen.py tests/stream/test_testgen.py && git commit -m "feat(stream): pytest file generation from oracle outputs"`
 
+> **Amended after Task 7 implementation (rulings R-T7-1..3 in the SDD ledger):** `compute_expected` wraps the driver result — on `timed_out`, non-zero rc, or non-JSON/truncated stdout (exec.py caps stdout at 1 MiB) it raises `OracleError(RuntimeError)` carrying module_name, rc, timed_out and the stderr tail (Task 8 maps it to a dropped unit); it also guards record count/order and validates `module_name` as an identifier. `render_tests` drops any INPUT whose repr does not round-trip (`eval(repr(inp)) == inp` raises or is False — e.g. `inf`/`nan` render as bare names) with the existing reason `"no-roundtrip"`; original test numbering is preserved (measured: Mbpp/404 went from a wholesale `canonical-fails-hidden` drop to 111 hidden tests + 12 input drops, canonical all-pass). `_is_floaty` uses `ast.literal_eval`. Success paths and all signatures are otherwise the brief's.
+
 ---
 
 ### Task 8: Build a unit end-to-end with self-check (`stream/build.py`)

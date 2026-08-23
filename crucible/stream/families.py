@@ -68,7 +68,15 @@ def core_operator_names() -> list[str]:
 
 
 def all_operator_names() -> list[str]:
-    """Every operator the stream may use: the core set plus our ``StatementDeletion``."""
+    """The **full** engine operator set -- 213 cosmic-ray core names plus our
+    ``StatementDeletion`` -- sorted, ``core/`` stripped.
+
+    This is deliberately *not* the set the stream may use: it still contains the two
+    A2-excluded names (``EXCLUDED``), which cannot even be instantiated argument-free.
+    It exists so ``check_complete`` and the family tables are computed over everything
+    the engine ships. **To enumerate usable operators, iterate ``operators_by_family()``
+    (or filter this list by ``family_of(name) is not None``).**
+    """
     return sorted(core_operator_names() + [SDL_OPERATOR])
 
 

@@ -15,6 +15,7 @@ def test_family_examples():
     assert F.family_of("RemoveDecorator") == "EXC" and F.family_of("ExceptionReplacer") == "EXC"
     assert F.family_of("StatementDeletion") == "SDL"
     assert F.family_of("VariableReplacer") is None and F.family_of("Nonsense") is None
+    assert F.family_of("core/AddNot") is None  # names arrive WITHOUT the core/ prefix
 
 
 def test_operators_by_family_covers_all_families_and_counts():

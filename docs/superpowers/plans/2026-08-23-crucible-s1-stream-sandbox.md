@@ -1010,6 +1010,8 @@ def strip_docstrings(src: str) -> str:
 
 - [ ] **Step 3: Run → `4 passed`. Commit** — `git add crucible/stream/units.py tests/stream/test_units.py && git commit -m "feat(stream): Unit dataclass, docstring stripping, module naming"`
 
+> **Amended after Task 6 review (rulings R-T6-1..2 in the SDD ledger):** `strip_docstrings` strips leading string-literal statements with a `while` loop (not `if`) so it is idempotent — a residual leading literal is never promoted into a new docstring, which keeps `src_hash` stable under re-stripping; `test_unit_round_trip` uses distinguishable visible/hidden values (`"vis"`/`"hid"`, 2/3) and asserts them by name after the round-trip, pinning the positional field order that Tasks 7–14 depend on; the three-kinds test also covers `async def`. `test_units.py` has 6 tests (brief's 4 + a literal sha256 pin + an idempotence test).
+
 ---
 
 ### Task 7: Oracle (expected outputs) + test-file generation (`stream/oracle.py`, `stream/testgen.py`)

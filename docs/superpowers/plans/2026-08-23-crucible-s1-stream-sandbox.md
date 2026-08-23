@@ -386,6 +386,8 @@ Break: in `_env`, delete the line `env.pop("PYTEST_ADDOPTS", None)` and change t
 git add crucible/sandbox/exec.py tests/sandbox/test_exec.py && git commit -m "feat(sandbox): isolated execution primitive with network block, rlimit, wall cap"
 ```
 
+> **Amended after Task 2 review (rulings R-T2-1..5 in the SDD ledger):** the shipped `exec.py` differs from the Step 3 code above — stdout/stderr are captured to files in the workdir (not pipes) and read back capped at 1 MiB with `errors="replace"`; the child is awaited with `proc.wait(timeout)` and `killpg`'d (a `setsid` grandchild can no longer stall the cap); resource limits are applied through a `prlimit` wrapper (`--as`, `--fsize=16MiB`, `--core=0`) with `preexec_fn` only as a fallback (thread-safety); `env_extra` cannot override sandbox keys. The Python-level socket shim is accepted for S1 with its threat model documented (accidental network use, not adversarial); OS-level isolation is deferred in CARRIED-DEBT.
+
 ---
 
 ### Task 3: `TestReport` + junit parsing + pytest runner (`sandbox/report.py`, `sandbox/runner.py`)

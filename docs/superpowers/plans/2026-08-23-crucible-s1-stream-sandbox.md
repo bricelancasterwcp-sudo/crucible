@@ -887,6 +887,8 @@ Run: `.venv/bin/python -c "from crucible.stream import evalplus as ep; print(len
 
 - [ ] **Step 6: Commit** — `git add crucible/stream/evalplus.py tests/stream/test_evalplus.py tests/fixtures && git commit -m "feat(stream): EvalPlus loader with pinned digests"`
 
+> **Amended after Task 5 review (rulings R-T5-1..2 in the SDD ledger):** the shipped `evalplus.py` differs from the Step 3 code above in two bodies — `cache_dir()` treats an empty/whitespace `$CRUCIBLE_CACHE` as unset and applies `expandvars`+`expanduser` to a set value (an empty variable had made CWD the dataset cache); `fetch()` downloads to `<filename>.part` and `os.replace`s it onto the final path only after the full body, unlinking the `.part` on any exception (the original created the final file before reading a byte, so a mid-transfer failure poisoned the cache until hand-deleted); `DigestMismatch` names the path and says to delete it. Signatures, `DATASETS`, pins and the original four tests are unchanged; the test file has 11 tests (download branch now covered by monkeypatching `urllib.request.urlopen` — still no network).
+
 ---
 
 ### Task 6: Unit dataclass, docstring stripping, naming (`stream/units.py`)

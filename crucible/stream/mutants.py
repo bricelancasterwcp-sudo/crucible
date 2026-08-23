@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import difflib
 import random
+import warnings
 from dataclasses import asdict, dataclass
 
 from cosmic_ray import plugins
@@ -141,13 +142,19 @@ def make_mutant(unit: Unit, spec: MutantSpec) -> Mutant | None:
     raising: the occurrence does not match this source, the "mutation" left the source
     byte-identical (an empty diff would key a task that is not a bug), or the result
     does not compile (a broken module fails every test for the wrong reason, which
-    would score as a kill the agent never earned).
+    would score as a kill the agent never earned). Only a genuine ``SyntaxError`` counts
+    as "does not compile" -- see the warning filter below.
     """
     mutated = apply_spec(unit.module_src, spec)
     if mutated is None or mutated == unit.module_src:
         return None
     try:
-        compile(mutated, unit.module_name, "exec")
+        # ``x is 'a'`` and friends compile fine but emit a ``SyntaxWarning``, and under
+        # ``-W error`` CPython promotes that to ``SyntaxError`` -- which would make this
+        # guard silently drop perfectly valid mutants (114 of 17,836 on the real corpus).
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            compile(mutated, unit.module_name, "exec")
     except SyntaxError:
         return None
     diff = _unified(unit.module_name, unit.module_src, mutated)

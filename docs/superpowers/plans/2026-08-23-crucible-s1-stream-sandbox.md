@@ -1729,6 +1729,8 @@ def sample_specs(specs: list[MutantSpec], *, per_family: int, rng: random.Random
 
 - [ ] **Step 3: Run → `4 passed`. Mutation check: in `make_mutant`, drop the `mutated == unit.module_src` guard; purge; run; if nothing fails, add a test that asserts `make_mutant` returns `None` for a spec whose operator is a no-op on the source (e.g. `ReplaceTrueWithFalse` has no positions → enumerate returns []; so instead mutate `_unified` to return `""` and assert the key test fails). Restore; rerun green. Commit** — `git add crucible/stream/mutants.py tests/stream/test_mutants.py && git commit -m "feat(stream): mutant enumeration, application, content-hash keys"`
 
+> **Amended after Task 11 review (rulings R-T11-1..2 in the SDD ledger):** `make_mutant`'s `compile()` guard runs under `warnings.catch_warnings()` + `simplefilter("ignore", SyntaxWarning)` — 114/17,836 real mutants (e.g. `x is 'a'`) emit `SyntaxWarning`, and under `-W error` CPython turns it into `SyntaxError`, which would silently drop valid mutants (note: `catch_warnings` is process-global — do not call `make_mutant` from a thread pool). `test_mutants.py` has 10 tests: the brief's plus pinned `mutated_src` and full diff text, a two-occurrence fixture pinning global occurrence numbering and per-occurrence span content, a `per_family=2` distinct-span case, the natural SyntaxError case (HumanEval/76: `ReplaceUnaryOperator_USub_Not` turns `if n == -1:` into `if n == not 1:`), and the SyntaxWarning case. Observed on the full EvalPlus corpus: 17,836 mutants, 0 key collisions, EXC family yields ZERO mutants on either dataset.
+
 ---
 
 ### Task 12: Mutant validation in the sandbox (`stream/validate.py`)

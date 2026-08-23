@@ -11,6 +11,21 @@ dependencies = [
   "numpy>=1.26",
 ]
 
+[project.optional-dependencies]
+# The live serving/LoRA spike (docs/findings/S1-serving.md). NOT installed by default and
+# NOT needed for the test suite -- these pull multi-GB CUDA wheels. Install on the GPU box
+# only: `uv pip install --python .venv/bin/python -e '.[serve]'` (pick the torch CUDA index
+# for sm_120 per pytorch.org). vLLM is the primary server; if its wheel does not support
+# Blackwell sm_120 the fallback is a source-built llama.cpp (MIT) driven over the same
+# OpenAI-compatible API -- see the findings doc. bitsandbytes is optional (LoRA-train QoL).
+serve = [
+  "torch",              # BSD-3-Clause; pick the cu128+ index-url for RTX 5080 / sm_120
+  "vllm",               # Apache-2.0; primary server (--served-model-name identity)
+  "transformers",       # Apache-2.0; model + tokenizer load in the LoRA smoke
+  "peft",               # Apache-2.0; LoRA attach
+  "accelerate",         # Apache-2.0; device_map/dtype placement for the smoke
+]
+
 [project.scripts]
 crucible = "crucible.cli:main"
 

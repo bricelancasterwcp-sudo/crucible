@@ -45,12 +45,47 @@ class DigestMismatch(RuntimeError):
     """A dataset file's sha256 does not match its pin -- the file is not the dataset."""
 
 
+def _cache_override() -> Path | None:
+    """The cache dir named by ``$CRUCIBLE_CACHE``, or None if the var says nothing.
+
+    An empty or whitespace-only value is an *unset* var, not a request to cache into
+    the current working directory -- the same none-vs-zero rule the rest of the tree
+    follows (ruling R-T5-1). A set value gets ``$VAR`` and ``~`` expanded, because a
+    shell-style path that arrives unexpanded would otherwise create a literal
+    ``~``-named directory next to wherever the process happened to start.
+    """
+    raw = os.environ.get("CRUCIBLE_CACHE")
+    if raw is None or not raw.strip():
+        return None
+    return Path(os.path.expandvars(raw)).expanduser()
+
+
 def cache_dir() -> Path:
-    return Path(os.environ.get("CRUCIBLE_CACHE", Path.home() / ".cache" / "crucible"))
+    override = _cache_override()
+    return override if override is not None else Path.home() / ".cache" / "crucible"
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _download(url: str, path: Path) -> None:
+    """Download ``url`` to ``path`` atomically: nothing appears at ``path`` unless it is whole.
+
+    Writing straight to the final path creates/truncates it before the first byte
+    arrives, so a dropped connection, ^C or OOM leaves a partial file that ``exists()``
+    -- and every later fetch then fails the digest check forever (ruling R-T5-2). The
+    body lands in a ``.part`` sibling that is promoted with ``os.replace`` only once it
+    is complete, and is removed on any failure, ``KeyboardInterrupt`` included.
+    """
+    part = path.with_suffix(path.suffix + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp, open(part, "wb") as out:
+            out.write(resp.read())
+        os.replace(part, path)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
 
 
 def fetch(name: str, *, cache: Path | None = None) -> Path:
@@ -59,11 +94,11 @@ def fetch(name: str, *, cache: Path | None = None) -> Path:
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / ds.filename
     if not path.exists():
-        with urllib.request.urlopen(ds.url, timeout=60) as resp, open(path, "wb") as out:
-            out.write(resp.read())
+        _download(ds.url, path)
     got = _sha256(path)
     if got != ds.sha256:
-        raise DigestMismatch(f"{name}: expected {ds.sha256}, got {got} at {path}")
+        raise DigestMismatch(
+            f"{name}: expected {ds.sha256}, got {got} at {path} -- delete this file and re-run fetch")
     return path
 
 

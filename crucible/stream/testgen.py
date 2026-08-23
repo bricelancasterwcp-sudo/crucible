@@ -15,16 +15,22 @@ each of those runs during collection, where the unit does not exist yet.
 *Expected values are literals, not calls.* Every value came from the oracle and already
 survived ``eval(repr(v)) == v`` inside the sandbox, so writing it in-line is exact. A test
 never recomputes the expectation, which is what keeps a mutant from being judged against
-itself.
+itself. The controller never evaluates a ``value_repr`` at all -- it is copied verbatim
+into the file and only the sandbox ever runs it.
 
 *Arguments are literals too, and are checked here.* The oracle vets the value it returns
 but not the input it was given, and both are rendered into the same file. An input whose
-repr is not a literal the file can evaluate is dropped with the same ``no-roundtrip``
-reason rather than emitted as a test that would fail for every unit alike.
+repr is not a literal is dropped with the ``no-roundtrip`` reason rather than emitted as a
+test that would fail for every unit alike (ruling R-T7-2).
 
-*Floats compare with a tolerance.* EvalPlus ships ``atol`` for the problems that need it;
-a float expectation with ``atol == 0`` still gets ``pytest.approx(..., abs=1e-9)`` rather
-than ``==``, because a last-bit difference is not a behavioural kill.
+*Floats compare structurally, at any depth (ruling R-T7-4).* Each file defines its own
+``_eq``: bools by ``==``, numbers by ``math.isclose(rel_tol=1e-7, abs_tol=ATOL)``, and
+lists, tuples and dicts element-wise through the same rule. This mirrors EvalPlus's own
+evaluator (recursive ``is_floats`` + ``allclose``, default ``atol`` 1e-6 when the problem
+ships none). ``pytest.approx`` cannot do this job: it raises ``TypeError: pytest.approx()
+does not support nested data structures``, so a nested float would have been compared
+exactly and a last-bit difference would have counted as a kill -- silently, because the
+canonical self-check reproduces its own bits.
 
 Rendering is a pure function of its arguments: the same inputs and expectations always
 produce byte-identical text, so a unit's test source is stable across runs and hashable.
@@ -35,25 +41,26 @@ import ast
 
 from .oracle import Expected
 
-_HEADER = "import pytest\nfrom {module} import {entry} as candidate\n\n"
-# Tolerance for a float expectation the problem itself did not qualify with an atol.
-_DEFAULT_ATOL = 1e-9
+# EvalPlus's default absolute tolerance for problems that ship no atol of their own.
+_DEFAULT_ATOL = 1e-6
+
+_PRELUDE = "import math\nfrom {module} import {entry} as candidate\n\nATOL = {atol}\n\n\n"
+
+# Rendered verbatim into every generated file. Kept as text, not built from the local
+# ``_eq``, so what the tests compare with is exactly what is written down here.
+_COMPARATOR = '''def _eq(a, b):
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and (isinstance(a, float) or isinstance(b, float)):
+        return math.isclose(a, b, rel_tol=1e-7, abs_tol=ATOL)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return type(a) is type(b) and len(a) == len(b) and all(_eq(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_eq(a[k], b[k]) for k in a)
+    return a == b
 
 
-def _is_floaty(value_repr: str) -> bool:
-    """True when the expected value contains a float, so ``==`` would be too strict.
-
-    ``ast.literal_eval``, not ``eval`` (ruling R-T7-3): this runs in the controller
-    process, and the text is whatever a unit's ``__repr__`` produced inside the sandbox.
-    Literal evaluation is also the more faithful question to ask -- it is exactly what the
-    generated test file, which binds no names beyond ``pytest`` and ``candidate``, can do.
-    Anything it cannot parse is simply not treated as floaty.
-    """
-    try:
-        v = ast.literal_eval(value_repr)
-    except Exception:
-        return False
-    return isinstance(v, float) or (isinstance(v, (list, tuple)) and any(isinstance(x, float) for x in v))
+'''
 
 
 def _round_trips(value: object) -> bool:
@@ -64,11 +71,35 @@ def _round_trips(value: object) -> bool:
     emits a bare name the file never binds. That raises ``NameError`` inside the test
     body, which pytest records as a *failure*: the unit gets blamed for something only the
     renderer did. Dropping the input with a reason is the honest answer.
+
+    ``ast.literal_eval``, never bare ``eval`` (ruling R-T7-3): this runs in the controller
+    process, on text a unit's ``__repr__`` produced inside the sandbox. It is stricter than
+    the generated file needs -- a repr that calls a builtin (``range(0, 3)``) would in fact
+    evaluate there -- and that conservatism is the point: an unrenderable input costs one
+    named drop, an evaluated one costs the controller.
     """
     try:
         return ast.literal_eval(repr(value)) == value
     except Exception:
         return False
+
+
+def _check_alignment(inputs: list[list], expected: list[Expected]) -> None:
+    """Refuse expectations that do not line up one-to-one with the inputs (ruling R-T7-5).
+
+    Rendering zips the two, so a short, long or misordered ``expected`` would silently
+    attach one input's expected value to another input's arguments, or drop inputs without
+    recording them in ``dropped``. An ``ok`` expectation with no ``value_repr`` would
+    render ``== None`` -- an expectation nothing measured. All caller bugs, so they raise.
+    """
+    if len(inputs) != len(expected):
+        raise ValueError(f"render_tests: {len(inputs)} inputs but {len(expected)} expectations")
+    for i, e in enumerate(expected):
+        if e.index != i:
+            raise ValueError(f"render_tests: expected[{i}].index is {e.index}; "
+                             f"expectations must be in input order")
+        if e.ok and e.value_repr is None:
+            raise ValueError(f"render_tests: expected[{i}] is ok but carries no value_repr")
 
 
 def render_tests(module_name: str, entry_point: str, inputs: list[list], expected: list[Expected], *,
@@ -81,7 +112,9 @@ def render_tests(module_name: str, entry_point: str, inputs: list[list], expecte
     is visible in the record rather than inferred from a count. Surviving tests keep their
     original index, so names never shift when a neighbour is dropped.
     """
-    lines = [_HEADER.format(module=module_name, entry=entry_point)]
+    _check_alignment(inputs, expected)
+    tolerance = float(atol) if atol > 0 else _DEFAULT_ATOL
+    lines = [_PRELUDE.format(module=module_name, entry=entry_point, atol=repr(tolerance)), _COMPARATOR]
     dropped: list[tuple[str, str]] = []
     for e, args in zip(expected, inputs):
         name = f"{prefix}{e.index}"
@@ -91,10 +124,5 @@ def render_tests(module_name: str, entry_point: str, inputs: list[list], expecte
         if not _round_trips(args):
             dropped.append((name, "no-roundtrip"))
             continue
-        call = f"candidate(*{args!r})"
-        if atol > 0 or _is_floaty(e.value_repr or ""):
-            cmp = f"assert {call} == pytest.approx({e.value_repr}, abs={atol or _DEFAULT_ATOL!r})"
-        else:
-            cmp = f"assert {call} == {e.value_repr}"
-        lines.append(f"def test_{name}():\n    {cmp}\n\n")
+        lines.append(f"def test_{name}():\n    assert _eq(candidate(*{args!r}), {e.value_repr})\n\n")
     return "".join(lines), dropped

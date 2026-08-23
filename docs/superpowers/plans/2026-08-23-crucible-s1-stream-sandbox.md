@@ -635,6 +635,8 @@ Rather than string-sniffing, use a deterministic rule: **run the test file's own
 git add crucible/sandbox/runner.py tests/sandbox/test_runner.py crucible/sandbox/report.py && git commit -m "feat(sandbox): pytest runner with honest hang/collection/infra classification"
 ```
 
+> **Amended after Task 3 implementation (rulings R-T3-1..2 in the SDD ledger):** the shipped `runner.py` probe is `import test_unit` run in the sandbox with the unit replaced by a PEP 562 `__getattr__` stub (infra message `"test file does not load: …"`), NOT `ast.parse` — the plan's own test case `this is not python` parses as a `Name is not Name` comparison and only fails at import, so the `ast.parse` probe let it through and charged the unit with `__collection__`. Any test file that fails to LOAD standalone is infra; an rc=2 collection error after a passing probe can then only be the unit's fault. `test_runner.py` has 8 tests, not 7: the 8th pins the wall-cap `__suite__` branch, which the 7 left mutation-survivable (the hang test exercises pytest-timeout, not `execute()`'s cap). `_classify`'s rc condition is written as `rc not in (0, 1, 2)` (identical to the Step 6 text).
+
 ---
 
 ### Task 4: Verification budget meter (`sandbox/budget.py`)

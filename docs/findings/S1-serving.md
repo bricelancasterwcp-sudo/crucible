@@ -16,8 +16,7 @@ This spike has two halves with different completion bars.
   llama.cpp) on the GPU, downloading multi-GB weights, and running the LoRA-attach smoke
   against a real model. That is a heavy, GPU-committing, multi-hour operation; it is not run
   in this session. The exact turnkey steps and the numbers to record are in
-  **[§7 PENDING LIVE RUN](#7-pending-live-run-brice)**. No benchmark numbers in this doc are
-  invented — live-run cells are left blank (`____`) for the operator to fill.
+  **[§7 LIVE RUN — DONE](#7-live-run--done-2026-08-23)**. Live run executed 2026-08-23 — §7 carries the measured results (no fabricated numbers).
 
 ## 1. This box (measured 2026-08-23, idle desktop)
 
@@ -160,39 +159,45 @@ save + server-load all succeed ⇒ proposer = **Qwen3.5-2B**. Any step fails unr
 the timebox ⇒ re-run the smoke with `Qwen/Qwen2.5-Coder-1.5B-Instruct`; proposer for all
 small arms = **Qwen2.5-Coder-1.5B-Instruct** (spec §2 fallback).
 
-## 7. PENDING LIVE RUN (Brice)
+## 7. LIVE RUN — DONE 2026-08-23
 
-Not run in this session (GPU-committing, multi-hour, multi-GB download). Execute §5→§6, then
-fill every `____` below. Do not delete a blank you could not measure — mark it `n/a` + why.
+Executed §5→§6 on this box (RTX 5080, sm_120). The vLLM path succeeded on the **first** CUDA
+rung (cu128) — no cu129/cu130/nightly/llama.cpp fallback needed. Every value below is measured.
 
-**Steps, in order:**
-1. Stop Ollama; confirm `< ~1 GiB` VRAM used.
-2. Install `torch` for sm_120 (§5A); run the cuda self-check. If "no kernel image": try
-   `cu129`/`cu130` once, then nightly, then go to llama.cpp (§5B). Record which rung worked.
-3. Bring up the server; `assert_identity` must pass; a completion must return `n>1` choices
-   each with `logprobs` (vLLM) or `n_probs` (llama.cpp).
-4. Run the LoRA smoke (§6) on Qwen3.5-2B; load the adapter into the server; sample once with
-   it active. Apply the §6 decision rule.
-5. Commit the filled doc + CARRIED-DEBT.
-
-**Record (no fabrication — blanks until measured):**
+**Record:**
 
 | Measurement | Value |
 |---|---|
-| torch version / CUDA index that worked | `____` |
-| `torch.cuda.is_available()` / capability | `____` / `____` |
-| Server that came up on sm_120 (`vllm` \| `llamacpp`) + version/commit | `____` |
-| Server startup time (s) | `____` |
-| VRAM used while serving Qwen3.5-2B (GiB) | `____` |
-| tok/s @ 256-token completion, Qwen3.5-2B | `____` |
-| tok/s @ 256-token completion, Qwen3.5-9B (Q6_K or Q4_K_M — say which) | `____` |
-| n-best + logprobs present in a completion? | `____` |
-| LoRA attach + fwd/bwd + save OK? | `____` |
-| Adapter-active generation sample | `____` |
-| Server-side adapter load OK? (vLLM POST / llama.cpp GGUF-convert) | `____` |
-| **Proposer decision** (Qwen3.5-2B \| Qwen2.5-Coder-1.5B-Instruct) | `____` |
-| Measured free VRAM, idle desktop (cross-check §1) | `____` |
+| torch version / CUDA index that worked | `torch 2.11.0+cu128` verified sm_120 first; **vllm 0.27.1 then upgraded it to `torch 2.13.0+cu130`** (also sm_120-good). cu128 worked on rung 1 — no fallback ladder used. |
+| `torch.cuda.is_available()` / capability | `True` / `(12, 0)` — a 2048x2048 CUDA matmul returned finite on **both** torch builds |
+| Server that came up on sm_120 + version | **vLLM 0.27.1** (V1 engine) — with the ninja/FlashInfer workaround below |
+| Server startup time (s) | ~145 s (weights 3.2 s + profiling/warmup ~32 s + KV-cache init and CUDA-graph capture) |
+| VRAM used while serving Qwen3.5-2B (GiB) | **9.58 GiB** at `--gpu-memory-utilization 0.6` (weights alone 4.32 GiB, bf16); ~6 GiB free |
+| tok/s @ 256-token completion, Qwen3.5-2B | **138.5 tok/s** (single request, temp 0.7, 256/256 tokens) |
+| tok/s @ 256-token completion, Qwen3.5-9B | `n/a this run` — 9B bf16 ~18 GiB > 16 GiB card; needs a quantized load (GGUF via llama.cpp — blocked on `nvcc`; or a vLLM AWQ/GPTQ). Deferred — **not an S1 exit criterion**. |
+| n-best + logprobs present in a completion? | **Yes** — an `n=2` request returned 2 choices, each with `logprobs.token_logprobs` populated |
+| LoRA attach + fwd/bwd + save OK? | **Yes** — rank-16 LoRA on 12 modules (attn q/k/v/o + MLP up/gate/down + Qwen3.5 `in_proj_*`), **16.82 M** trainable params (0.886 %), fwd/bwd loss 0.697, peak **4.54 GiB**, saved to `runs/lora-smoke/` |
+| Adapter-active generation sample | local (peft): `def add(a, b):\n    return a + b\ndef subtract(a, b):\n   ` -- served (vLLM `model=smoke`): ` a + b\n\ndef subtract(a, b):\n   ` |
+| Server-side adapter load OK? | **Yes** -- `POST /v1/load_lora_adapter {lora_name:"smoke", lora_path:runs/lora-smoke}` -> HTTP 200; `/v1/models` then lists `["Qwen/Qwen3.5-2B","smoke"]`. Runtime-LoRA (sleep/consolidation) path proven. |
+| **Proposer decision** | **Qwen3.5-2B** — §6 rule: attach + fwd/bwd + generate + save + server-load all passed; the Qwen2.5-Coder-1.5B fallback is not needed |
+| Measured free VRAM, idle desktop | 15207 MiB (~14.85 GiB) free / 636 MiB used — cross-checks §1 |
+
+**Gotchas recorded (sm_120 + VLM base):**
+
+- `Qwen/Qwen3.5-2B` is a **vision-language base** (`Qwen3_5ForConditionalGeneration`, i.e. Qwen3-VL
+  with a video processor), not a plain text LM. transformers 5.15.1 and vLLM 0.27.1 both load it
+  natively for **text-only** completions (the vision tower loads but is unused for text). Budget
+  VRAM for the whole model.
+- vLLM's default **FlashInfer sampler JIT-compiles a top-k/top-p CUDA kernel at engine init**, which
+  needs `ninja` and (for the compile) `nvcc`. This box has neither by default, so engine-core init
+  crashes in `_initialize_kv_caches` -> `_dummy_sampler_run` with `No such file or directory:
+  'ninja'`. **Fix: `pip install ninja` and launch with `VLLM_USE_FLASHINFER_SAMPLER=0`** (native
+  torch sampling; n-best and logprobs are unaffected). Without a CUDA toolkit, disabling the JIT
+  sampler is the reliable path.
+- Port 8001 (the §5 example) was already bound on this box; served on **8010** instead.
 
 **S1 exit criteria this run closes (spec §10):**
-- [ ] A server (vLLM or llama.cpp) serves Qwen3.5-2B with n-best + logprobs, identity-asserted.
-- [ ] The LoRA-attach decision is recorded (proposer = Qwen3.5-2B or fallback 1.5B).
+- [x] A server (vLLM 0.27.1) serves Qwen3.5-2B with n-best + logprobs, identity-asserted.
+- [x] The LoRA-attach decision is recorded -- **proposer = Qwen3.5-2B**.
+
+Remaining (NOT an S1 exit): Qwen3.5-9B baseline tok/s needs a quantized load to fit the 16 GiB card.

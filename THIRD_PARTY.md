@@ -21,3 +21,4 @@ Every adopted, vendored, or ported artifact. License is what the command returne
 | Qwen3.5-2B (model) | huggingface.co/Qwen/Qwen3.5-2B | Apache-2.0 | HF API `cardData.license` on `Qwen/Qwen3.5-2B` | 2026-08-23 | proposer model (weights) |
 | Qwen3.5-9B (model) | huggingface.co/Qwen/Qwen3.5-9B | Apache-2.0 | HF API `cardData.license` on `Qwen/Qwen3.5-9B` | 2026-08-23 | baseline model for tok/s comparison (weights) |
 | Qwen2.5-Coder-1.5B-Instruct (model) | huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct | Apache-2.0 | HF API `cardData.license` | 2026-08-23 | fallback proposer if Qwen3.5-2B LoRA attach fails (spec §2). NB: Qwen2.5-Coder-3B is `other` (Qwen license) — do not use |
+| REx | github.com/haotang1995/REx | MIT | `gh api repos/haotang1995/REx --jq .license.spdx_id` | 2026-08-23 | Thompson-sampling scheduler ported (Beta bandit) to crucible/search/rex.py |

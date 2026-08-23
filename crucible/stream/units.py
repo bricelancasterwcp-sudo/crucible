@@ -71,11 +71,14 @@ def module_name_for(task_id: str) -> str:
 
 
 class _DocstringStripper(ast.NodeTransformer):
-    """Drops the leading string expression from every scope that can hold one."""
+    """Drops every leading string expression from each scope that can hold a docstring."""
 
     def _strip(self, node):
         body = getattr(node, "body", None)
-        if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+        # ``while``, not ``if``: removing one leading string promotes the *next* leading string
+        # into the docstring slot, so a single pass would leave a docstring behind and make the
+        # function non-idempotent -- and ``src_hash`` is derived from its output (ruling R-T6-2).
+        while (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
                 and isinstance(body[0].value.value, str)):
             # A body that was *only* a docstring still needs a statement to stay parseable.
             body = body[1:] or [ast.Pass()]

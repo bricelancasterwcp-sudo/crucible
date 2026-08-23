@@ -28,3 +28,9 @@ def test_cli_precheck_exits_zero_on_ok_and_nonzero_on_bad(tmp_path):
     man["counts"].pop("equivalent")
     mpath.write_text(json.dumps(man))
     assert main(["stream", "precheck", str(d)]) == 1
+
+
+def test_cli_arm_help_lists_pilot_and_run():
+    out = subprocess.run([sys.executable, "-m", "crucible.cli", "arm", "--help"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0 and "pilot" in out.stdout and "run" in out.stdout

@@ -1,11 +1,18 @@
-"""``crucible`` command line: build a stream, pre-check one on disk, or smoke-test one.
+"""``crucible`` command line: build/precheck/smoke a stream, or run the arms over one.
 
-Three subcommands under ``stream``. ``build`` composes a stream and writes it, printing the
+``stream`` groups the S1 subcommands. ``build`` composes a stream and writes it, printing the
 directory it landed in. ``precheck`` reads a written stream back and exits non-zero unless
 every structural gate passes -- so a shell pipeline (or a Phase-A run) can refuse a stream
-that does not match itself across phases without parsing the JSON it also prints.
-``smoke`` re-applies the first ``--n`` tasks' mutants against their visible suites and
-prints the kill census.
+that does not match itself across phases without parsing the JSON it also prints. ``smoke``
+re-applies the first ``--n`` tasks' mutants against their visible suites and prints the kill
+census.
+
+``arm`` groups the S2 run subcommands, each talking to a served proposer over ``--base-url``.
+``pilot`` runs the ceiling pilot (``A_noMem`` over ``--n`` phase-1 tasks) and prints the
+:class:`~crucible.run.pilot.PilotVerdict` as JSON -- p0 and whether the stream is too easy
+(spec §4.8.4). ``run`` runs one named arm over a chosen task set and prints where the records
+landed. The proposer's served identity is asserted on construction, so a mismatched or
+unreachable server is turned into a one-line message and a non-zero exit -- never a traceback.
 
 Nothing here promotes a warning to an error (R-T12-1): no ``-W``, no ``PYTHONWARNINGS``,
 no ``warnings`` filter. The build path depends on SyntaxWarning staying a warning.
@@ -21,10 +28,12 @@ import json
 import sys
 from pathlib import Path
 
+DEFAULT_PILOT_MODEL = "Qwen/Qwen3.5-2B"   # ARMS["A_noMem"].model -- the frozen ceiling proposer
+PROPOSER_ERROR_EXIT = 3                    # served identity mismatch / unreachable server
 
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="crucible")
-    sub = p.add_subparsers(dest="cmd", required=True)
+
+def _add_stream(sub) -> None:
+    """The S1 ``stream`` subcommands: build / precheck / smoke."""
     s = sub.add_parser("stream").add_subparsers(dest="scmd", required=True)
     b = s.add_parser("build")
     b.add_argument("--seed", type=int, default=0); b.add_argument("--C", type=int, default=200)
@@ -34,7 +43,22 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--out", type=Path, default=Path("streams"))
     pc = s.add_parser("precheck"); pc.add_argument("dir", type=Path)
     sm = s.add_parser("smoke"); sm.add_argument("dir", type=Path); sm.add_argument("--n", type=int, default=30)
-    a = p.parse_args(argv)
+
+
+def _add_arm(sub) -> None:
+    """The S2 ``arm`` subcommands: pilot (ceiling) / run (one arm over a task set)."""
+    a = sub.add_parser("arm").add_subparsers(dest="acmd", required=True)
+    pl = a.add_parser("pilot"); pl.add_argument("stream_dir", type=Path)
+    pl.add_argument("--base-url", required=True); pl.add_argument("--model", default=DEFAULT_PILOT_MODEL)
+    pl.add_argument("--n", type=int, default=30); pl.add_argument("--seed", type=int, default=0)
+    pl.add_argument("--out", type=Path, default=Path("runs"))
+    rn = a.add_parser("run"); rn.add_argument("stream_dir", type=Path)
+    rn.add_argument("--arm", required=True); rn.add_argument("--base-url", required=True)
+    rn.add_argument("--tasks", default="phase1"); rn.add_argument("--out", type=Path, default=Path("runs"))
+
+
+def _run_stream(a) -> int:
+    """Dispatch the parsed ``stream`` subcommand; the S1 behaviour, unchanged."""
     if a.scmd == "build":
         from crucible.stream.compose import NotEnoughClasses
         from crucible.stream.pipeline import BuildConfig, build_stream
@@ -54,6 +78,72 @@ def main(argv: list[str] | None = None) -> int:
         from crucible.stream.pipeline import smoke
         print(json.dumps(smoke(a.dir, a.n))); return 0
     return 2
+
+
+def _proposer_or_none(base_url: str, model: str):
+    """A ``VLLMProposer`` for ``(base_url, model)``, or ``None`` after a one-line error.
+
+    Construction asserts served identity, so a mismatched checkpoint or an unreachable server
+    raises ``IdentityMismatch`` (connection failures are folded into it upstream). Caught here
+    and printed as one line -- the caller returns :data:`PROPOSER_ERROR_EXIT`, never a traceback.
+    """
+    from crucible.proposer.client import VLLMProposer
+    from crucible.proposer.identity import IdentityMismatch
+    try:
+        return VLLMProposer(base_url, model)
+    except (IdentityMismatch, OSError) as e:
+        print(f"proposer error: {e}", file=sys.stderr)
+        return None
+
+
+def _arm_pilot(a) -> int:
+    """Run the ceiling pilot and print its verdict as JSON."""
+    from crucible.run.pilot import ceiling_pilot
+    from crucible.value.model import ConstantValue
+    proposer = _proposer_or_none(a.base_url, a.model)
+    if proposer is None:
+        return PROPOSER_ERROR_EXIT
+    verdict = ceiling_pilot(a.stream_dir, a.out, proposer, ConstantValue(), n=a.n, seed=a.seed)
+    print(json.dumps(verdict.to_dict(), sort_keys=True))
+    return 0
+
+
+def _task_keys(manifest, tasks: str) -> list[str]:
+    """The task_keys ``--tasks`` selects: ``all`` manifest tasks, ``phase1`` only, or from a file."""
+    if tasks == "all":
+        return [t.task_key for t in manifest.tasks]
+    if tasks == "phase1":
+        return [t.task_key for t in manifest.tasks if t.kind == "first"]
+    lines = Path(tasks).read_text(encoding="utf-8").splitlines()
+    return [ln.strip() for ln in lines if ln.strip()]
+
+
+def _arm_run(a) -> int:
+    """Run one named arm over the chosen task set and print where the records landed."""
+    from crucible.run.arm import ARMS
+    from crucible.run.driver import run_arm
+    from crucible.stream import store
+    from crucible.value.model import ConstantValue
+    if a.arm not in ARMS:
+        print(f"unknown arm {a.arm!r}; known: {sorted(ARMS)}", file=sys.stderr); return 2
+    cfg = ARMS[a.arm]
+    proposer = _proposer_or_none(a.base_url, cfg.model)
+    if proposer is None:
+        return PROPOSER_ERROR_EXIT
+    keys = _task_keys(store.read_manifest(a.stream_dir), a.tasks)
+    out_path = run_arm(cfg, a.stream_dir, keys, proposer, ConstantValue(), a.out)
+    print(f"records written to {out_path}"); return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="crucible")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    _add_stream(sub)
+    _add_arm(sub)
+    a = p.parse_args(argv)
+    if a.cmd == "arm":
+        return _arm_pilot(a) if a.acmd == "pilot" else _arm_run(a)
+    return _run_stream(a)
 
 
 if __name__ == "__main__":

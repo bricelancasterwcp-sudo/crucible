@@ -7,14 +7,24 @@ in that same unit. Beside them phase 2 carries ``n_nov`` ``novel`` tasks drawn f
 deliberately **held out** of phase 1. Those are the control: without them a phase-2
 improvement could be nothing more than "the agent has seen this file before".
 
-Four things here are load-bearing.
+Five things here are load-bearing.
 
 *The two mutants of a class must touch different sites.* If ``second`` sat on the same
 span as ``first``, "has the agent learned this bug kind" would collapse into "can the
 agent replay the exact patch it just wrote". ``_pick_pair`` therefore walks past every
 candidate that shares ``m1``'s span, and a family whose valid mutants all sit on one
-site is not a class at all -- it is dropped as ``ineligible-class`` rather than quietly
-paired up.
+site is not a class at all -- it is named in ``dropped`` as ``ineligible-class`` rather
+than quietly paired up.
+
+*Which two mutants form a class is a preference; which of them goes first is a coin
+flip.* ``_prefer_non_timeout`` picks the pair from the front of a non-timeout-first
+ordering, because a mutant the visible suite catches only by hanging is a poor task. But
+if that same ordering also decided phase, every timeout mutant in a pair would land in
+phase 2 by construction -- measured at a first-vs-second timeout rate of 0.000 vs 1.000
+-- and spec §4.8.1(1c) requires those two rates to sit within 2·SE of each other (Task
+15's ``timeout-rate-band`` pre-check enforces it). So after the pair is chosen, a seeded
+coin decides which member is ``first``. The preference survives; the systematic
+confound does not.
 
 *The hold-out is drawn, not taken.* Units are sorted and then shuffled with the run's
 seed before the split into novel and class units, so composition does not inherit
@@ -26,15 +36,22 @@ which would correlate the control with whatever ordering EvalPlus happens to shi
 and phase 2 are shuffled from their own streams so that presentation order is
 reproducible from the seed alone and independent between phases.
 
-*``counts`` names every exclusion reason, zero included.* A reason that is merely absent
-from the dict is indistinguishable from a reason nobody looked for, so the closed
-vocabulary (``hidden-only``, ``equivalent``, ``infra``, ``syntax`` from Task 12, plus
-``ineligible-class`` and ``unit-no-valid`` from here) is seeded to zero. ``dropped``
-carries the complement: it names *which* unit or class was excluded, and why.
+*``counts`` is a census, and ``dropped`` names every unit and class the census excludes.*
+A reason that is merely absent from the dict is indistinguishable from a reason nobody
+looked for, so the closed vocabulary (``hidden-only``, ``equivalent``, ``infra``,
+``syntax`` from Task 12, plus ``ineligible-class`` and ``unit-no-valid`` from here) is
+seeded to zero. ``eligible_classes`` counts every class the corpus *could* have supplied,
+over all class units and independent of ``C``; ``classes_taken`` is what the quota walk
+actually took. The walk stops as soon as it has ``C`` classes, so the class units it
+never reached are counted as ``units-unused`` and named in ``dropped`` as
+``unit-unused`` -- a unit missing from the stream is visible in the record, never
+inferred from a gap. ``dropped`` is emitted in sorted order within each segment, so it
+does not inherit the caller's unit ordering.
 
 ``stream_hash`` covers the knobs (seed, C, n_nov, rung), the unit sources that survived,
 and every task's (key, phase, kind). Change any of them and the stream is a different
-stream -- it is the id a run record points at, not a checksum of convenience.
+stream -- it is the id a run record points at, not a checksum of convenience. Neither
+``counts`` nor ``dropped`` is in it: they describe the composition, they are not it.
 """
 from __future__ import annotations
 
@@ -50,7 +67,13 @@ Pair = tuple[Mutant, Validation]
 
 EXCLUSION_REASONS: tuple[str, ...] = ("hidden-only", "equivalent", "infra", "syntax",
                                       "ineligible-class", "unit-no-valid")
-"""Every way a mutant, a unit or a class can fail to reach the stream. All are counted."""
+"""Reasons a mutant, unit or class fails to reach the stream. All are counted, zero included.
+
+``dropped`` carries one further reason, ``unit-unused`` (a class unit the ``C``-quota walk
+never reached). It is counted under the census key ``units-unused`` rather than here,
+alongside ``eligible_classes`` and ``valid_mutants``, because it is a property of the
+quota rather than of the mutant.
+"""
 
 
 class NotEnoughClasses(RuntimeError):
@@ -147,13 +170,28 @@ def _bump(counts: dict[str, int], key: str) -> None:
     counts[key] = counts.get(key, 0) + 1
 
 
+def _by_family(pairs: list[Pair]) -> dict[str, list[Pair]]:
+    """Group one unit's valid mutants by family. Absent families simply never appear --
+    on the real corpus EXC yields no mutants at all, and that must not be an error."""
+    by: dict[str, list[Pair]] = {}
+    for m, v in pairs:
+        by.setdefault(m.family, []).append((m, v))
+    return by
+
+
+def _is_eligible(pairs: list[Pair]) -> bool:
+    """A family forms a class only if two of its valid mutants sit at **different** spans."""
+    return len({m.span for m, _ in pairs}) >= 2
+
+
 def _prefer_non_timeout(pairs: list[Pair], rng: random.Random) -> list[Pair]:
     """``pairs`` shuffled with ``rng``, then stably sorted so non-timeout kills come first.
 
     A mutant the visible suite only catches by hanging is a real task but a poor one --
     its signal is "wait five seconds", not "this assertion fails" -- so it is chosen last
     rather than excluded. The shuffle happens *before* the sort, so ties break randomly
-    instead of by input order.
+    instead of by input order. This orders *selection* only; phase assignment is a
+    separate draw (see ``_build_classes``).
     """
     pool = list(pairs)
     rng.shuffle(pool)
@@ -165,9 +203,9 @@ def _pick_pair(pairs: list[Pair], rng: random.Random) -> tuple[Pair, Pair] | Non
     """Two mutants of one family at **different** spans, or ``None`` if the family has none.
 
     The span check is the class's whole point -- see the module docstring. It is kept even
-    though ``_build_classes`` only calls this for families that already show two distinct
-    spans: the guard there saves an rng draw, this one keeps the invariant local to the
-    function that would otherwise break it.
+    though ``_build_classes`` only calls this for families ``_is_eligible`` accepted: the
+    guard there saves an rng draw, this one keeps the invariant local to the function that
+    would otherwise break it.
     """
     pool = _prefer_non_timeout(pairs, rng)
     m1 = pool[0]
@@ -178,14 +216,15 @@ def _pick_pair(pairs: list[Pair], rng: random.Random) -> tuple[Pair, Pair] | Non
 
 
 def _partition_valid(units: list[Unit], validated: dict[str, list[Pair]],
-                     ) -> tuple[dict[str, list[Pair]], list[tuple[str, str]], dict[str, int]]:
+                     ) -> tuple[dict[str, list[Pair]], list[str], dict[str, int]]:
     """Split the validated mutants into "usable, by unit" and "excluded, counted by reason".
 
-    A unit with no valid mutant at all is itself dropped and named in ``dropped``: a unit
-    missing from the stream must be visible in the record, not inferred from a gap.
+    Returns ``(valid_by_unit, units with no valid mutant, counts)``. A unit with nothing
+    valid is named to the caller so it reaches ``dropped``: a unit missing from the stream
+    must be visible in the record, not inferred from a gap.
     """
     valid_by_unit: dict[str, list[Pair]] = {}
-    dropped: list[tuple[str, str]] = []
+    no_valid: list[str] = []
     counts: dict[str, int] = {}
     for u in units:
         keep = []
@@ -197,41 +236,55 @@ def _partition_valid(units: list[Unit], validated: dict[str, list[Pair]],
         if keep:
             valid_by_unit[u.unit_id] = keep
         else:
-            dropped.append((u.unit_id, "unit-no-valid"))
+            no_valid.append(u.unit_id)
             _bump(counts, "unit-no-valid")
-    return valid_by_unit, dropped, counts
+    return valid_by_unit, no_valid, counts
+
+
+def _class_census(valid_by_unit: dict[str, list[Pair]], class_units: list[str],
+                  ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Every (unit, family) class over **all** class units, split eligible / ineligible.
+
+    A census, not a tally: it does not stop at ``C`` and it draws no randomness, so adding
+    it cannot shift the walk's rng sequence. Sorted by ``(unit_id, family)`` so the
+    ``dropped`` entries derived from it are independent of the caller's ordering.
+    """
+    eligible: list[tuple[str, str]] = []
+    ineligible: list[tuple[str, str]] = []
+    for uid in class_units:
+        for fam, pairs in _by_family(valid_by_unit[uid]).items():
+            (eligible if _is_eligible(pairs) else ineligible).append((uid, fam))
+    return sorted(eligible), sorted(ineligible)
 
 
 def _build_classes(valid_by_unit: dict[str, list[Pair]], class_units: list[str], C: int, rng: random.Random,
-                   ) -> tuple[dict[str, tuple[str, str]], list[TaskSpec], list[TaskSpec], list[tuple[str, str]]]:
-    """Take (unit, family) classes from ``class_units`` until ``C`` of them exist.
+                   ) -> tuple[dict[str, tuple[str, str]], list[TaskSpec], list[TaskSpec], list[str]]:
+    """Take (unit, family) classes until ``C`` of them exist; report the units never reached.
 
-    Families are visited in sorted order within each unit so the walk is deterministic;
-    families absent from a unit simply never appear (on the real corpus EXC yields no
-    mutants at all, and that must not be an error). A family whose valid mutants all
-    share one span cannot form a class and is dropped as ``ineligible-class``.
+    Families are visited in sorted order within each unit so the walk is deterministic.
+    Which member of a pair becomes ``first`` is a seeded coin flip drawn here, after the
+    pair is fixed -- see the module docstring and spec §4.8.1(1c).
     """
     classes: dict[str, tuple[str, str]] = {}
     p1: list[TaskSpec] = []
     p2: list[TaskSpec] = []
-    dropped: list[tuple[str, str]] = []
-    for uid in class_units:
-        by_fam: dict[str, list[Pair]] = {}
-        for m, v in valid_by_unit[uid]:
-            by_fam.setdefault(m.family, []).append((m, v))
+    for i, uid in enumerate(class_units):
+        if len(classes) >= C:
+            return classes, p1, p2, class_units[i:]
+        by_fam = _by_family(valid_by_unit[uid])
         for fam in sorted(by_fam):
             if len(classes) >= C:
                 break
-            distinct_sites = len({m.span for m, _ in by_fam[fam]}) >= 2
-            pair = _pick_pair(by_fam[fam], rng) if distinct_sites else None
-            if pair is None:
-                dropped.append((class_id(uid, fam), "ineligible-class"))
+            if not _is_eligible(by_fam[fam]):
                 continue
-            (m1, v1), (m2, v2) = pair
-            classes[class_id(uid, fam)] = (m1.key, m2.key)
-            p1.append(_task(m1, v1, 1, "first"))
-            p2.append(_task(m2, v2, 2, "second"))
-    return classes, p1, p2, dropped
+            pair = _pick_pair(by_fam[fam], rng)
+            if pair is None:                                    # unreachable given _is_eligible
+                continue
+            first, second = pair if rng.random() < 0.5 else (pair[1], pair[0])
+            classes[class_id(uid, fam)] = (first[0].key, second[0].key)
+            p1.append(_task(*first, 1, "first"))
+            p2.append(_task(*second, 2, "second"))
+    return classes, p1, p2, []
 
 
 def _pick_novel(valid_by_unit: dict[str, list[Pair]], novel_units: list[str], rng: random.Random) -> list[TaskSpec]:
@@ -250,6 +303,13 @@ def _hash(seed: int, C: int, n_nov: int, rung: str, src_hashes: list[str], tasks
                                    "tasks": [(t.task_key, t.phase, t.kind) for t in tasks]}, sort_keys=True))
 
 
+def _dropped(no_valid: list[str], ineligible: list[tuple[str, str]], unused: list[str]) -> tuple[tuple[str, str], ...]:
+    """Every excluded unit and class, each segment sorted so the caller's order cannot leak in."""
+    return tuple([(uid, "unit-no-valid") for uid in sorted(no_valid)]
+                 + [(class_id(uid, fam), "ineligible-class") for uid, fam in ineligible]
+                 + [(uid, "unit-unused") for uid in sorted(unused)])
+
+
 def compose(units: list[Unit], validated: dict[str, list[Pair]], *,
             seed: int, C: int, n_nov: int, rung: str = "base") -> StreamManifest:
     """Build the stream: ``C`` classes across two phases plus ``n_nov`` held-out novel tasks.
@@ -258,21 +318,17 @@ def compose(units: list[Unit], validated: dict[str, list[Pair]], *,
     fewer classes than pre-registered is not the experiment that was registered.
     """
     rng = random.Random(f"{seed}:compose")
-    valid_by_unit, dropped, counts = _partition_valid(units, validated)
+    valid_by_unit, no_valid, counts = _partition_valid(units, validated)
     candidates = sorted(valid_by_unit)
     rng.shuffle(candidates)
     if len(candidates) < n_nov + 1:
         raise NotEnoughClasses(f"only {len(candidates)} units with valid mutants; need n_nov={n_nov} plus class units")
     novel_units, class_units = candidates[:n_nov], candidates[n_nov:]
 
-    classes, p1, p2, class_dropped = _build_classes(valid_by_unit, class_units, C, rng)
-    dropped = dropped + class_dropped
-    for _cid, reason in class_dropped:
-        _bump(counts, reason)
-    for reason in EXCLUSION_REASONS:
-        counts.setdefault(reason, 0)                    # None-vs-zero: unobserved is still named
-    if len(classes) < C:
-        raise NotEnoughClasses(f"eligible classes {len(classes)} < C={C}")
+    eligible, ineligible = _class_census(valid_by_unit, class_units)
+    if len(eligible) < C:
+        raise NotEnoughClasses(f"eligible classes {len(eligible)} < C={C}")
+    classes, p1, p2, unused = _build_classes(valid_by_unit, class_units, C, rng)
     p2 = p2 + _pick_novel(valid_by_unit, novel_units, rng)
 
     random.Random(f"{seed}:phase1").shuffle(p1)
@@ -280,7 +336,11 @@ def compose(units: list[Unit], validated: dict[str, list[Pair]], *,
     tasks = tuple(p1 + p2)
     unit_ids = tuple(sorted({t.unit_id for t in tasks}))
     src_hashes = sorted(u.src_hash for u in units if u.unit_id in unit_ids)
-    counts.update({"eligible_classes": len(classes),
+    counts["ineligible-class"] = len(ineligible)
+    for reason in EXCLUSION_REASONS:
+        counts.setdefault(reason, 0)                    # None-vs-zero: unobserved is still named
+    counts.update({"eligible_classes": len(eligible), "classes_taken": len(classes),
+                   "units-unused": len(unused),
                    "valid_mutants": sum(len(v) for v in valid_by_unit.values())})
     return StreamManifest(_hash(seed, C, n_nov, rung, src_hashes, tasks), seed, C, n_nov, rung,
-                          unit_ids, tasks, classes, tuple(dropped), counts)
+                          unit_ids, tasks, classes, _dropped(no_valid, ineligible, unused), counts)

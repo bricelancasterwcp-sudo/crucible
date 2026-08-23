@@ -97,3 +97,38 @@ def test_rejects_module_name_that_collides_with_the_test_file():
 def test_rejects_module_name_that_is_not_an_identifier():
     with pytest.raises(ValueError):
         run_tests("../x", MOD, TESTS)
+
+
+# The junit pytest leaves behind when a run is interrupted part-way: the completed test,
+# then a nameless placeholder for the one that stopped the session.
+INTERRUPTED_JUNIT = ('<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests">'
+                     '<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1">'
+                     '<testcase classname="test_unit" name="test_v0" time="0.000" />'
+                     '<testcase time="0.000" /></testsuite></testsuites>')
+
+
+def test_probe_message_names_the_cause_of_a_collection_failure():
+    # pytest reports collection diagnostics on stdout, so a stderr-only tail says nothing.
+    r = run_tests("unit_x", MOD, BAD_PARAMETRIZE)
+    assert r.infra_error is not None
+    assert "TypeError" in r.infra_error or "parametrize" in r.infra_error, r.infra_error
+
+
+def test_probe_message_names_the_cause_of_an_import_failure():
+    r = run_tests("unit_x", MOD, "this is not python\n")
+    assert r.infra_error is not None and "NameError" in r.infra_error, r.infra_error
+
+
+def test_nameless_testcase_is_interrupted_even_at_rc_1():
+    # pytest.exit(..., returncode=1) exits 1 with the same partial junit: without the
+    # nameless-testcase check this reads as a complete, all-passed run.
+    r = _classify(1, False, INTERRUPTED_JUNIT, "", 0.5)
+    assert r.infra_error is not None and not r.all_passed and not r.passed
+
+
+def test_rejects_reserved_and_keyword_module_names():
+    # "sitecustomize" would be overwritten by the sandbox network shim, silently dropping
+    # the unit source and fabricating a kill.
+    for name in ("sitecustomize", "conftest", "pytest", "class"):
+        with pytest.raises(ValueError):
+            run_tests(name, MOD, TESTS)

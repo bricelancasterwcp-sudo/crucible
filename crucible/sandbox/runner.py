@@ -19,6 +19,7 @@ a test file that dies in any of those is ours, not the unit's (ruling R-T3-3).
 """
 from __future__ import annotations
 
+import keyword
 import os
 import shutil
 import sys
@@ -29,6 +30,9 @@ from .report import TestReport, parse_junit
 
 _TEST_MODULE = "test_unit"
 TEST_FILE = f"{_TEST_MODULE}.py"
+# Names the sandbox itself owns: ``sitecustomize`` is the network shim ``execute()`` writes
+# last (it would overwrite the unit), ``conftest``/``pytest`` are pytest's own (R-T3-9).
+_RESERVED_MODULE_NAMES = frozenset({_TEST_MODULE, "sitecustomize", "conftest", "pytest"})
 _JUNIT = "junit.xml"
 # Stand-in for the unit while the test file is collected alone: a PEP 562 module-level
 # __getattr__ satisfies any ``from <unit> import name`` the test file performs.
@@ -36,8 +40,8 @@ _UNIT_STUB_SRC = "def __getattr__(name):\n    return lambda *a, **k: None\n"
 # Deliberately independent of the caller's wall cap: a caller with a tight budget must not
 # be able to turn a slow-but-valid test file into a false infra error.
 _PROBE_WALL_CAP_S = 10.0
-_STDERR_TAIL = 400
-_PROBE_STDERR_TAIL = 300
+_OUTPUT_TAIL = 400
+_PROBE_OUTPUT_TAIL = 300
 
 
 def run_tests(module_name: str, module_src: str, test_src: str, *, subset: list[str] | None = None,
@@ -56,14 +60,25 @@ def run_tests(module_name: str, module_src: str, test_src: str, *, subset: list[
     probe = _probe(python, module_name, test_src, mem_limit_bytes)
     if probe.timed_out or probe.returncode != 0:
         return TestReport((), (), (), (), probe.wall_s,
-                          f"test file does not collect: {probe.stderr[-_PROBE_STDERR_TAIL:]}")
+                          f"test file does not collect: {_tail(probe, _PROBE_OUTPUT_TAIL)}")
     res = _run_pytest(python, module_name, module_src, test_src, subset,
                       per_test_timeout_s, wall_cap_s, mem_limit_bytes)
     try:
         xml = _read_junit(res.workdir)
     finally:
         shutil.rmtree(res.workdir, ignore_errors=True)
-    return _classify(res.returncode, res.timed_out, xml, res.stderr, probe.wall_s + res.wall_s)
+    return _classify(res.returncode, res.timed_out, xml, _tail(res, _OUTPUT_TAIL),
+                     probe.wall_s + res.wall_s)
+
+
+def _tail(res: ExecResult, cap: int) -> str:
+    """The last ``cap`` characters the child said, stdout included.
+
+    pytest writes collection diagnostics -- the SyntaxError, the NameError, the
+    parametrize TypeError -- to *stdout* and leaves stderr empty, so a stderr-only tail
+    is a constant empty string exactly when the diagnosis matters (ruling R-T3-10).
+    """
+    return (res.stdout + res.stderr)[-cap:]
 
 
 def _check_module_name(module_name: str) -> None:
@@ -72,9 +87,10 @@ def _check_module_name(module_name: str) -> None:
     This is a caller bug, not a property of the unit, so it raises instead of returning a
     report: a silent collision drops one of the two source files and fabricates a kill.
     """
-    if not module_name.isidentifier() or module_name == _TEST_MODULE:
-        raise ValueError(f"module_name must be a Python identifier other than "
-                         f"{_TEST_MODULE!r}; got {module_name!r}")
+    if (not module_name.isidentifier() or keyword.iskeyword(module_name)
+            or module_name in _RESERVED_MODULE_NAMES):
+        raise ValueError(f"module_name must be a Python identifier, not a keyword, and not one "
+                         f"of {sorted(_RESERVED_MODULE_NAMES)}; got {module_name!r}")
 
 
 def _probe(python: str, module_name: str, test_src: str, mem_limit_bytes: int) -> ExecResult:
@@ -110,23 +126,28 @@ def _read_junit(workdir: str) -> str | None:
         return fh.read()
 
 
-def _classify(rc: int | None, timed_out: bool, xml: str | None, stderr: str, wall_s: float) -> TestReport:
+def _classify(rc: int | None, timed_out: bool, xml: str | None, output: str, wall_s: float) -> TestReport:
     """Turn a raw pytest exit into a verdict, keeping failures and infra errors apart."""
     if timed_out:
         return TestReport((), (), ("__suite__",), (), wall_s, None)
     if xml is None:
-        return TestReport((), (), (), (), wall_s, f"no junit written (rc={rc}): {stderr[-_STDERR_TAIL:]}")
+        return TestReport((), (), (), (), wall_s, f"no junit written (rc={rc}): {output}")
     if rc not in (0, 1, 2):
-        return TestReport((), (), (), (), wall_s, f"pytest rc={rc}: {stderr[-_STDERR_TAIL:]}")
+        return TestReport((), (), (), (), wall_s, f"pytest rc={rc}: {output}")
     try:
         passed, failed, t_out, errored = parse_junit(xml)
     except ET.ParseError as exc:
-        return TestReport((), (), (), (), wall_s, f"junit unparseable (rc={rc}): {exc}")
+        return TestReport((), (), (), (), wall_s, f"junit unparseable (rc={rc}): {exc} | {output}")
+    if any("" in bucket for bucket in (passed, failed, t_out, errored)):
+        # A nameless <testcase/> is pytest's placeholder for the test that stopped the
+        # session. It marks a partial run whatever the exit code -- pytest.exit(returncode=1)
+        # produces this shape at rc=1, which would otherwise read as all-passed (R-T3-8).
+        return TestReport((), (), (), (), wall_s, f"pytest interrupted (rc={rc})")
     if rc == 2:
         if passed or failed or t_out:
             # Interrupted part-way (e.g. pytest.exit from generated code): a partial run
             # is not a measurement, whatever it managed to record (ruling R-T3-4).
-            return TestReport((), (), (), (), wall_s, "pytest interrupted (rc=2)")
+            return TestReport((), (), (), (), wall_s, f"pytest interrupted (rc={rc})")
         # Collection failed inside pytest. The probe already collected the test file
         # standalone, so the fault can only be the unit's.
         return TestReport((), (), (), ("__collection__",), wall_s, None)

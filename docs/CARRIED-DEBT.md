@@ -34,3 +34,40 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
 - **Sandbox isolation is Python-level, not OS-level** (ruling R-T2-3, Task 2). `crucible/sandbox/exec.py` blocks outbound sockets with a `sitecustomize.py` shim: it stops *accidental* network use by generated single-function code, which is the failure mode S1 has, but it is not an adversary barrier -- a unit that shells out to `curl` or calls `connect` through `ctypes` still reaches the network. No S1 code path produces such a unit (units are single functions the proposer writes, run by pytest). OS-level isolation (network namespace / bubblewrap) is deferred past S1. The same ruling covers the escaped-`setsid` grandchild: file-backed capture means it can no longer stall the wall cap, but reaping it would need a cgroup or PID namespace.
 ### Process lessons
 - (fill at merge)
+
+## S2 (in progress)
+### Settled
+- **Search + arms machinery built and reviewed clean** (plan Tasks 1–15 + docstring fix, branch
+  `s2-search-arms`). Proposer adapters (prompt/codec/client), REx Thompson search (`search/rex.py`,
+  `node.py`, `loop.py`), constant value-fn v0, driver/records/lens/pilot/landing-check, CLI
+  `arm pilot|run`. Every task passed the two-stage SDD review; whole-branch review = ready to merge.
+  Ruling **R-S2-T7-1**: REx posterior was inert (refinement ignored it); fixed so the scheduler's
+  Beta posterior actually drives which node is refined (verified 0.730 vs 0.555).
+
+### Deferred, with rulings — BLOCKING
+- **Ceiling pilot BLOCKED at the §4.7 codec-landing gate** (plan Task 16, operational run,
+  2026-08-23). The pilot runs A_noMem = the **Qwen3.5-2B** small-arm proposer; on the real
+  450-task stream at the **pinned** sampler (§3, `max_new_tokens 1024`), the 2B lands **0.767**
+  and the §2 alternative `Qwen2.5-Coder-1.5B-Instruct` lands **0.80** — **both fail the ≥0.95
+  gate.** Diagnosis: failures are decoding artifacts (truncation-dominated — the codec re-emits
+  the module *and* the whole visible test harness, overflowing 1024 tokens → unclosed fence;
+  plus ~6% empty completions and, on the 2B, fragment/test-echo). At `max_new_tokens 2048` the
+  1.5B rises to **0.92** (frozen) / **~0.94** (with unclosed-fence salvage), so the fix is a
+  concrete **codec fix** (§4.7's other sanctioned remedy, since the fallback also fails): (A)
+  raise the pinned `max_new_tokens` to 2048 [§3 amendment, recommended minimum], (B) salvage
+  unclosed fences in `extract_module` [§4.4 code], (C) trim the codec so the model stops
+  reproducing the visible test file [§4.4 redesign]. **All three amend pinned/frozen
+  pre-registration → operator decision.** The 2B must be re-probed under the amended config
+  before it is kept or swapped for the 1.5B (its failures were more test-echo than truncation).
+  **p0 unmeasured; too-easy verdict N/A until the gate is cleared.** Full record:
+  `docs/findings/S2-ceiling-pilot.md`. Pilot does NOT run until Brice picks a remedy and approves
+  the amendment.
+- **Baseline "big" proposer not yet landing-probed** (S3/S4). §2 `Qwen3.5-9B` (fallback
+  `Qwen2.5-Coder-14B-Instruct Q4_K_M`) gates B_naive/big, not the pilot; must clear §4.7 before
+  those arms run.
+
+### Process lessons
+- **The landing pre-check earned its place.** §4.7 caught that the pre-registered proposer would
+  have run the whole experiment at 77% parseable — measurements dominated by parse failures, not
+  reasoning — before a single arm ran. It also caught that the "fix" is a pinned-value amendment,
+  not a silent retune. Exactly the confound §4.7/§11 was written to stop.

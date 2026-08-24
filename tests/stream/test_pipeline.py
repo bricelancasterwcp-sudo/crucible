@@ -155,7 +155,7 @@ def test_stack2_composes_only_two_site_tasks_and_keeps_the_singles_on_disk(tmp_p
     # components' spans are exactly the two sites the task reports.
     from crucible.stream.precheck import precheck
     cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=6, max_hidden=2, jobs=2, rung="stack2")
-    d = build_stream(cfg, tmp_path, recs=_stack_recs(), log=lambda *a: None)
+    d = build_stream(cfg, tmp_path / "a", recs=_stack_recs(), log=lambda *a: None)
     man = store.read_manifest(d)
     assert man.rung == "stack2" and len(man.tasks) == 4
     task_mutants = {t.task_key: store.read_mutant(d, t.task_key) for t in man.tasks}
@@ -201,3 +201,13 @@ def test_stack2_composes_only_two_site_tasks_and_keeps_the_singles_on_disk(tmp_p
     # not the far larger pool of valid singles they were built from.
     assert man.counts["valid_mutants"] == sum(vals[m.key].valid for m in stored if m.components)
     assert man.counts["valid_mutants"] < sum(vals[m.key].valid for m in singles)
+
+    # Spec §9 at rung 1: same seed, same inputs => same stream. Rung 0 is pinned by
+    # test_build_stream_is_deterministic_...; rung 1 adds a whole stacking layer (a
+    # per-unit rng threaded through families in sorted order, plus a second validate_many
+    # pass whose kills_by_timeout feed pair selection), and a stream that is only
+    # *usually* the same stream is not a reproducible experiment. A sibling out_root is
+    # required, not cosmetic: same root and _write_atomic takes the content-addressed
+    # early return, which would compare a hash to itself.
+    d2 = build_stream(cfg, tmp_path / "b", recs=_stack_recs(), log=lambda *a: None)
+    assert store.read_manifest(d2).stream_hash == man.stream_hash

@@ -75,6 +75,9 @@ class BuildConfig:
     limit_units: int | None = None
     jobs: int = 8
     rung: str = "base"
+    # Not last, by design: it sits here so ``sources`` stays last as the only non-scalar.
+    # Safe because no positional caller reaches past ``rung`` (every call site keywords
+    # from here on), so no existing positional argument changes meaning.
     pairs_per_family: int = 4
     sources: tuple[str, ...] = ("humaneval", "mbpp")
 

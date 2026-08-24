@@ -44,11 +44,13 @@ def _serve(served_model=MODEL):
             self.captured["__path__"] = self.path
             if self.path == "/v1/chat/completions":
                 # Chat shape: text under message.content, logprobs under a `content` list.
+                user = (req.get("messages") or [{}])[-1].get("content")
                 choice = {"message": {"role": "assistant", "content": _COMPLETION},
                           "finish_reason": "stop"}
-                choice["logprobs"] = {
-                    "content": [{"token": "t", "logprob": lp} for lp in _TOKEN_LOGPROBS]
-                }
+                if user != _NO_LOGPROBS_PROMPT:  # sentinel: omit the block, as a server may in chat mode
+                    choice["logprobs"] = {
+                        "content": [{"token": "t", "logprob": lp} for lp in _TOKEN_LOGPROBS]
+                    }
                 self._json(200, {"choices": [dict(choice) for _ in range(req.get("n", 1))]})
                 return
             choice = {"text": _COMPLETION, "finish_reason": "stop"}
@@ -205,5 +207,16 @@ def test_chat_mode_empty_content_is_a_nonlanding_candidate():
             assert not extract_module(c.text or "").ok
         finally:
             T._COMPLETION = saved
+    finally:
+        srv.shutdown()
+
+
+def test_chat_mode_scores_none_when_logprobs_absent():
+    """Some servers omit the logprobs block in chat mode; that must yield None scores (unknown),
+    not a crash -- the same graceful degradation the raw path has."""
+    srv, url, _ = _serve()
+    try:
+        c = VLLMProposer(url, MODEL, chat=True).generate(_NO_LOGPROBS_PROMPT, n=1, seed=1)[0]
+        assert c.mean_logprob is None and c.self_certainty is None
     finally:
         srv.shutdown()

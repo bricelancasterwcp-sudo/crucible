@@ -78,7 +78,15 @@ def test_hidden_infra_error_leaves_hidden_pass_none(monkeypatch):
 
 
 def test_arm_registry_matches_frozen_spec():
-    assert ARMS["A_noMem"] == ArmConfig("A_noMem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True)  # A2
-    assert ARMS["B_search"] == ArmConfig("B_search", "Qwen/Qwen3.5-9B", True)
-    assert ARMS["B_naive"] == ArmConfig("B_naive", "Qwen/Qwen3.5-9B", False)
+    # A2: A_noMem is the chat-served instruct 1.5B; the B arms are raw-served base 9B.
+    assert ARMS["A_noMem"] == ArmConfig("A_noMem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True)
+    assert ARMS["B_search"] == ArmConfig("B_search", "Qwen/Qwen3.5-9B", True, chat=False)
+    assert ARMS["B_naive"] == ArmConfig("B_naive", "Qwen/Qwen3.5-9B", False, chat=False)
     assert ARMS["B_naive"].use_search is False
+
+
+def test_chat_serving_is_an_arm_property_not_a_cli_default():
+    """The instruct A_noMem proposer MUST be chat-served; the base B proposers MUST be raw-served.
+    Binding chat to the arm stops `arm run --arm A_noMem` (no --chat) from silently serving raw."""
+    assert ARMS["A_noMem"].chat is True
+    assert ARMS["B_search"].chat is False and ARMS["B_naive"].chat is False

@@ -57,6 +57,7 @@ class ArmConfig:
     name: str
     model: str
     use_search: bool
+    chat: bool = False
     k: int = 8
     width: int = 4
     seed: int = 0
@@ -65,13 +66,19 @@ class ArmConfig:
 # Amendment A2 (2026-08-23, pre-lock): the small-arm proposer is Qwen2.5-Coder-1.5B-Instruct,
 # not Qwen3.5-2B. The 2B (a Qwen3-VL base) failed the §4.7 landing gate on the full-module
 # codec by repetition-degeneration that no budget or sampler penalty could fix; the 1.5B is
-# the pre-registered §2 alternative and clears the gate when chat-served (must be run with
-# VLLMProposer(chat=True) so its instruct chat template is applied). See
-# docs/findings/S2-ceiling-pilot.md §7. B_search/B_naive keep the 9B pending its own §4.7 probe.
+# the pre-registered §2 alternative and clears the gate when chat-served. See
+# docs/findings/S2-ceiling-pilot.md §7.
+#
+# ``chat`` is a per-arm property, NOT a CLI default: the serving surface is dictated by the
+# model, so an *instruct* proposer (A_noMem's 1.5B) MUST be chat-served and a *base* proposer
+# (the 9B B arms) MUST be raw-served. Binding it here means ``crucible arm run --arm A_noMem``
+# cannot silently serve the instruct model raw -- which would reproduce the ~6% empty
+# completions the §4.7 gate rejects and corrupt the very records the experiment scores. The
+# 9B baseline keeps chat=False pending its own §4.7 probe (may flip if that model is instruct).
 ARMS: dict[str, ArmConfig] = {
-    "A_noMem": ArmConfig("A_noMem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True),
-    "B_search": ArmConfig("B_search", "Qwen/Qwen3.5-9B", True),
-    "B_naive": ArmConfig("B_naive", "Qwen/Qwen3.5-9B", False),
+    "A_noMem": ArmConfig("A_noMem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
+    "B_search": ArmConfig("B_search", "Qwen/Qwen3.5-9B", True, chat=False),
+    "B_naive": ArmConfig("B_naive", "Qwen/Qwen3.5-9B", False, chat=False),
 }
 
 

@@ -92,7 +92,10 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
   (p0 > 0.70). A_noMem (search, no memory) already solves 23/30 → the base stream is too easy for
   the memory experiment; the pilot did its job catching an undiscriminating ceiling before the run.
   Records: `runs/pilot-a2-15bc/A_noMem/`. Full record: `docs/findings/S2-ceiling-pilot.md §7–§8`.
-- **Deferred — hardening ladder is NOT implemented** (spec §4.8.4 / §10 S2 "apply the hardening
+- ~~**Deferred — hardening ladder is NOT implemented**~~ **RESOLVED 2026-08-24 (S2.5):** rung (i)
+  stack-2 built (branch `s2.5-stack2`), stream `1158e92f40ad`, re-pilot **p0 = 0.267 ≤ 0.70** —
+  rung FIXED at `stack2`. See `docs/findings/S2.5-stack2.md` and the S2.5 section below.
+- **Original text (kept):** hardening ladder was NOT implemented (spec §4.8.4 / §10 S2 "apply the hardening
   ladder if needed"). The pilot's `too_easy` verdict prescribes `FIRST_HARDENING_RUNG` = "stack two
   mutations per unit", but `rung` is only a label in the stream hash — the mutation engine
   (`mutants.py`) injects ONE mutation per task and even prefers *distinct* spans over stacking.
@@ -100,3 +103,42 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
   mutation mode + rebuild + re-pilot. Scope decision (build it now as an S2.5 / fold into S4) is
   Brice's. Until then the base rung stays measured-too-easy; the gating A_full-vs-A_noMem run must
   wait for a hardened stream.
+
+
+## S2.5 (rung-1 stack-2 hardening) — 2026-08-24
+### Settled
+- **Two-site mutant engine + rung dispatch built and reviewed clean** (branch `s2.5-stack2`,
+  a155890..HEAD; 7 SDD tasks + final whole-branch review + fix wave; 301 tests green capped (299 at fix-wave + 2 SERVE-entry tests)).
+  `Mutant.components`, `stack.py` (span-matched composition — the wrong-site trap is closed by
+  exact-span re-selection; span-partition pairing gives disjoint site-sets by construction),
+  compose site-set classes + `TaskSpec.span2` + post-walk short-stream raise, precheck
+  `distinct-sites` site-sets + `two-site-at-stack2` + derived `REQUIRED_COUNTS`, CLI
+  `--rung stack2 --pairs-per-family`. Rung-0 proven byte-identical (pinned fixture hash + full
+  `dd5912cddedc` rebuild guard).
+- **Ceiling cleared per pre-reg §4.8.4:** rung-1 stream `1158e92f40ad` (200 classes, all
+  prechecks, smoke 30/30, landing 1.00) → **p0 = 0.267, too_easy=false, rung fixed at stack2.**
+- Rulings of record: R-S25-1 (components AND composite each visible-killed), R-S25-2 (rung (i)
+  only), CONST-early exclusion (structural: NumberReplacer double-position spans; capacity
+  re-measured 238→207 eligible ≥ C=200), stack-apply census = all compose_pair Nones,
+  inclusive-end span overlap (conservative).
+
+### Deferred, with rulings
+- **`_is_eligible` anchoring mutation survives the fixtures** (final review MINOR-5, parked):
+  a head-anchored weakening would undercount `eligible_classes` at rung 1 — conservative
+  direction only (early NotEnoughClasses, never a silent pass); killing it needs fixture
+  reordering that churns the C-walk assertions.
+- **Rung-1 stream hash is sensitive to `kills_by_timeout` flake reordering pair selection**
+  (T7 note): the in-suite double-build determinism test is the tripwire; re-check at
+  `prereg-lock-a` time.
+- **hidden-only/equivalent boundary verdict flake** (count-level, one mutant, hash-neutral) —
+  observed on the rung-0 guard rebuild; findings §4.
+- Cosmetic minors from task reviews logged in the SDD ledger
+  (`.superpowers/sdd/2026-08-23-crucible-s2.5-stack2/progress.md`, kept).
+
+### Process lessons
+- The brief's own mutation checks failed to kill twice (Task 3, Task 4) and both times the
+  implementer chased the surviving mutant to a REAL property (NumberReplacer same-span
+  positions; span-shuffle locality confound) instead of accepting green — the checks exist to
+  be chased, not passed.
+- Build ops: `--jobs 8` OOMs `build_units` at any tried cap; the proven recipe is jobs 5-6
+  under `MemoryMax=12G` with disk `TMPDIR` (findings §4).

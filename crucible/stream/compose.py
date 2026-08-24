@@ -12,9 +12,12 @@ Five things here are load-bearing.
 *The two mutants of a class must touch different sites.* If ``second`` sat on the same
 span as ``first``, "has the agent learned this bug kind" would collapse into "can the
 agent replay the exact patch it just wrote". ``_pick_pair`` therefore walks past every
-candidate that shares ``m1``'s span, and a family whose valid mutants all sit on one
+candidate that shares a site with ``m1``, and a family whose valid mutants all sit on one
 site is not a class at all -- it is named in ``dropped`` as ``ineligible-class`` rather
-than quietly paired up.
+than quietly paired up. The comparison is between *site sets* (``_site_set``), not spans:
+a rung-1 mutant touches two sites and sharing **either** of them is sharing a site
+(spec §4.8.3). At rung 0 a site set is the mutant's own single span, so the rule -- and
+every draw it feeds -- is unchanged.
 
 *Which two mutants form a class is a preference; which of them goes first is a coin
 flip.* ``_prefer_non_timeout`` picks the pair from the front of a non-timeout-first
@@ -39,7 +42,8 @@ reproducible from the seed alone and independent between phases.
 *``counts`` is a census, and ``dropped`` names every unit and class the census excludes.*
 A reason that is merely absent from the dict is indistinguishable from a reason nobody
 looked for, so the closed vocabulary (``hidden-only``, ``equivalent``, ``infra``,
-``syntax`` from Task 12, plus ``ineligible-class`` and ``unit-no-valid`` from here) is
+``syntax`` from Task 12, plus ``ineligible-class`` and ``unit-no-valid`` from here, plus
+``stack-apply`` which the rung-1 builder hands in through ``extra_counts``) is
 seeded to zero. ``eligible_classes`` counts every class the corpus *could* have supplied,
 over all class units and independent of ``C``; ``classes_taken`` is what the quota walk
 actually took. The walk stops as soon as it has ``C`` classes, so the class units it
@@ -66,13 +70,20 @@ from .validate import Validation
 Pair = tuple[Mutant, Validation]
 
 EXCLUSION_REASONS: tuple[str, ...] = ("hidden-only", "equivalent", "infra", "syntax",
-                                      "ineligible-class", "unit-no-valid")
+                                      "ineligible-class", "unit-no-valid", "stack-apply")
 """Reasons a mutant, unit or class fails to reach the stream. All are counted, zero included.
 
 ``dropped`` carries one further reason, ``unit-unused`` (a class unit the ``C``-quota walk
 never reached). It is counted under the census key ``units-unused`` rather than here,
 alongside ``eligible_classes`` and ``valid_mutants``, because it is a property of the
 quota rather than of the mutant.
+
+``stack-apply`` runs the other way: it is counted here but never *named* in ``dropped``.
+It is the rung-1 count of mutant pairs that failed composition, and a pair is not a
+stream entity -- it has no id to name, and both of its components may still serve
+elsewhere in the stream. compose never sees those failures itself; the builder passes
+the total in through ``extra_counts``. Seeding it to zero at every rung keeps "no pair
+failed" distinct from "nobody counted".
 """
 
 
@@ -93,6 +104,10 @@ class TaskSpec:
     and the bug is identified by its content hash. ``kills_by_timeout`` and
     ``n_killing_visible`` are copied from the mutant's ``Validation`` so a task can be
     described without re-reading the validation record.
+
+    ``span2`` is the second site of a rung-1 stacked task and ``None`` for a single-site
+    one. It is trailing and defaulted so every existing positional construction still
+    means what it meant, and so a pre-rung-1 manifest still loads.
     """
 
     task_key: str
@@ -104,18 +119,26 @@ class TaskSpec:
     span: Span
     kills_by_timeout: bool
     n_killing_visible: int
+    span2: Span | None = None
 
     def to_dict(self) -> dict:
         """JSON-ready form: the nested span tuples become lists so a file round-trip is exact."""
         d = asdict(self)
         d["span"] = [list(self.span[0]), list(self.span[1])]
+        d["span2"] = None if self.span2 is None else [list(self.span2[0]), list(self.span2[1])]
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "TaskSpec":
-        """Inverse of :meth:`to_dict`; restores the tuple shape so equality holds."""
+        """Inverse of :meth:`to_dict`; restores the tuple shape so equality holds.
+
+        ``span2`` is read with ``.get``: a manifest written before rung 1 existed carries
+        no such key at all, and it must load as the single-site task it is.
+        """
         d = dict(d)
         d["span"] = (tuple(d["span"][0]), tuple(d["span"][1]))
+        s2 = d.get("span2")
+        d["span2"] = None if s2 is None else (tuple(s2[0]), tuple(s2[1]))
         return cls(**d)
 
 
@@ -160,9 +183,15 @@ class StreamManifest:
 
 
 def _task(m: Mutant, v: Validation, phase: int, kind: str) -> TaskSpec:
-    """Package one validated mutant as a task. The mutant's key becomes the task key."""
+    """Package one validated mutant as a task. The mutant's key becomes the task key.
+
+    A stacked mutant's top-level ``span`` is already its *early* component's, so ``span2``
+    carries the late one and the task reports both sites it touches. A single-site mutant
+    has no components and reports ``None``.
+    """
     return TaskSpec(m.key, m.unit_id, m.family, class_id(m.unit_id, m.family), phase, kind, m.span,
-                    v.kills_by_timeout, v.n_killing_visible)
+                    v.kills_by_timeout, v.n_killing_visible,
+                    m.components[1].span if m.components else None)
 
 
 def _bump(counts: dict[str, int], key: str) -> None:
@@ -179,9 +208,20 @@ def _by_family(pairs: list[Pair]) -> dict[str, list[Pair]]:
     return by
 
 
+def _site_set(m: Mutant) -> frozenset[Span]:
+    """The sites a mutant touches: its components' spans, or its own span for a single."""
+    return frozenset(c.span for c in m.components) if m.components else frozenset((m.span,))
+
+
 def _is_eligible(pairs: list[Pair]) -> bool:
-    """A family forms a class only if two of its valid mutants sit at **different** spans."""
-    return len({m.span for m, _ in pairs}) >= 2
+    """A family forms a class only if two of its valid mutants touch **disjoint** site sets.
+
+    At rung 0 every site set is one span, so this is exactly the old "two of them sit at
+    different spans" -- same answer, same order, and no rng either way. At rung 1 a mutant
+    touches two sites and sharing either one disqualifies the pairing (spec §4.8.3).
+    """
+    sets = [_site_set(m) for m, _ in pairs]
+    return any(not (sets[i] & sets[j]) for i in range(len(sets)) for j in range(i + 1, len(sets)))
 
 
 def _prefer_non_timeout(pairs: list[Pair], rng: random.Random) -> list[Pair]:
@@ -200,17 +240,22 @@ def _prefer_non_timeout(pairs: list[Pair], rng: random.Random) -> list[Pair]:
 
 
 def _pick_pair(pairs: list[Pair], rng: random.Random) -> tuple[Pair, Pair] | None:
-    """Two mutants of one family at **different** spans, or ``None`` if the family has none.
+    """Two mutants of one family on **disjoint** sites, or ``None`` if the family has none.
 
-    The span check is the class's whole point -- see the module docstring. It is kept even
+    The site check is the class's whole point -- see the module docstring. It is kept even
     though ``_build_classes`` only calls this for families ``_is_eligible`` accepted: the
     guard there saves an rng draw, this one keeps the invariant local to the function that
     would otherwise break it.
+
+    Unlike ``_is_eligible`` the walk is not exhaustive -- it keeps the preferred head and
+    tries only what follows it. At rung 0 that cannot fail on an eligible family (two
+    distinct spans exist, so whatever the head is, one of them differs from it); at rung 1
+    a head can overlap every remaining candidate, and that family yields no class.
     """
     pool = _prefer_non_timeout(pairs, rng)
     m1 = pool[0]
     for cand in pool[1:]:
-        if cand[0].span != m1[0].span:
+        if not (_site_set(cand[0]) & _site_set(m1[0])):
             return m1, cand
     return None
 
@@ -278,7 +323,7 @@ def _build_classes(valid_by_unit: dict[str, list[Pair]], class_units: list[str],
             if not _is_eligible(by_fam[fam]):
                 continue
             pair = _pick_pair(by_fam[fam], rng)
-            if pair is None:                                    # unreachable given _is_eligible
+            if pair is None:                                    # rung 0: unreachable; rung 1: see _pick_pair
                 continue
             first, second = pair if rng.random() < 0.5 else (pair[1], pair[0])
             classes[class_id(uid, fam)] = (first[0].key, second[0].key)
@@ -311,11 +356,20 @@ def _dropped(no_valid: list[str], ineligible: list[tuple[str, str]], unused: lis
 
 
 def compose(units: list[Unit], validated: dict[str, list[Pair]], *,
-            seed: int, C: int, n_nov: int, rung: str = "base") -> StreamManifest:
+            seed: int, C: int, n_nov: int, rung: str = "base",
+            extra_counts: dict[str, int] | None = None) -> StreamManifest:
     """Build the stream: ``C`` classes across two phases plus ``n_nov`` held-out novel tasks.
 
     Raises :class:`NotEnoughClasses` rather than returning a short stream -- a run with
-    fewer classes than pre-registered is not the experiment that was registered.
+    fewer classes than pre-registered is not the experiment that was registered. The
+    pre-check is over ``_is_eligible``, and at rung 1 that is the weaker of the two site
+    tests: ``_pick_pair`` can still decline a family the census counted as eligible, so
+    the walk can end short of ``C`` without raising. ``counts["classes_taken"]`` is what
+    actually landed -- read it against ``C`` before trusting a rung-1 stream.
+
+    ``extra_counts`` merges census keys the *builder* observed and compose never could --
+    rung 1's ``stack-apply`` -- into ``counts`` after the closed vocabulary is seeded, so
+    the manifest can report them without compose having to know how they happened.
     """
     rng = random.Random(f"{seed}:compose")
     valid_by_unit, no_valid, counts = _partition_valid(units, validated)
@@ -339,6 +393,7 @@ def compose(units: list[Unit], validated: dict[str, list[Pair]], *,
     counts["ineligible-class"] = len(ineligible)
     for reason in EXCLUSION_REASONS:
         counts.setdefault(reason, 0)                    # None-vs-zero: unobserved is still named
+    counts.update(extra_counts or {})                   # builder-side census keys, e.g. stack-apply
     counts.update({"eligible_classes": len(eligible), "classes_taken": len(classes),
                    "units-unused": len(unused),
                    "valid_mutants": sum(len(v) for v in valid_by_unit.values())})

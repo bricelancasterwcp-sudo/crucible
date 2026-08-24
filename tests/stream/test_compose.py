@@ -25,7 +25,7 @@ from dataclasses import fields, replace
 import pytest
 
 from crucible.stream.compose import NotEnoughClasses, StreamManifest, TaskSpec, class_id, compose
-from crucible.stream.mutants import Mutant
+from crucible.stream.mutants import Component, Mutant
 from crucible.stream.units import Unit, sha256_text
 from crucible.stream.validate import Validation
 
@@ -323,3 +323,65 @@ def test_rung0_hash_regression():
     units, validated = _world(8)
     man = compose(units, validated, seed=0, C=4, n_nov=2, rung="base")
     assert man.stream_hash == "42953644bb923f7ffb6e742ef65fe042835c3178cd0b2974536014b759c9448d"
+
+
+# --- rung-1 (stack2) fixtures and tests -------------------------------------------------
+# ``_stacked_world`` is ``_world``'s two-site mirror: the overlap that ``_world`` expresses
+# as a shared span, a stacked world expresses as a shared *site set* member. Tag ``c``
+# overlaps ``a`` on line 2 and ``b`` on line 5, so a pairing that compared only top-level
+# spans would happily pair c with b (spans 2 vs 4) and put two mutations on line 5.
+
+
+def _stacked(u, fam, l1, l2, tag, timeout=False):
+    """A two-site fixture mutant: components at lines l1 < l2, top-level = early."""
+    key = sha256_text(f"{u.unit_id}:{fam}:{l1}+{l2}:{tag}")
+    comps = (Component("Op", 0, ((l1, 1), (l1, 2))), Component("Op2", 1, ((l2, 1), (l2, 2))))
+    m = Mutant(u.unit_id, key, "Op", 0, fam, comps[0].span, "src", "diff", components=comps)
+    return (m, Validation(key, True, "killed-visible", timeout, 1, ("test_v0",)))
+
+
+def _stacked_world(n_units=6):
+    """Each unit's ARITH family: two stacked mutants with disjoint site-sets {2,3} / {4,5},
+    plus one whose site-set overlaps the first (line 2) -- never pairable with it."""
+    units = [_unit(i) for i in range(n_units)]
+    validated = {u.unit_id: [_stacked(u, "ARITH", 2, 3, "a"), _stacked(u, "ARITH", 4, 5, "b"),
+                             _stacked(u, "ARITH", 2, 5, "c")] for u in units}
+    return units, validated
+
+
+def test_compose_pairs_stacked_classes_by_disjoint_site_sets():
+    units, validated = _stacked_world()
+    man = compose(units, validated, seed=0, C=3, n_nov=2, rung="stack2")
+    by_key = {t.task_key: t for t in man.tasks}
+    for k1, k2 in man.classes.values():
+        s1 = {by_key[k1].span, by_key[k1].span2}
+        s2 = {by_key[k2].span, by_key[k2].span2}
+        assert not (s1 & s2)                                        # §4.8.3 clarified
+    for t in man.tasks:
+        assert t.span2 is not None and t.span2 != t.span            # every rung-1 task is two-site
+
+
+def test_taskspec_span2_round_trips_and_defaults():
+    units, validated = _stacked_world()
+    man = compose(units, validated, seed=0, C=3, n_nov=2, rung="stack2")
+    assert StreamManifest.from_dict(json.loads(json.dumps(man.to_dict()))) == man
+    d = man.tasks[0].to_dict(); d.pop("span2")
+    assert TaskSpec.from_dict(d).span2 is None                      # pre-stack2 manifests load
+
+
+def test_single_site_world_still_composes_identically():
+    # The generalized eligibility/pairing must be a no-op for singles; the pinned-hash
+    # regression test is the byte-level check, this is the semantic one.
+    units, validated = _world(8)
+    man = compose(units, validated, seed=0, C=4, n_nov=2, rung="base")
+    assert all(t.span2 is None for t in man.tasks)
+
+
+def test_stack_apply_is_a_seeded_census_key_and_extra_counts_merge():
+    units, validated = _world(8)
+    man = compose(units, validated, seed=0, C=4, n_nov=2, rung="base")
+    assert man.counts["stack-apply"] == 0                           # None-vs-zero
+    units, validated = _stacked_world()
+    man2 = compose(units, validated, seed=0, C=3, n_nov=2, rung="stack2",
+                   extra_counts={"stack-apply": 7})
+    assert man2.counts["stack-apply"] == 7

@@ -592,3 +592,123 @@ def test_slice_runner_samples_greedily(stream, tmp_path):
 
     assert [c["n"] for c in proposer.calls] == [1]
     assert [c["temperature"] for c in proposer.calls] == [0.0]
+
+
+# --- the calibrated abstention path, end to end -----------------------------------------
+#
+# The controller's ruling: abstention is wired through the SEARCH, not restamped onto a
+# finished record. ``before_task`` builds the per-task hook from the calibrator + this task's
+# provenance class, the driver threads it into ``attempt_task`` beside the memory block, and
+# the loop applies the §6 gate BEFORE ``run_hidden`` runs. These tests use a REAL
+# ``Calibrator``, trained through ``observe``, so what they pin is the actual gate and not a
+# fake's opinion of it.
+#
+# Two mutants die here: dropping the ``confidence`` kwarg from the driver's A_full call
+# (``..._rescues_a_raw_abstain`` flips to abstain and reports the raw 0.3), and a
+# ``should_abstain`` that always returns False (``..._abstains_below_abstain_p`` flips to
+# believed).
+
+RAW = 0.3          # what the value model scores every node at in these tests
+NOHIT_P1 = provenance_class(False, 1)
+
+
+class _FixedValue(_SpyValue):
+    """``OnlineValue`` whose ``score`` is pinned, so the RAW confidence is a known number.
+
+    Still calls through to ``OnlineValue.score`` first: that is what caches the node's
+    features, which is what makes the later ``update_by_id`` a real training step rather
+    than a silent miss.
+    """
+
+    def __init__(self, raw: float = RAW) -> None:
+        super().__init__()
+        self._raw = raw
+
+    def score(self, node) -> float:
+        super().score(node)
+        return self._raw
+
+
+def _trained(calibrator: Calibrator, passes: int, fails: int) -> Calibrator:
+    """Train ``NOHIT_P1`` at score ``RAW`` so it calibrates to ``passes/(passes+fails)``.
+
+    All observations sit at the same score, so the isotonic fit there is exactly that ratio
+    and MIN_OBS is satisfied by ``passes + fails >= 10``.
+    """
+    for i in range(passes + fails):
+        calibrator.observe(RAW, NOHIT_P1, i < passes)
+    return calibrator
+
+
+def _search_full():
+    """A SEARCH arm (A_full is one) on a tiny budget -- the abstain rule lives on this path.
+
+    The single-shot control has no abstention rule to condition (see ``arm._naive_attempt``),
+    so the calibrated gate can only be exercised through a search arm.
+    """
+    return ArmConfig("A_full", "fake/model", use_search=True, k=2, width=1)
+
+
+def _one_task_drive(stream, tmp_path, calibrator_pair):
+    """Drive ONE phase-1 task with a never-repairing proposer (reward 0) under A_full's hooks."""
+    passes, fails = calibrator_pair
+    first_a, _first_b, _second_a = _class_pair(stream)
+    by_key = {t.task_key: t for t in stream_store.read_manifest(stream).tasks}
+    task = by_key[first_a]
+    assert (task.phase, task.kind) == (1, "first")        # so NOHIT_P1 is really its class
+    unit = stream_store.read_unit(stream, task.unit_id)
+    wrong = f"def {unit.entry_point}(*a, **k):\n    return None\n"
+
+    r = _drive_rig(stream, tmp_path)
+    r.value = _FixedValue()
+    _trained(r.calibrator, passes, fails)
+    r.hooks = FullHooks(r.store, r.value, r.calibrator, r.controller, r.registry,
+                        sleep_records_path=r.sleep_records_path)
+    out = run_arm(_search_full(), stream, [first_a], FakeProposer("fake/model", [wrong]),
+                  r.value, tmp_path / "out", log=lambda *a: None, hooks=r.hooks)
+    return r, read_task_records(out)[0]
+
+
+def test_calibrated_confidence_rescues_a_raw_abstain(stream, tmp_path):
+    """Raw 0.3 would abstain under the structural < 0.5 rule; calibrated 0.6 does not.
+
+    MUTATION: drop ``confidence`` from the driver's A_full call -> status flips to abstain
+    and the recorded confidence is the raw 0.3.
+    """
+    r, rec = _one_task_drive(stream, tmp_path, (6, 4))
+
+    assert rec.visible_reward < 0.5                        # the reward half WOULD have fired
+    assert rec.status == "believed"
+    assert rec.confidence == pytest.approx(0.6)            # the CALIBRATED value it decided on
+    # ... and the calibrator was trained on the RAW score, never on its own output.
+    assert r.calibrator.observed[-1] == (RAW, NOHIT_P1, rec.hidden_pass)
+
+
+def test_calibrated_confidence_abstains_below_abstain_p(stream, tmp_path):
+    """MUTATION: ``should_abstain`` returning False always -> this flips to believed."""
+    _r, rec = _one_task_drive(stream, tmp_path, (1, 9))
+
+    assert rec.confidence == pytest.approx(0.1)            # below ABSTAIN_P = 0.2
+    assert rec.status == "abstain"
+
+
+def test_the_episode_carries_the_calibrated_confidence_not_a_recalibration(stream, tmp_path):
+    # Calibrating an already-calibrated number would compose the isotonic map with itself.
+    r, rec = _one_task_drive(stream, tmp_path, (6, 4))
+
+    assert r.store.episodes()[0].confidence == pytest.approx(rec.confidence)
+
+
+def test_task_confidence_is_bound_to_this_task_s_provenance_class(rig):
+    rig.hooks.before_task(U, replace(SPEC, phase=2))
+    assert rig.hooks.task_confidence().cls == provenance_class(False, 2)
+
+    rig.hooks.before_task(U, SPEC)
+    assert rig.hooks.task_confidence().cls == NOHIT_P1
+
+
+def test_task_confidence_without_an_open_task_raises(rig):
+    # A silently-absent hook would put A_full back on the raw < 0.5 rule with nothing in the
+    # records to show it, so the failure is loud.
+    with pytest.raises(ValueError):
+        rig.hooks.task_confidence()

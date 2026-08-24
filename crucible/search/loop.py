@@ -32,6 +32,29 @@ dropped, so the loop stays bounded (see :func:`_budget_loop`).
 ``Value`` is declared here as a minimal protocol because Task 8 (``crucible/value/model.py``)
 may not be committed yet; that task supplies the concrete ``ConstantValue``. Anything with a
 ``score(node) -> float`` satisfies the loop; ``None`` falls back to proposer self-certainty.
+
+**Abstention has TWO rules, and which one applies depends on whether the arm is calibrated
+(S3).** They are deliberately different numbers, not a constant that drifted:
+
+* :data:`ABSTAIN_THRESHOLD` (``0.5``) is STRUCTURAL and unconditional. It gates the REWARD
+  half -- "fewer than half the visible tests pass" -- for every arm, always.
+* The CONFIDENCE half depends on what the confidence number MEANS. With no
+  :class:`TaskConfidence` hook (``confidence=None``: A_noMem, both B arms) the reported
+  confidence is a RAW value-model score -- a ranking signal, not a probability -- so the
+  honest gate is the same structural ``< 0.5``: "the ranker does not believe this either".
+  With a hook (A_full) the number is a CALIBRATED P(hidden pass) for this task's provenance
+  class, and the gate becomes the pre-registered §6 rule
+  :func:`crucible.uncertainty.conformal.Calibrator.should_abstain` at
+  :data:`~crucible.uncertainty.conformal.ABSTAIN_P` (``0.2``, inclusive). Comparing a
+  calibrated probability against ``0.5`` would abstain on most of a hard stream, and
+  comparing a raw score against ``0.2`` would abstain almost never; the two numbers are not
+  interchangeable and neither is a mis-copy of the other.
+
+The hook composes rather than replaces: ``reward < ABSTAIN_THRESHOLD`` must ALSO hold, so a
+calibrated arm can never abstain on a submission that is passing most of its visible suite.
+The reported ``confidence`` is whatever the decision actually used -- calibrated when a hook
+is present, raw when it is not -- because a record whose confidence field did not drive its
+own status would be unauditable.
 """
 from __future__ import annotations
 
@@ -60,6 +83,22 @@ class Value(Protocol):
     """The heuristic the search ranks unexecuted candidates by (Task 8 ships a concrete one)."""
 
     def score(self, node: Node) -> float: ...
+
+
+@runtime_checkable
+class TaskConfidence(Protocol):
+    """One task's calibrated confidence and its abstention gate (S3, A_full only).
+
+    Bound to ONE task's provenance class before the search starts, so neither method takes a
+    class argument: the search does not know what a provenance class is and must not have to.
+    ``calibrate`` maps a raw value score to P(hidden pass); ``should_abstain`` answers the §6
+    gate for an already-calibrated probability. ``None`` everywhere else -- see the module
+    docstring's two-rules note. ``crucible.run.full`` supplies the implementation.
+    """
+
+    def calibrate(self, score: float) -> float: ...
+
+    def should_abstain(self, p: float) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -172,6 +211,7 @@ class _Ctx:
     tree: Tree
     rex: RexScheduler
     memory: str | None = None
+    confidence: "TaskConfidence | None" = None
     root_prompt: str = ""
     pending: dict[str, Node] = field(default_factory=dict)
     seen: set[str] = field(default_factory=set)
@@ -259,11 +299,20 @@ def _budget_loop(ctx: _Ctx, k: int) -> int:
     return charged
 
 
-def _status(reward: float, confidence: float) -> str:
-    """``verified_visible`` on a full pass; ``abstain`` when reward and confidence are both low."""
+def _status(reward: float, confidence: float,
+            conf: "TaskConfidence | None" = None) -> str:
+    """``verified_visible`` on a full pass; ``abstain`` when reward AND confidence are both low.
+
+    The reward half is structural and unconditional (``< ABSTAIN_THRESHOLD``). The confidence
+    half is the raw ``< ABSTAIN_THRESHOLD`` compare when there is no hook, and ``conf
+    .should_abstain(confidence)`` -- the calibrated §6 gate -- when there is. See the module
+    docstring for why those are two different numbers rather than one that drifted.
+    """
     if reward >= 1.0:
         return VERIFIED_VISIBLE
-    if reward < ABSTAIN_THRESHOLD and confidence < ABSTAIN_THRESHOLD:
+    low_confidence = (confidence < ABSTAIN_THRESHOLD if conf is None
+                      else conf.should_abstain(confidence))
+    if reward < ABSTAIN_THRESHOLD and low_confidence:
         return ABSTAIN
     return BELIEVED
 
@@ -272,7 +321,11 @@ def _finalize(ctx: _Ctx, executions_charged: int) -> SearchResult:
     """Score the tree's best visible node into the frozen :class:`SearchResult`."""
     best = ctx.tree.best_visible()
     reward = best.visible_reward()
+    # The raw ranker score, then the calibrated probability when this arm has a hook. The
+    # REPORTED confidence is the one the status decision below actually used.
     confidence = _value_score(ctx.value, best)
+    if ctx.confidence is not None:
+        confidence = _clamp01(float(ctx.confidence.calibrate(confidence)))
     return SearchResult(
         best_patch=best.candidate.text,
         best_node_id=best.node_id,
@@ -280,7 +333,7 @@ def _finalize(ctx: _Ctx, executions_charged: int) -> SearchResult:
         executions_charged=executions_charged,
         landed=bool(best.candidate.text.strip()),
         nodes=len(ctx.seen),
-        status=_status(reward, confidence),
+        status=_status(reward, confidence, ctx.confidence),
         confidence=confidence,
         root_prompt=ctx.root_prompt,
         symptom_failed=(tuple(ctx.symptom.failed) + tuple(ctx.symptom.timed_out)
@@ -289,7 +342,7 @@ def _finalize(ctx: _Ctx, executions_charged: int) -> SearchResult:
 
 
 def search(unit: Unit, proposer: Proposer, value, *, seed: int, k: int = 8, width: int = 4,
-           memory: str | None = None,
+           memory: str | None = None, confidence: "TaskConfidence | None" = None,
            per_test_timeout_s: float = 5.0, wall_cap_s: float = 60.0) -> SearchResult:
     """Budgeted propose->execute->refine search; returns the final submission (spec S4.6).
 
@@ -301,13 +354,19 @@ def search(unit: Unit, proposer: Proposer, value, *, seed: int, k: int = 8, widt
     the root seeding prompt and every refinement prompt alike -- because a block that fades
     after the first round would make "the agent had memory" true only of the first attempt.
     ``None`` (A_noMem) adds nothing to any prompt: the arm is byte-for-byte its S2 self.
+
+    ``confidence`` is the S3 per-task :class:`TaskConfidence` hook (A_full). It touches
+    NOTHING inside the loop -- not a prompt, not an execution, not the REx ordering, which
+    still ranks on the RAW value score -- only the final confidence number and the status
+    rule derived from it (see :func:`_status`). ``None`` -- the default, and what every other
+    arm passes -- leaves both exactly as S2 computed them.
     """
     symptom = run(unit, unit.module_src, None,          # rule 1: the FREE symptom, never charged
                   per_test_timeout_s=per_test_timeout_s, wall_cap_s=wall_cap_s)
     rng = random.Random(f"{seed}:search:{unit.unit_id}")
     root = Node.for_candidate(Candidate(unit.module_src, None, None))
     ctx = _Ctx(unit, proposer, value, symptom, seed, width, per_test_timeout_s, wall_cap_s,
-               Tree(root), RexScheduler(rng=rng), memory=memory)
+               Tree(root), RexScheduler(rng=rng), memory=memory, confidence=confidence)
     ctx.seen.add(root.node_id)
     ctx.depth[root.node_id] = 0
     _seed_roots(ctx, root)

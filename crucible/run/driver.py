@@ -134,11 +134,13 @@ def run_arm(cfg: ArmConfig, stream_dir: Path, task_keys: list[str], proposer, va
     file are skipped -- ``attempt_task`` is not re-invoked for them. Returns the output dir.
 
     ``hooks`` (S3, A_full only) turns this loop into the memory arm without changing it:
-    ``before_task`` supplies the retrieved block that becomes ``attempt_task``'s ``memory``,
-    ``after_task`` writes the episode/lesson and returns the ``(retrieved_ids, adapter_id)``
-    stamped onto the record, and ``between_tasks`` is where sleep may fire. ``None`` -- every
-    other arm -- calls ``attempt_task`` with the S2 argument list and stamps nothing (see the
-    module docstring).
+    ``before_task`` supplies the retrieved block that becomes ``attempt_task``'s ``memory``
+    and builds the per-task calibration hook (``task_confidence``) that becomes its
+    ``confidence`` -- so A_full's abstention decision is made on a calibrated number, inside
+    the search, before the hidden oracle runs. ``after_task`` writes the episode/lesson and
+    returns the ``(retrieved_ids, adapter_id)`` stamped onto the record, and ``between_tasks``
+    is where sleep may fire. ``None`` -- every other arm -- calls ``attempt_task`` with the S2
+    argument list and stamps nothing (see the module docstring).
 
     Three orderings inside the loop are load-bearing:
 
@@ -165,9 +167,15 @@ def run_arm(cfg: ArmConfig, stream_dir: Path, task_keys: list[str], proposer, va
         if task is None:
             raise KeyError(f"task_key {task_key!r} is not in stream {manifest.stream_hash[:12]}")
         unit = _mutated_unit(stream_dir, task)
-        # hooks=None => the S2 call, argument for argument: the kwarg is ABSENT, not None.
-        memory_kw = {} if hooks is None else {"memory": hooks.before_task(unit, task)}
-        rec, execs, result = attempt_task(cfg, unit, task, proposer, value, **memory_kw)
+        # hooks=None => the S2 call, argument for argument: BOTH kwargs are ABSENT, not None.
+        # With hooks, ``before_task`` runs first (it is what builds the confidence hook the
+        # next line reads), so the two are sequenced explicitly rather than by dict-literal
+        # evaluation order.
+        attempt_kw: dict = {}
+        if hooks is not None:
+            block = hooks.before_task(unit, task)         # builds this task's confidence hook
+            attempt_kw = {"memory": block, "confidence": hooks.task_confidence()}
+        rec, execs, result = attempt_task(cfg, unit, task, proposer, value, **attempt_kw)
         now = utc_now()                                   # THE clock read (see module docstring)
         if hooks is not None:
             retrieved_ids, adapter_id = hooks.after_task(unit, task, rec, result, now)

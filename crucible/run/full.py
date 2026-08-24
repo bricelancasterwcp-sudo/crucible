@@ -35,8 +35,9 @@ the calibrator that an infra failure is a repair failure. Both are skipped on ``
 the same None-vs-zero discipline the lens applies to its denominators.
 
 **What travels between the two task-scoped hooks, and why it is guarded.** ``before_task``
-retrieves and remembers the ``(task_key, item_ids, hit)`` it produced; ``after_task`` needs
-those ids for the episode's ``memory_item_ids`` and for the record's ``retrieved_ids``.
+retrieves and remembers the ``(task_key, item_ids, hit, confidence)`` it produced;
+``after_task`` needs those ids for the episode's ``memory_item_ids`` and for the record's
+``retrieved_ids``, and the attempt itself needs the confidence hook.
 Re-retrieving inside ``after_task`` would be cheap but WRONG: by then the store may hold a
 lesson minted from this very task, so the second read could report items the prompt never
 contained. The pending state is therefore keyed by ``task_key`` and an ``after_task`` that
@@ -47,12 +48,26 @@ make "did this task get memory" (the column E1 is measured on) a lie that no rec
 :func:`crucible.run.driver.utc_now`, the one place an arm run reads one, so an episode, the
 lesson distilled from it, and a sleep fired immediately after all carry the same instant.
 
-**What is NOT wired here, deliberately.** The calibrator's ``should_abstain`` gate is
-consulted by nothing in this module: an attempt's ``status`` is decided by the search that
-made it, and rewriting it to ``"abstain"`` after the hidden oracle has already spoken would
-restate history rather than change a decision. Abstention that actually suppresses a
-submission has to live inside the search loop, where the decision is still live; recorded
-here so the omission is a documented choice and not an oversight.
+**Abstention is decided INSIDE the search, never restamped onto a record.** An attempt's
+``status`` is a decision the arm makes about its own submission, so it has to happen while
+the decision is still live -- before ``run_hidden`` answers. ``before_task`` therefore builds
+a :class:`_TaskConfidence` bound to this task's provenance class, and the driver threads it
+into ``attempt_task`` alongside the memory block; the search calibrates its best node's raw
+value score through it and applies the §6 gate
+(:func:`~crucible.uncertainty.conformal.Calibrator.should_abstain`, ``ABSTAIN_P = 0.2``) in
+place of the structural ``< 0.5`` compare. Rewriting ``status`` here in ``after_task``
+instead would restate history rather than change a decision, and is not done. The two
+thresholds are deliberately different rules -- see ``crucible.search.loop``'s module
+docstring.
+
+*The calibrator is trained on the RAW score, never on its own output.* The record's
+``confidence`` for A_full is the CALIBRATED p (the number the status decision used), so the
+raw score it was mapped from is no longer on the record -- ``_TaskConfidence`` remembers it
+(``calibrate`` is called exactly once per attempt, in the search's finalisation) and
+``after_task`` observes THAT. Feeding a calibrated p back into ``observe`` would fit the
+isotonic map against its own output, and the fit would drift toward the identity a little
+more with every task; that is the kind of self-confirming instrument this whole spike exists
+to avoid.
 """
 from __future__ import annotations
 
@@ -69,7 +84,7 @@ from crucible.memory.store import MemoryStore
 from crucible.run.arm import ArmConfig, attempt_task
 from crucible.run.driver import _mutated_unit
 from crucible.run.records import TaskRecord
-from crucible.search.loop import SearchResult
+from crucible.search.loop import SearchResult, TaskConfidence
 from crucible.sleep.loop import (SLEEP_THRESHOLD_DEFAULT, ServerAdapter, SleepController,
                                  SleepRecord, VllmAdapterLoader)
 from crucible.sleep.registry import AdapterRegistry
@@ -115,7 +130,10 @@ class ArmHooks(Protocol):
     it; every other arm passes ``None`` and the driver stays byte-identical to S2.
 
     ``before_task`` returns the memory block for this attempt's prompts (``None`` = no
-    memory, never ``""``). ``after_task`` returns ``(retrieved_ids, adapter_id)`` for the
+    memory, never ``""``); ``task_confidence`` returns the calibration hook it just built for
+    the same task, which the driver threads into ``attempt_task`` beside the block. They are
+    two calls rather than one tuple so ``before_task``'s pinned return type stays what the
+    driver actually passes as ``memory``. ``after_task`` returns ``(retrieved_ids, adapter_id)`` for the
     driver to stamp onto the record via ``dataclasses.replace`` -- the hooks never mutate a
     record themselves, because a frozen record that only the driver writes is what makes
     "the file traces attempt order" true. ``between_tasks`` is the sleep check.
@@ -127,10 +145,37 @@ class ArmHooks(Protocol):
 
     def before_task(self, unit: Unit, taskspec: TaskSpec) -> str | None: ...
 
+    def task_confidence(self) -> "TaskConfidence | None": ...
+
     def after_task(self, unit: Unit, taskspec: TaskSpec, record: TaskRecord,
                    result: SearchResult, now: str) -> tuple[tuple[str, ...], str | None]: ...
 
     def between_tasks(self, solved_task_keys: list[str], now: str) -> None: ...
+
+
+class _TaskConfidence:
+    """One task's calibrated confidence + abstention gate -- the search's ``TaskConfidence``.
+
+    Bound to ONE provenance class (``(retrieval_hit, phase)``) at ``before_task`` time, so the
+    search never has to know what a provenance class is. ``calibrate`` REMEMBERS the raw score
+    it was handed (``self.raw``): the record keeps the calibrated value, so this is the only
+    surviving copy of the calibrator's own input, and ``observe`` must be trained on that --
+    see the module docstring.
+    """
+
+    def __init__(self, calibrator: Calibrator, cls: str) -> None:
+        self._calibrator = calibrator
+        self.cls = cls
+        self.raw: float | None = None
+
+    def calibrate(self, score: float) -> float:
+        """Calibrated P(hidden pass) for ``score`` in this class; records ``score`` as raw."""
+        self.raw = score
+        return self._calibrator.confidence(score, self.cls)
+
+    def should_abstain(self, p: float) -> bool:
+        """The pre-reg §6 gate for an already-calibrated ``p`` (``ABSTAIN_P``, inclusive)."""
+        return self._calibrator.should_abstain(p, self.cls)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -140,6 +185,12 @@ class _Pending:
     task_key: str
     item_ids: tuple[str, ...]
     hit: bool
+    """Whether anything was retrieved. Kept beside ``confidence`` (whose ``cls`` already
+    encodes it) because it is the value the VALUE MODEL was given as its retrieval-hit
+    feature, and a record of what was fed to each organ is worth more than one derived
+    field."""
+
+    confidence: _TaskConfidence
 
 
 class FullHooks:
@@ -189,13 +240,29 @@ class FullHooks:
         """
         block = retrieve(self._store, taskspec.unit_id, taskspec.family)
         hit = block.block is not None
-        self._pending = _Pending(taskspec.task_key, block.item_ids, hit)
+        cls = provenance_class(hit, taskspec.phase)
+        self._pending = _Pending(taskspec.task_key, block.item_ids, hit,
+                                 _TaskConfidence(self._calibrator, cls))
         self._value.begin_task(taskspec.family, hit)
         return block.block
+
+    def task_confidence(self) -> _TaskConfidence:
+        """The calibration hook ``before_task`` just built -- the driver threads it into the
+        attempt so the abstention decision is made on a CALIBRATED number, before the hidden
+        oracle runs. Raises if no task is open: a silently absent hook would put A_full back
+        on the raw ``< 0.5`` rule with nothing in the records to show it."""
+        if self._pending is None:
+            raise ValueError("task_confidence() with no task open -- call before_task first")
+        return self._pending.confidence
 
     def after_task(self, unit: Unit, taskspec: TaskSpec, record: TaskRecord,
                    result: SearchResult, now: str) -> tuple[tuple[str, ...], str | None]:
         """Write the episode (always), the lesson (verified only), and learn from the outcome.
+
+        By the time this runs the abstention decision is already made and recorded: the
+        search applied ``task_confidence()`` before ``run_hidden``, so ``record.confidence``
+        is the CALIBRATED p and ``record.status`` is the §6 gate's verdict. Nothing here
+        re-decides either.
 
         Returns ``(retrieved_ids, adapter_id)`` for the driver to stamp. ``adapter_id`` is
         the registry's latest ACCEPTED adapter, read now rather than at ``before_task``:
@@ -221,9 +288,15 @@ class FullHooks:
             )
         self._pending = None
 
-        cls = provenance_class(pending.hit, taskspec.phase)
-        confidence = self._calibrator.confidence(record.confidence, cls)
-        episode = self._episode(taskspec, record, result, pending, now, confidence)
+        cls = pending.confidence.cls
+        # The record's confidence IS the calibrated p when the search used the hook; the raw
+        # score it came from survives only on the closure. Fall back to the record only when
+        # nothing calibrated (no search ran through the hook) -- then the two are the same
+        # number and the fallback is exact, not a guess.
+        raw = pending.confidence.raw
+        if raw is None:
+            raw = record.confidence
+        episode = self._episode(taskspec, record, result, pending, now, record.confidence)
         self._store.write_episode(episode)
 
         if episode.verified and episode.landed_module is not None:
@@ -236,7 +309,7 @@ class FullHooks:
 
         if record.hidden_pass is not None:           # measured, so it can be learned from
             self._value.update_by_id(result.best_node_id, record.hidden_pass)
-            self._calibrator.observe(record.confidence, cls, record.hidden_pass)
+            self._calibrator.observe(raw, cls, record.hidden_pass)
 
         return pending.item_ids, self._registry.latest_accepted()
 
@@ -263,9 +336,10 @@ class FullHooks:
         ``landed_module`` is the submitted module when the codec produced one, else ``None``
         ("nothing landed", not an empty module). ``last_verified_at`` is set only for a
         verified episode: the hidden suite just checked that claim, and for an unverified one
-        there is no claim to have checked. ``confidence`` is the CALIBRATED P(hidden pass)
-        for this attempt as the organ believed it just BEFORE this outcome was folded in --
-        a real number the run can be audited against, not a mint-time constant.
+        there is no claim to have checked. ``confidence`` is the record's own confidence --
+        for A_full the CALIBRATED P(hidden pass) the status decision was made on, carried
+        verbatim rather than re-calibrated (composing the isotonic map with itself would make
+        the episode's number mean nothing at all).
         """
         verified = episode_verified(record.hidden_pass, record.tampered)
         return EpisodicRecord(

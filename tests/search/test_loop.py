@@ -26,6 +26,7 @@ from crucible.search import loop as loop_mod
 from crucible.search.loop import SearchResult, search
 from crucible.search.rex import RexScheduler
 from crucible.stream.units import Unit, sha256_text
+from crucible.uncertainty.conformal import ABSTAIN_P
 
 # The mutated (buggy) module: ``a - b`` fails both visible tests. Its correct repair is ``a + b``.
 BUG = "def add(a, b):\n    return a - b\n"
@@ -389,3 +390,97 @@ def test_search_result_from_dict_loads_an_s2_era_dict():
     r = SearchResult.from_dict(s2)
     assert r.root_prompt == ""
     assert r.symptom_failed == ()
+
+
+# --- S3: the per-task calibrated-confidence hook (A_full's abstention) --------
+#
+# Abstention is a decision the ARM makes about its own submission, so it is decided here --
+# inside the search, before the hidden oracle runs -- and never restamped onto a finished
+# record. The hook changes exactly two things: the confidence NUMBER reported (calibrated
+# rather than raw) and the confidence HALF of the abstain rule (the §6 gate at ABSTAIN_P =
+# 0.2 rather than the structural < 0.5 compare). It changes no prompt, no execution, and no
+# REx ordering -- REx still ranks on the raw value score.
+#
+# The two thresholds are deliberately different rules (see both modules' docstrings), so
+# there is NO cross-module equality pin here. What is pinned instead is that the calibrated
+# path really consults ``should_abstain``: a mutant whose ``should_abstain`` always returns
+# False is killed by ``test_calibrated_confidence_below_abstain_p_abstains``.
+
+
+class FixedConfidence:
+    """A ``TaskConfidence`` stand-in: a fixed calibrated value + the REAL ABSTAIN_P gate.
+
+    ``calibrate`` records what it was handed, so a test can assert the loop calibrates the
+    RAW value score (the number the calibrator must later be trained on) rather than
+    something it already transformed.
+    """
+
+    def __init__(self, p: float) -> None:
+        self.p = p
+        self.calibrated: list[float] = []
+
+    def calibrate(self, score: float) -> float:
+        self.calibrated.append(score)
+        return self.p
+
+    def should_abstain(self, p: float) -> bool:
+        return p < ABSTAIN_P
+
+
+@pytest.mark.timeout(60)
+def test_explicit_confidence_none_reproduces_the_s2_search_exactly(monkeypatch):
+    # A_noMem byte-identity, the same guard the memory threading carries: an absent hook and
+    # an explicit None must both leave every prompt and every result field exactly as S2's.
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    p1 = ProbeProposer()
+    r1 = search(_unit(), p1, ConstantValue(0.3), seed=13, k=4, width=2)
+    p2 = ProbeProposer()
+    r2 = search(_unit(), p2, ConstantValue(0.3), seed=13, k=4, width=2, confidence=None)
+    assert p1.prompts == p2.prompts
+    assert r1.to_dict() == r2.to_dict()
+    # ... and the S2 rule really is the raw one: raw 0.3 < 0.5 with reward 0.0 -> abstain.
+    assert r1.status == loop_mod.ABSTAIN and r1.confidence == pytest.approx(0.3)
+
+
+@pytest.mark.timeout(60)
+def test_calibrated_confidence_rescues_a_raw_abstain(monkeypatch):
+    # THE composition case: raw 0.3 would abstain under the structural < 0.5 compare, but a
+    # calibrated 0.35 clears the §6 gate (>= ABSTAIN_P), so the arm believes its submission.
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    hook = FixedConfidence(0.35)
+    r = search(_unit(), ProbeProposer(), ConstantValue(0.3), seed=13, k=4, width=2,
+               confidence=hook)
+    assert r.visible_reward < loop_mod.ABSTAIN_THRESHOLD      # the reward half WOULD have fired
+    assert r.status == loop_mod.BELIEVED
+    assert r.confidence == pytest.approx(0.35)                # the value the decision used
+    assert hook.calibrated == [0.3]                           # calibrated the RAW score, once
+
+
+@pytest.mark.timeout(60)
+def test_calibrated_confidence_below_abstain_p_abstains(monkeypatch):
+    # The reverse, and the mutation pin: a ``should_abstain`` that always returns False makes
+    # this the only failing test in the file.
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    r = search(_unit(), ProbeProposer(), ConstantValue(0.3), seed=13, k=4, width=2,
+               confidence=FixedConfidence(0.05))
+    assert r.status == loop_mod.ABSTAIN
+    assert r.confidence == pytest.approx(0.05)
+
+
+@pytest.mark.timeout(60)
+def test_the_reward_half_still_gates_the_calibrated_rule(monkeypatch):
+    # Composes, does not replace: reward 0.5 is NOT below ABSTAIN_THRESHOLD, so even a
+    # calibrated confidence of 0.0 cannot abstain. A hook that replaced the whole rule would.
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    r = search(_unit(), ScriptedProposer([[A_HALF]]), ConstantValue(0.3), seed=13, k=2,
+               width=1, confidence=FixedConfidence(0.0))
+    assert r.visible_reward == pytest.approx(0.5)
+    assert r.status == loop_mod.BELIEVED
+
+
+@pytest.mark.timeout(120)
+def test_a_full_visible_pass_is_never_an_abstain_however_low_the_calibration():
+    r = search(_unit(), ScriptedProposer([[FIX]]), ConstantValue(0.3), seed=1, k=2, width=1,
+               confidence=FixedConfidence(0.0))
+    assert r.visible_reward == 1.0
+    assert r.status == loop_mod.VERIFIED_VISIBLE

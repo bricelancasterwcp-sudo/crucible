@@ -43,11 +43,23 @@ region into a single flat block at the local mean instead. This is a hard mathem
 property, not an implementation gap; see ``tests/uncertainty/test_conformal.py``'s module
 docstring for how the ``recalibrate`` tests are built around it.
 
-**Abstention composes, it does not replace.** :func:`should_abstain`'s :data:`ABSTAIN_P`
-gate is a SECOND, independent abstention signal layered on top of the search loop's
-existing ``crucible.search.loop.ABSTAIN_THRESHOLD`` rule (reward + raw value confidence
-both low) -- callers are expected to abstain if EITHER rule fires, not to swap one for the
-other.
+**Abstention composes with the reward rule, and REPLACES the raw-confidence compare (S3
+wiring).** The search loop's abstain rule has two halves. Its REWARD half (``reward <
+crucible.search.loop.ABSTAIN_THRESHOLD``, structurally ``0.5``) is unconditional and this
+module never touches it -- an arm still cannot abstain on a submission that is passing most
+of its visible suite. Its CONFIDENCE half is what changes: for an arm with no calibration
+hook the loop compares a RAW value-model score against that same structural ``0.5``, and for
+a calibrated arm (A_full, via ``crucible.run.full``'s per-task hook) the loop calls
+:meth:`Calibrator.should_abstain` on a CALIBRATED probability at :data:`ABSTAIN_P` (``0.2``)
+instead.
+
+The two numbers are deliberately different rules, not one constant that drifted: ``0.5`` on
+a raw ranking score means "the ranker does not believe this either", while ``0.2`` on a
+calibrated P(hidden pass) is the pre-registered §6 gate. Comparing a calibrated probability
+against ``0.5`` would abstain on most of a hard stream (at p0 ~ 0.27 the honest calibrated
+probability is usually below a half), and comparing a raw score against ``0.2`` would
+abstain almost never. Neither module re-derives the other's threshold, and there is
+deliberately no cross-module equality pin between them.
 
 **The fit is a pure function of the observation multiset, not of insertion order.**
 :func:`_fit_isotonic` pools every pair sharing the same score into one weighted-mean point
@@ -72,8 +84,8 @@ PROVENANCE_CLASSES: tuple[str, ...] = ("hit-p1", "hit-p2", "nohit-p1", "nohit-p2
 MIN_OBS = 10
 
 # Inclusive gate, same convention as spec Section 4.7's `landing >= 0.95`: p == ABSTAIN_P
-# exactly does NOT abstain. Composes with (does not replace) the search loop's own
-# ABSTAIN_THRESHOLD rule -- see the module docstring.
+# exactly does NOT abstain. Composes with the search loop's REWARD half and replaces its
+# raw-confidence compare for a calibrated arm -- see the module docstring.
 ABSTAIN_P = 0.2
 
 
@@ -201,8 +213,11 @@ class Calibrator:
 
         ``cls`` is accepted for signature symmetry with :meth:`confidence` (and for a
         future per-class threshold, if S4 needs one); :data:`ABSTAIN_P` is currently a
-        single module-level constant applied the same way to every class. This composes
-        with, and does not replace, the search loop's own ``ABSTAIN_THRESHOLD`` rule.
+        single module-level constant applied the same way to every class.
+
+        This is the CONFIDENCE half of ``crucible.search.loop._status``'s abstain rule for a
+        calibrated arm; the reward half (``< ABSTAIN_THRESHOLD``) still has to hold too. See
+        the module docstring for why ``0.2`` here and ``0.5`` there are two different rules.
         """
         del cls  # not read yet -- see the docstring
         return p < ABSTAIN_P

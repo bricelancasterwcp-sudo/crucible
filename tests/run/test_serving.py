@@ -114,6 +114,22 @@ def test_serve_9b_carries_s1_fp8_flags():
     assert s.port == 8010
 
 
+def test_serve_1_5b_proposer_carries_a2_flags():
+    # A2 (docs/findings/S2-ceiling-pilot.md §7-§8): Qwen2.5-Coder-1.5B-Instruct, chat-served
+    # by the client -- but the vllm-serve surface is the same OpenAI server as the 2B, so it
+    # gets the 2B's proven flag shape (2B-parity defaults, to be confirmed live at first serve).
+    s = SERVE["Qwen/Qwen2.5-Coder-1.5B-Instruct"]
+    assert isinstance(s, ServeSpec)
+    assert s.served_name == "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    assert s.hf_id == "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    assert s.extra_args == [
+        "--max-model-len", "8192",
+        "--gpu-memory-utilization", "0.6",
+        "--enable-lora", "--max-lora-rank", "32",
+    ]
+    assert s.port == 8010
+
+
 def test_serve_command_prefixes_vllm_and_names_the_model():
     argv = serve_command("Qwen/Qwen3.5-9B")
     assert argv[:3] == ["vllm", "serve", "lovedheart/Qwen3.5-9B-FP8"]
@@ -122,6 +138,16 @@ def test_serve_command_prefixes_vllm_and_names_the_model():
     assert argv[-2:] == ["--port", "8010"]
     # every S1 flag rides through, in order
     assert "--enforce-eager" in argv
+
+
+def test_serve_command_for_a2_proposer():
+    argv = serve_command("Qwen/Qwen2.5-Coder-1.5B-Instruct")
+    assert argv[:3] == ["vllm", "serve", "Qwen/Qwen2.5-Coder-1.5B-Instruct"]
+    assert "--served-model-name" in argv
+    name_idx = argv.index("--served-model-name") + 1
+    assert argv[name_idx] == "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    assert argv[-2:] == ["--port", "8010"]
+    assert "--enable-lora" in argv
 
 
 def test_serve_script_disables_flashinfer_sampler():

@@ -11,7 +11,9 @@ module owns the two halves the unit tests can pin without a GPU:
   ``lovedheart/Qwen3.5-9B-FP8`` repo (bf16 9B ~18 GiB does not fit) with ``--enforce-eager``
   (CUDA-graph capture OOMs beside 12 GiB of FP8 weights on the 16 GiB card) at util 0.90; the
   2B runs bf16 at util 0.6 with runtime-LoRA enabled. The served *name* is stamped as the
-  arm's model id and later identity-asserted (:mod:`crucible.proposer.identity`).
+  arm's model id and later identity-asserted (:mod:`crucible.proposer.identity`). Amendment A2
+  (docs/findings/S2-ceiling-pilot.md §7-§8) adds ``Qwen2.5-Coder-1.5B-Instruct`` as the small-arm
+  proposer, 2B-parity flags, unmeasured on this model until first serve.
 
 * ``wait_ready`` -- poll ``GET {base}/v1/models`` until the server answers 200 (ready), the
   launcher pid dies (crashed -> give up), or the timebox elapses. The pid-death check
@@ -58,6 +60,21 @@ SERVE: dict[str, ServeSpec] = {
     "Qwen/Qwen3.5-9B": ServeSpec(
         "Qwen/Qwen3.5-9B", "lovedheart/Qwen3.5-9B-FP8",
         ["--max-model-len", "4096", "--gpu-memory-utilization", "0.90", "--enforce-eager"],
+    ),
+    # A2 proposer (docs/findings/S2-ceiling-pilot.md §7-§8): the 2B (Qwen3.5-2B, a VL-base)
+    # degenerates on the full-module-rewrite codec and cannot clear the §4.7 landing gate; the
+    # 1.5B coder, chat-served, clears it at 1.00. Chat-vs-completions is a CLIENT concern
+    # (crucible.proposer.client applies the template over /v1/chat/completions) -- the vllm-serve
+    # surface underneath is the same OpenAI server either way, so this entry mirrors the 2B's
+    # flag shape. bf16 ~3.1 GiB (this model is ~5x smaller than the 2B), so util 0.6 is ample
+    # headroom, not a tight fit; LoRA flags are kept (not yet exercised) for S3's planned
+    # LoRA-attach re-verify on this model (S2-ceiling-pilot.md §7 cost item 3 -- attach was
+    # proven on the 2B, not this one). These are 2B-parity defaults, unmeasured on this model --
+    # to be confirmed live at first serve, which happens right after this table entry lands.
+    "Qwen/Qwen2.5-Coder-1.5B-Instruct": ServeSpec(
+        "Qwen/Qwen2.5-Coder-1.5B-Instruct", "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+        ["--max-model-len", "8192", "--gpu-memory-utilization", "0.6",
+         "--enable-lora", "--max-lora-rank", "32"],
     ),
 }
 

@@ -17,6 +17,8 @@ These construct ``Node``/``Candidate`` directly -- no sandbox, no GPU -- so they
 a plain ``pytest`` with nothing wrapped.
 """
 
+import pytest
+
 from crucible.run.types import Candidate
 from crucible.search.node import Node
 from crucible.value.model import Value
@@ -67,6 +69,39 @@ def test_score_handles_none_mean_logprob_and_self_certainty():
     node = _node(mean_logprob=None, self_certainty=None)
     s = value.score(node)
     assert 0.0 <= s <= 1.0
+
+
+def test_none_features_score_identically_to_explicit_zero():
+    # Stronger than "doesn't raise": train first so the mean_logprob/self_certainty
+    # weights are nonzero, so a mutant that lets None leak into the dot product (or maps
+    # it to anything but 0.0) diverges from the explicit-0.0 node instead of coincidentally
+    # matching it at the untrained w=0 starting point.
+    value = OnlineValue()
+    trainer_node = _node("train\n", mean_logprob=-1.0, self_certainty=0.3, depth=2)
+    for _ in range(5):
+        value.update(trainer_node, outcome=True)
+
+    none_node = _node("none-case\n", mean_logprob=None, self_certainty=None, depth=1)
+    zero_node = _node("zero-case\n", mean_logprob=0.0, self_certainty=0.0, depth=1)
+    assert value.score(none_node) == value.score(zero_node)
+
+
+def test_score_stays_in_unit_interval_with_extreme_restored_weights():
+    # MINOR 1: pins the stable-sigmoid split in _sigmoid (the x >= 0 vs x < 0 branches) --
+    # restore() injects weights directly, bypassing training, so this reaches magnitudes
+    # SGD alone would take forever to produce.
+    value = OnlineValue()
+    dim = len(value.w)
+
+    value.restore({"w": [1000.0] * dim, "n_scores": 0, "n_updates": 0})
+    s_hi = value.score(_node())
+    assert 0.0 <= s_hi <= 1.0
+    assert s_hi > 0.999
+
+    value.restore({"w": [-1000.0] * dim, "n_scores": 0, "n_updates": 0})
+    s_lo = value.score(_node())
+    assert 0.0 <= s_lo <= 1.0
+    assert s_lo < 0.001
 
 
 # --- update: moves the prediction toward the observed outcome -----------------
@@ -122,6 +157,25 @@ def test_begin_task_defaults_before_any_call_do_not_raise():
     value = OnlineValue()
     s = value.score(_node())
     assert 0.0 <= s <= 1.0
+
+
+def test_begin_task_raises_on_unknown_family():
+    # THE mutation guard for the Important finding: an unrecognised family must fail
+    # loudly, not silently degrade to an all-zero one-hot indistinguishable from
+    # "begin_task was never called".
+    value = OnlineValue()
+    with pytest.raises(ValueError):
+        value.begin_task("NOPE", retrieval_hit=False)
+
+
+def test_begin_task_raises_on_exc_specifically():
+    # EXC exists in the canonical taxonomy (crucible.stream.families.FAMILIES) but has no
+    # slot in this module's feature schema -- it yields no mutants on the real corpus
+    # (crucible/stream/compose.py:204). Pinned by name so a future FAMILIES edit that
+    # accidentally re-admits EXC gets caught here, not just by the generic-unknown test.
+    value = OnlineValue()
+    with pytest.raises(ValueError):
+        value.begin_task("EXC", retrieval_hit=False)
 
 
 # --- update_by_id: the driver's deferred-outcome path --------------------------

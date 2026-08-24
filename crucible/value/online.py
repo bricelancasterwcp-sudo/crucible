@@ -35,6 +35,14 @@ from the current context rather than trusting a possibly-stale cache entry.
 that were cached at score time -- even if :meth:`begin_task` has since moved on to a new
 task's context. This is intentional: the outcome being folded in belongs to the task the
 node was scored under, not whatever task happens to be active when the outcome lands.
+
+**FAMILIES is a strict subset of the canonical taxonomy** (``crucible.stream.families.FAMILIES``,
+which also lists ``EXC``): EXC yields no mutants on the real corpus (see
+``crucible/stream/compose.py:204``) so it carries no training signal and has no slot here,
+while CONST is kept despite rung-1 streams carrying none of it, for schema stability --
+:meth:`begin_task` enforces this asymmetry by raising loudly on any family outside this
+module's ``FAMILIES``, EXC included, rather than silently degrading it to an all-zero
+one-hot indistinguishable from "begin_task was never called".
 """
 from __future__ import annotations
 
@@ -85,7 +93,15 @@ class OnlineValue:
         Called by the A_full driver once before each task; the search loop never calls
         this -- it only sees ``score``/``update``, both of which read whatever context was
         last set here (or the safe all-zero default, before the first call).
+
+        Raises ``ValueError`` if ``family`` is not one of :data:`FAMILIES` -- matching the
+        repo's exclusion-is-explicit idiom (``crucible.stream.families``). An unrecognised
+        family, including ``EXC`` (present in the canonical taxonomy but absent from this
+        feature schema -- see the module docstring), must fail loudly rather than silently
+        collapsing to an all-zero one-hot indistinguishable from no ``begin_task`` call.
         """
+        if family not in FAMILIES:
+            raise ValueError(f"unknown family {family!r}; must be one of {FAMILIES}")
         self._family = family
         self._retrieval_hit = retrieval_hit
 

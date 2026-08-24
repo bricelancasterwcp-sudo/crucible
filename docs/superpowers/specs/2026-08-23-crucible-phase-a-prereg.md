@@ -110,7 +110,7 @@ Before lock, run `assay`'s landing probe (already on this box) against each serv
 Computable in seconds; all must pass or the stream is rebuilt:
 1. Phase-1 vs phase-2 `m1`/`m2` sets: identical family distribution (by construction — assert it), and the distributions of (a) number of killing tests, (b) unit source length, (c) `kills_by_timeout` rate lie within 2·SE of each other.
 2. Novel units are disjoint from phase-1 units (assert).
-3. Every class has `m1.site ≠ m2.site` (assert).
+3. Every class has `m1.site ≠ m2.site` (assert). *[Clarified 2026-08-23, per §11, with the rung-1 build (see `2026-08-23-crucible-s2.5-stack2-design.md`): at rung ≥ 1 a task carries a site-**set** (two sites), and this assertion is **disjointness of m1's and m2's site-sets**. Original wording kept above; no threshold changes.]*
 4. **Ceiling / contamination pilot:** run **A_noMem** on a 30-task pilot drawn from phase 1. If success > 0.70, the stream is too easy for E1 to be detectable; apply the **hardening ladder in this order, one rung at a time, re-running the pilot**: (i) two-site mutants; (ii) MBPP+-only seeds; (iii) α-rename identifiers (semantics-preserving); (iv) tier-2 real repos via SWE-smith procedural bugs. The rung reached is recorded and fixed at lock.
 5. **Live control:** A_noMem runs **first and completely**. Its second-minus-first delta must lie within ±Δ_min of zero. If not, the stream is confounded: fix, rebuild, rerun A_noMem from zero. A_full never runs until this passes. (This is why it is a preflight and not a re-roll — no A_full number has been read.)
 

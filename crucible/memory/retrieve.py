@@ -1,13 +1,23 @@
 """Retrieval: what A_full's prompt block actually contains (design spec §3, task 4 brief).
 
-*Class-exact, then family-wide -- never merged.* ``retrieve`` calls ``store.semantic_for``
-first; only if that returns nothing at all does it fall back to ``store.semantic_family``
-(the "novel task" path, spec §3: "a NOVEL task can only ever get family-level lessons").
-The two pools are never combined -- an exact-class hit, even a single one, means the
-family-wide pool is never consulted. This also gates the episodic exemplar: it is
-class-specific by construction (see below), so it is only even considered on the
-exact-class path, and omitted outright on the family-fallback path -- not replaced by a
-family-wide substitute, just absent.
+*Class-exact, then family-wide -- never merged, and the trigger is POST-FILTER.*
+``retrieve`` calls ``store.semantic_for`` first; it falls back to ``store.semantic_family``
+(the "novel task" path, spec §3: "a NOVEL task can only ever get family-level lessons")
+unless the exact-class pool has at least one LIVE (non-falsified) lesson. A class whose
+only lessons are all falsified is therefore treated the same as a class with no lessons at
+all -- both fall back to family-wide -- rather than surfacing zero lessons when a
+perfectly good family-wide fallback exists. The two pools are never combined -- when the
+class path IS taken (>=1 live exact-class lesson), the family-wide pool is never
+consulted.
+
+*The episodic exemplar is decoupled from the lesson path.* It does NOT follow whichever
+pool the lessons came from. It is included whenever a verified, unfalsified episode
+exists for this exact (unit_id, family) class -- regardless of whether the lessons above
+came from the class-exact or the family-wide pool -- and absent only when no such episode
+exists (the genuinely-novel-unit case: no class content at all). A class with only
+falsified lessons can therefore still produce a class exemplar alongside family-wide
+lessons: falsification of a *lesson* says nothing about whether the *episode* it was
+templated from is still a fact about this unit.
 
 *Honest storage means retrieval does its own filtering.* ``store.py``'s module docstring
 is explicit that ``semantic_for``/``semantic_family``/``episodes`` return falsified rows
@@ -54,6 +64,7 @@ in an ``item_id`` tie-break. Two calls against the same store state return equal
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from .distill import render_lesson
@@ -84,13 +95,16 @@ def retrieve(store: MemoryStore, unit_id: str, family: str) -> RetrievedBlock:
     """See the module docstring for the full policy. Pure function of the store's current
     contents -- no writes, no clock, so two calls against the same state are equal."""
     exact = store.semantic_for(unit_id, family)
-    on_exact_class_path = bool(exact)
-    pool = exact if on_exact_class_path else store.semantic_family(family)
-
-    eligible = [item for item in pool if item.falsified_by is None]
+    live_exact = [item for item in exact if item.falsified_by is None]
+    if live_exact:
+        eligible = live_exact
+    else:
+        family_pool = store.semantic_family(family)
+        eligible = [item for item in family_pool if item.falsified_by is None]
     lessons = _rank_lessons(eligible)[:2]
 
-    exemplar = _pick_exemplar(store, unit_id, family) if on_exact_class_path else None
+    # Decoupled from the lesson path above -- see module docstring.
+    exemplar = _pick_exemplar(store, unit_id, family)
 
     lesson_parts: list[_Part] = [(render_lesson(item), item.item_id) for item in lessons]
     exemplar_part: _Part | None = None
@@ -134,14 +148,14 @@ def _render_exemplar(landed_module: str) -> str:
     return f"{_EXEMPLAR_HEADER}\n```python\n{landed_module}\n```"
 
 
-def _budget_candidates(lesson_parts: list[_Part], exemplar_part: _Part | None):
+def _budget_candidates(lesson_parts: list[_Part], exemplar_part: _Part | None) -> Iterator[list[_Part]]:
     """Yield part-lists in strict drop order: everything, then exemplar dropped, then the
     second lesson also dropped. Never yields an empty list -- see the module docstring's
     None-vs-zero note."""
-    full = list(lesson_parts) + ([exemplar_part] if exemplar_part else [])
+    full = list(lesson_parts) + ([exemplar_part] if exemplar_part is not None else [])
     if full:
         yield full
-    if exemplar_part and lesson_parts:
+    if exemplar_part is not None and lesson_parts:
         yield list(lesson_parts)
     if len(lesson_parts) >= 2:
         yield lesson_parts[:1]

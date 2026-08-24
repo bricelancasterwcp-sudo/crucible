@@ -1,5 +1,7 @@
 """Tests for two-site mutant composition: span overlap and the wrong-site trap."""
 
+import pytest
+
 from crucible.stream.mutants import Mutant, MutantSpec, enumerate_specs, make_mutant
 from crucible.stream.stack import compose_pair, spans_overlap
 from crucible.stream.units import Unit, sha256_text
@@ -33,6 +35,11 @@ def test_compose_pair_flips_both_sites():
     assert (st.operator, st.occurrence, st.span) == (
         st.components[0].operator, st.components[0].occurrence, st.components[0].span)
     assert st.key == sha256_text(u.src_hash + "\n" + st.diff) and st.unit_id == u.unit_id
+    # The key equality above is tautological on its own -- it re-derives the key from the
+    # diff the mutant carries. What makes it an identity is the diff BASE: the one hashed
+    # diff is against the ORIGINAL source, so BOTH component edits show up as removals.
+    # Diffing against the intermediate (late.mutated_src) would hide the late edit.
+    assert "-    x = a + b" in st.diff and "-    y = c + d" in st.diff
 
 
 def test_compose_pair_survives_operator_created_match():
@@ -86,3 +93,24 @@ def test_compose_pair_drops_an_ambiguous_span_match():
     assert early.span < late.span and "a + 0" in early.mutated_src
     assert early.span == _single(u, "NumberReplacer", 0).span   # the ambiguity, pinned
     assert compose_pair(u, early, late) is None
+
+
+@pytest.mark.parametrize("sentinel", ["original", "early_single", "noncompiling", "no_match"])
+def test_compose_pair_drops_a_composite_that_is_not_a_new_bug(monkeypatch, sentinel):
+    # Sibling of the brief's no-op test above, which pins only the `late.mutated_src`
+    # member of the "differs from" guard. These cover the other two members, the compile
+    # guard, and the `stacked is None` branch -- each of which otherwise survives deletion.
+    u = _unit("def f(a, b, c, d):\n    x = a + b\n    y = c + d\n    return x, y\n")
+    op = "ReplaceBinaryOperator_Add_Sub"
+    ma, mb = _single(u, op, 0), _single(u, op, 1)
+    assert ma.span < mb.span      # so `ma` is the EARLY component after internal ordering
+    returns = {
+        "original": u.module_src,       # the two edits cancelled -- not a bug at all
+        "early_single": ma.mutated_src,  # the late edit vanished -- equals the early single
+        "noncompiling": "def f(:\n",    # composite does not compile -- fails for the wrong reason
+        "no_match": None,               # the operator did not match after all
+    }[sentinel]
+    import crucible.stream.stack as stack
+    monkeypatch.setattr(stack, "mutate_code", lambda src, op_, occ: returns)
+    assert compose_pair(u, ma, mb) is None
+    assert compose_pair(u, mb, ma) is None   # argument order cannot smuggle it past

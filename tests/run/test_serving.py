@@ -107,7 +107,7 @@ def test_serve_9b_carries_s1_fp8_flags():
     assert s.served_name == "Qwen/Qwen3.5-9B"
     assert s.hf_id == "lovedheart/Qwen3.5-9B-FP8"  # FP8, Blackwell-native (S1 §7)
     assert s.extra_args == [
-        "--max-model-len", "4096",
+        "--max-model-len", "8192",
         "--gpu-memory-utilization", "0.90",
         "--enforce-eager",
     ]

@@ -59,7 +59,11 @@ SERVE: dict[str, ServeSpec] = {
     # weights); util 0.90, 4k context -> ~14.2 GiB. Served-name asserted as the plain id (S1 §7).
     "Qwen/Qwen3.5-9B": ServeSpec(
         "Qwen/Qwen3.5-9B", "lovedheart/Qwen3.5-9B-FP8",
-        ["--max-model-len", "4096", "--gpu-memory-utilization", "0.90", "--enforce-eager"],
+        # 4096 (the S1-measured value) is incompatible with amendment A1: the codec prompt
+        # routinely exceeds 4096-2048 tokens, and vLLM 400s the request. At util 0.90 the KV
+        # cache holds ~13.4k tokens (server-reported 3.27x concurrency at 4096), so 8192 fits
+        # with 1.6x headroom -- and the landing probe / arms send one request at a time.
+        ["--max-model-len", "8192", "--gpu-memory-utilization", "0.90", "--enforce-eager"],
     ),
     # A2 proposer (docs/findings/S2-ceiling-pilot.md §7-§8): the 2B (Qwen3.5-2B, a VL-base)
     # degenerates on the full-module-rewrite codec and cannot clear the §4.7 landing gate; the

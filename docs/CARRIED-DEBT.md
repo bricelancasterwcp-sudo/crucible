@@ -71,3 +71,17 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
   have run the whole experiment at 77% parseable — measurements dominated by parse failures, not
   reasoning — before a single arm ran. It also caught that the "fix" is a pinned-value amendment,
   not a silent retune. Exactly the confound §4.7/§11 was written to stop.
+- **UPDATE (2026-08-23) — remedy investigated; clean fix identified, awaiting proposer greenlight.**
+  Amendment **A1** applied: pinned `max_new_tokens` 1024→2048 (single source `client.MAX_NEW_TOKENS`,
+  guard-tested; spec §3). Effect 2B 0.767→0.867, 1.5B 0.80→0.92. **2B ruled out** — its residual
+  is repetition-degeneration (`no-fence`, salvage rescues 0/5), and decoding penalties backfire
+  (`repetition_penalty=1.1`→0.233 all-empty from prompt-penalisation; `frequency_penalty=0.3`→0.633
+  with 8 syntax errors from code distortion). **Clean fix = the §2 1.5B coder served in CHAT mode:**
+  the 1.5B's residual was ~6% empties = an *instruct* model served raw (no chat template); via
+  `/v1/chat/completions` it lands **20/20** (raw 16/20). Recommended config: proposer
+  `Qwen2.5-Coder-1.5B-Instruct`, chat-served, `max_new_tokens 2048` — no codec/salvage/penalty
+  change. Costs (why it's Brice's call, not a silent swap): switches the pre-registered *primary*
+  proposer (2B→1.5B); needs a chat-completions path in `client.py` (logprobs shape differs — TDD +
+  review); S3 must re-verify LoRA-attach on the 1.5B before A_full (spec calls it LoRA-safe, but
+  unverified). Bigger-model alt = Apache **7B** coder (3B is `license:other`, excluded). Full record:
+  `docs/findings/S2-ceiling-pilot.md §7`.

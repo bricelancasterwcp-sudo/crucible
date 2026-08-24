@@ -133,3 +133,17 @@ def test_construction_asserts_served_identity():
             VLLMProposer(url, MODEL)
     finally:
         srv.shutdown()
+
+
+def test_default_max_tokens_is_the_pinned_budget():
+    """The pinned S3 token budget (amendment A1) reaches the server by default and is guarded
+    against silent drift: a bare generate() sends exactly MAX_NEW_TOKENS, whose value is 2048."""
+    from crucible.proposer.client import MAX_NEW_TOKENS
+
+    assert MAX_NEW_TOKENS == 2048  # the amended pin; changing it is a pre-registration decision
+    srv, url, H = _serve()
+    try:
+        VLLMProposer(url, MODEL).generate("p", n=1, seed=1)
+        assert H.captured["max_tokens"] == MAX_NEW_TOKENS
+    finally:
+        srv.shutdown()

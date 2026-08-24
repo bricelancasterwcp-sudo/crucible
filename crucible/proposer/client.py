@@ -37,6 +37,14 @@ from crucible.run.types import Candidate
 # keeps a wedged server from hanging a run forever without tripping on legitimate long batches.
 _REQUEST_TIMEOUT_S = 600.0
 
+# The pinned per-completion token budget (spec S3). Amendment A1 (2026-08-23, pre-lock): raised
+# 1024 -> 2048 after the S4.7 landing pre-check found the 1024 cap was the dominant landing
+# failure -- the full-module-rewrite codec re-emits the module AND the whole visible test
+# harness in one block, which routinely overflows 1024 tokens and truncates the completion with
+# its fence still open (recorded in docs/findings/S2-ceiling-pilot.md). Named, not inlined, so
+# the pin lives in one place and a test can guard it against silent drift.
+MAX_NEW_TOKENS = 2048
+
 
 @runtime_checkable
 class Proposer(Protocol):
@@ -45,7 +53,7 @@ class Proposer(Protocol):
     model: str
 
     def generate(
-        self, prompt: str, *, n: int, seed: int, max_tokens: int = 1024, temperature: float = 0.7
+        self, prompt: str, *, n: int, seed: int, max_tokens: int = MAX_NEW_TOKENS, temperature: float = 0.7
     ) -> list[Candidate]: ...
 
 
@@ -81,7 +89,7 @@ class VLLMProposer:
         self.model = model
 
     def generate(
-        self, prompt: str, *, n: int, seed: int, max_tokens: int = 1024, temperature: float = 0.7
+        self, prompt: str, *, n: int, seed: int, max_tokens: int = MAX_NEW_TOKENS, temperature: float = 0.7
     ) -> list[Candidate]:
         """POST one completion request for ``n`` samples; decode each choice to a ``Candidate``."""
         payload = {

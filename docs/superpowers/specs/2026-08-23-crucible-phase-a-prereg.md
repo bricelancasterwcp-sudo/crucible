@@ -47,9 +47,12 @@ All arms see the **identical task sequence** (same seeds, same order), the same 
 
 ## 3. Sampler and serving (pinned)
 
-- Temperature 0.7, top_p 0.95, max_new_tokens 1024, **thinking mode OFF** for all arms. Seed = hash(run_id, task_key, node_id, k) — deterministic and recorded.
+- Temperature 0.7, top_p 0.95, max_new_tokens **2048** [amended pre-lock — see A1], **thinking mode OFF** for all arms. Seed = hash(run_id, task_key, node_id, k) — deterministic and recorded.
 - One inference server process per arm-run; served model identity (path + digest) asserted by the driver before the first task and re-asserted after every sleep reload. Mismatch = infrastructure failure, run aborts.
 - vLLM is the intended server (n-best, logprobs, `/v1/load_lora_adapter` hot-swap). **llama.cpp `llama-server` is the committed fallback** (already on this box; `POST /lora-adapters` hot-swap; `n_probs`). Which one is used is recorded in the lens (§7). The sm_120 install is timeboxed to one working day in Slice 1; on expiry, fall back.
+
+**Amendments (pre-lock; §12 protocol — date + old value):**
+- **A1 (2026-08-23): `max_new_tokens` 1024 → 2048.** The S4.7 landing pre-check (run on the real 450-task stream before any arm) found the 1024 cap was the *dominant* codec-landing failure: the full-module-rewrite codec (§4.4) asks the model to re-emit the module **and** reproduce the whole visible test harness in one block, which routinely exceeds 1024 tokens, truncating the completion with its fence still open (rejected as `no-fence`). At the pinned 1024, Qwen3.5-2B landed 0.767 and Qwen2.5-Coder-1.5B-Instruct 0.80 — both below the 0.95 gate; raising the 1.5B to 2048 lifted landing to 0.92. This is the §4.7-sanctioned "codec fix, before any arm runs." Old value 1024. Evidence: `docs/findings/S2-ceiling-pilot.md`. Single source: `crucible.proposer.client.MAX_NEW_TOKENS`.
 - Sleep is an explicit **stop-serve → train → evaluate adapter → reload** cycle (serving and training cannot co-reside on 14.5 GB usable VRAM).
 
 ## 4. Task stream

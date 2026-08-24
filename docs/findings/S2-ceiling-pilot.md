@@ -131,3 +131,62 @@ Spec §10 S2 exit: *"A_noMem pilot number recorded; rung fixed; B arms smoke-tes
 
 The build slice is done and merge-ready; the operational slice resumes once the operator picks
 a §4.7 remedy (§5) and approves the corresponding pin/codec amendment.
+
+---
+
+## 7. Remedy investigated (2026-08-23) — the clean fix is the 1.5B, chat-served
+
+After §5 was written, I applied the minimum amendment and measured the rest instead of
+guessing. All on the real 450-task stream, memory-capped.
+
+**Amendment A1 applied — `max_new_tokens` 1024 → 2048** (spec §3; single-sourced as
+`crucible.proposer.client.MAX_NEW_TOKENS`, guard-tested). Effect: 2B **0.767 → 0.867**, 1.5B
+**0.80 → 0.92**. Truncation was real; more budget helps both. Not enough on its own.
+
+**The 2B cannot clear the gate — and no decoding knob saves it.**
+- 2B @2048 residual failures are **all `no-fence` from repetition-degeneration** (opens the
+  fence, emits a header, then loops a token to the cap). Unclosed-fence **salvage rescues 0 of
+  5** — the bodies don't parse even trimmed. Salvage is therefore *not* the fix.
+- `repetition_penalty=1.1` → landing **0.233** (23/30 **empty**): vLLM's repetition penalty
+  also penalises *prompt* tokens, so with a long prompt it drives immediate-EOS. Wrong knob.
+- `frequency_penalty=0.3` → landing **0.633** (8/30 **syntax**): penalising generated
+  repetition distorts code's legitimate repetition (indentation, keywords) into parse errors.
+  Wrong knob.
+- Conclusion: Qwen3.5-2B (a Qwen3-VL *base*) is genuinely unsuited to the full-module-rewrite
+  codec. This is the §4.7 gate doing its job — catching it *before* any arm ran.
+
+**The 1.5B coder, served correctly, clears it cleanly.** The 1.5B's residual at 2048 was ~6%
+**empty completions** — the tell that an *instruct* model was being served in raw
+`/v1/completions` mode **without its chat template**. Serving via `/v1/chat/completions`
+(vLLM applies the template) removes every empty:
+
+| Qwen2.5-Coder-1.5B-Instruct, n=20, 2048 tok | landing | fails |
+|---|---|---|
+| RAW `/v1/completions` (current client) | 0.800 | 4 empty |
+| CHAT `/v1/chat/completions` | **1.000** | none |
+
+### Recommended configuration (clears §4.7, no codec change, no sampler hack)
+- **Proposer: `Qwen2.5-Coder-1.5B-Instruct`** — the pre-registered §2 small-proposer
+  alternative; §4.7's "baseline fallback (§2)" for the 2B's landing failure. Apache-2.0.
+- **Serving: chat-completions** (apply the chat template — correct for an instruct model).
+- **`max_new_tokens` 2048** (A1, done). No unclosed-fence salvage or sampler penalty needed.
+
+### What this costs (why it is the operator's call, not a silent swap)
+1. It **switches the pre-registered *primary* proposer** (2B → 1.5B). Pre-registered as an
+   option, but a lock-record-level choice with a documented rationale (this section).
+2. It needs a **chat-completions path in `crucible/proposer/client.py`** — a change to a
+   core, contract-critical module (the search's `mean_logprob`/`self_certainty` come from the
+   completions-shaped `logprobs`; chat logprobs have a different shape). TDD + review warranted.
+3. **S3 consequence:** A_full (the thesis arm) trains a LoRA on the proposer. LoRA-attach was
+   verified on the **2B**, not the 1.5B. The spec (§2) calls the 1.5B "LoRA-safe" (plain
+   `Qwen2ForCausalLM`), so this is low-risk, but it is **unverified** and must be re-checked in
+   S3 before A_full runs.
+
+Alternative if a *more capable* proposer is wanted: **Qwen2.5-Coder-7B-Instruct is Apache-2.0**
+(the 3B is `license: other` / Qwen-Research — excluded by the MIT/Apache/BSD-only invariant and
+by spec §2). The 7B would clear landing with the most margin but needs quantization to fit 16 GB
+alongside a LoRA, and amends §2's proposer identity — a heavier change than the 1.5B.
+
+**Status unchanged: pilot not yet run; p0 unmeasured.** Awaiting the operator's pick of proposer
+(1.5B chat-served [recommended] vs 7B vs other) before implementing the serving path and running
+the pilot.

@@ -164,3 +164,19 @@ def test_serve_script_disables_flashinfer_sampler():
 def test_serve_script_is_executable():
     script = Path(__file__).resolve().parents[2] / "scripts" / "serve_model.sh"
     assert os.access(script, os.X_OK)
+
+
+def test_serve_14b_fallback_carries_awq_repo_and_eager():
+    """The §2 big-arm fallback (activated 2026-08-24): served name is the §2 model id, the
+    repo is the official AWQ quant, and eager mode + 8192 context mirror the 9B's 16-GiB
+    constraints. Membership here is what lets serve_model.sh serve what §2 names."""
+    spec = SERVE["Qwen/Qwen2.5-Coder-14B-Instruct"]
+    assert spec.hf_id == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
+    assert "--enforce-eager" in spec.extra_args
+    assert spec.extra_args[spec.extra_args.index("--max-model-len") + 1] == "8192"
+
+
+def test_serve_command_for_14b_fallback():
+    argv = serve_command("Qwen/Qwen2.5-Coder-14B-Instruct")
+    assert argv[:3] == ["vllm", "serve", "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"]
+    assert "Qwen/Qwen2.5-Coder-14B-Instruct" in argv  # served-model-name = §2 id

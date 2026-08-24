@@ -75,6 +75,18 @@ SERVE: dict[str, ServeSpec] = {
     # LoRA-attach re-verify on this model (S2-ceiling-pilot.md §7 cost item 3 -- attach was
     # proven on the 2B, not this one). These are 2B-parity defaults, unmeasured on this model --
     # to be confirmed live at first serve, which happens right after this table entry lands.
+    # §2 big-arm FALLBACK, activated 2026-08-24 (findings S2.5-stack2.md §6-§7): the §2
+    # primary Qwen3.5-9B fails the §4.7 landing gate raw (0.867: thinking-leak + fragments)
+    # AND chat-served (0.70 — the base model's default template invites more rumination).
+    # §2 names the 14B coder as the fallback; the Q4_K_M GGUF path is blocked on nvcc on
+    # this box, so the official Apache-2.0 AWQ quant is the servable variant (~9.5 GiB,
+    # AWQ kernels ship in the vLLM wheel). Instruct model => the client chat-serves it
+    # (the A2 lesson). enforce-eager for the same reason as the 9B: CUDA-graph capture
+    # beside big weights on the 16 GiB card.
+    "Qwen/Qwen2.5-Coder-14B-Instruct": ServeSpec(
+        "Qwen/Qwen2.5-Coder-14B-Instruct", "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
+        ["--max-model-len", "8192", "--gpu-memory-utilization", "0.90", "--enforce-eager"],
+    ),
     "Qwen/Qwen2.5-Coder-1.5B-Instruct": ServeSpec(
         "Qwen/Qwen2.5-Coder-1.5B-Instruct", "Qwen/Qwen2.5-Coder-1.5B-Instruct",
         ["--max-model-len", "8192", "--gpu-memory-utilization", "0.6",

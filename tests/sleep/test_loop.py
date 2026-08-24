@@ -164,8 +164,13 @@ class _Rig:
 
 
 def _rig(tmp_path: Path, *, verified: int = 3, counts: tuple[int, ...] = (10, 10),
-         threshold: int = 3, seed: int = 7, units: dict[str, Unit] | None = None) -> _Rig:
-    """A store holding ``verified`` verified episodes, wired to fakes with scripted ``counts``."""
+         threshold: int = 3, seed: int = 7, units: dict[str, Unit] | None = None,
+         prior_rows: int = 0) -> _Rig:
+    """A store holding ``verified`` verified episodes, wired to fakes with scripted ``counts``.
+
+    ``prior_rows`` writes that many registry rows BEFORE the controller is constructed --
+    the resume case, where sleeps already happened in an earlier process.
+    """
     tmp_path.mkdir(parents=True, exist_ok=True)
     store = MemoryStore(tmp_path / "mem.sqlite3")
     for i in range(verified):
@@ -175,6 +180,9 @@ def _rig(tmp_path: Path, *, verified: int = 3, counts: tuple[int, ...] = (10, 10
     server = FakeServerAdapter()
     runner = FakeSliceRunner(counts)
     registry = AdapterRegistry(tmp_path / "adapters.jsonl")
+    for i in range(prior_rows):
+        registry.record(f"ad-prior{i:012d}", "0" * 64, BASE_DIGEST, False,
+                        f"2026-08-23T0{i}:00:00Z")
     adapters_dir = tmp_path / "adapters"
     unit_loader = _SpyUnitLoader(units)
     controller = SleepController(store, trainer, server, runner, registry,
@@ -389,6 +397,53 @@ def test_reject_does_not_reset_the_counter_so_the_next_check_trains_again(tmp_pa
     assert second is not None
     assert second.sleep_index == 1
     assert len(rig.trainer.calls) == 2
+    rig.store.close()
+
+
+def test_accepted_sleep_snapshots_the_total_rather_than_advancing_by_threshold(tmp_path: Path):
+    # Review finding 2. An accepted sleep consumes EVERY verified episode that existed when
+    # it fired (5), not `threshold` of them -- so one new episode afterwards leaves 6 - 5 = 1
+    # < 3 and the next check must stay quiet. A `+= threshold` mutant snapshots 3 instead,
+    # leaving a phantom surplus of 2 and firing this second sleep early.
+    rig = _rig(tmp_path, verified=5, threshold=3, counts=(10, 10, 10, 10))
+    first = rig.controller.maybe_sleep(list(SOLVED_20), now="2026-08-24T12:00:00Z")
+    assert first.accepted is True and first.episodes_selected == 5
+
+    rig.store.write_episode(_episode("tk-05", created_at="2026-08-24T10:05:00Z",
+                                     root_prompt="prompt 5", landed_module="# module 5\n"))
+    second = rig.controller.maybe_sleep(list(SOLVED_20), now="2026-08-24T13:00:00Z")
+
+    assert second is None
+    assert len(rig.trainer.calls) == 1
+    rig.store.close()
+
+
+# ------------------------------------------------------------------------------- resume
+
+def test_sleep_index_is_seeded_from_the_registrys_committed_rows(tmp_path: Path):
+    # Review finding 1: a resumed controller must not restart the index at 0 -- that would
+    # stamp duplicate sleep_index values AND re-issue index 0's slice draw on a different run.
+    resumed = _rig(tmp_path / "resumed", verified=3, threshold=3, prior_rows=2)
+    fresh = _rig(tmp_path / "fresh", verified=3, threshold=3)
+
+    resumed_record = resumed.controller.maybe_sleep(list(SOLVED_20), now="2026-08-24T12:00:00Z")
+    fresh_record = fresh.controller.maybe_sleep(list(SOLVED_20), now="2026-08-24T12:00:00Z")
+
+    assert resumed_record.sleep_index == 2
+    assert fresh_record.sleep_index == 0
+    # Same seed, same solved set: only the index differs, and it must move the draw.
+    assert resumed_record.slice_task_keys != fresh_record.slice_task_keys
+    resumed.store.close()
+    fresh.store.close()
+
+
+def test_sleep_index_keeps_counting_from_the_seeded_start(tmp_path: Path):
+    rig = _rig(tmp_path, verified=3, threshold=3, counts=(12, 10, 12, 10), prior_rows=2)
+
+    first = rig.controller.maybe_sleep(list(SOLVED_20), now="2026-08-24T12:00:00Z")
+    second = rig.controller.maybe_sleep(list(SOLVED_20), now="2026-08-24T13:00:00Z")
+
+    assert (first.sleep_index, second.sleep_index) == (2, 3)
     rig.store.close()
 
 

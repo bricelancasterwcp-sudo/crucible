@@ -222,6 +222,32 @@ def test_registry_creates_parent_directories(tmp_path):
     assert registry.latest_accepted() == "ad-x"
 
 
+# --- count() (Task 10 review finding 1: the sleep loop's resume seed) ---------
+
+def test_count_is_zero_for_an_empty_registry_and_counts_every_outcome(tmp_path):
+    # One row per sleep cycle, accepted OR rejected -- the sleep loop seeds its sleep_index
+    # from this, so a rejected cycle must count exactly as much as an accepted one.
+    registry = AdapterRegistry(tmp_path / "registry.jsonl")
+    assert registry.count() == 0
+
+    registry.record("ad-a", "hash-a", "base-1", accepted=False, created_at="2026-08-24T10:00:00Z")
+    registry.record("ad-b", "hash-b", "base-1", accepted=True, created_at="2026-08-24T11:00:00Z")
+
+    assert registry.count() == 2
+
+
+def test_count_does_not_count_a_torn_final_line(tmp_path):
+    # Same tolerance _read_all applies: that record() call never committed, so the sleep it
+    # belonged to did not complete either and must not advance the resumed sleep index.
+    path = tmp_path / "registry.jsonl"
+    registry = AdapterRegistry(path)
+    registry.record("ad-valid", "hash-valid", "base-1", accepted=True, created_at="2026-08-24T10:00:00Z")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write('{"adapter_id": "ad-torn", "episode_set_h')
+
+    assert registry.count() == 1
+
+
 # --- torn-line tolerance (review finding 2 fix) ------------------------------
 
 def test_latest_accepted_tolerates_a_torn_final_line(tmp_path):

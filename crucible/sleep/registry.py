@@ -133,6 +133,17 @@ class AdapterRegistry:
             records.append(AdapterRecord.from_dict(payload))
         return records
 
+    def count(self) -> int:
+        """How many rows have been committed -- one per sleep cycle, accepted or rejected.
+
+        The sleep loop seeds its ``sleep_index`` from this on a resume (see
+        ``crucible.sleep.loop``): every cycle appends exactly one row here, so the row count
+        IS the number of sleeps this registry has seen. A torn final line is not counted --
+        ``_read_all`` drops it, and that ``record`` call never committed a row, so the sleep
+        it belonged to did not complete either.
+        """
+        return len(self._read_all())
+
     def latest_accepted(self) -> str | None:
         """The most recently recorded ``accepted=True`` adapter id, or ``None`` if none yet.
 

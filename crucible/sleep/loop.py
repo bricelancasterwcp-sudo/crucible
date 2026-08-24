@@ -19,6 +19,29 @@ re-deriving the subtraction inline). ``_last_accepted_count`` starts at 0, so a 
 built over a store that ALREADY holds ``threshold`` verified episodes sleeps on its first
 check: from this controller's point of view those episodes have never trained anything.
 
+*Resume is a supported mode, and only PART of this controller's state survives it
+(review finding 1).* ``crucible.run.driver`` is resumable at task granularity, so a
+``SleepController`` can legitimately be constructed part-way through a run. ``_sleep_index``
+is therefore seeded at construction from ``registry.count()`` -- every sleep appends exactly
+one row, so the committed row count IS the number of sleeps that already happened. That is
+the load-bearing half: without it a resumed run would re-issue index 0's slice draw (grading
+the new candidate on the same sample the pre-crash run used) and stamp duplicate
+``sleep_index`` values on records that are not the same sleep. The other two pieces of state
+deliberately do NOT survive, and both fail conservatively:
+
+- ``_last_accepted_count`` restarts at 0, so the first post-resume check counts the whole
+  verified history again and fires one sleep a continuous run would not have fired. The cost
+  is one extra consolidation cycle, gated exactly like every other -- it can waste a training
+  run, never accept a worse adapter.
+- ``_last_refalsified_at`` restarts at ``None``, so that first post-resume sleep re-checks
+  every live item instead of only the stale ones. More re-execution, never less.
+
+Persisting either would mean a second on-disk state file whose staleness is itself a failure
+mode; the honest trade is to restart them and say so here. Note for the design doc's "a
+replay sleeps at identical points" (§1): that holds for a REPLAY FROM ZERO -- same stream,
+same seed, same task order gives the same trigger points and the same slice draws. A RESUMED
+run is not a replay and shifts by the extra sleep above.
+
 *What the refalsify batch covers, and why it is two clauses.* (1) Every semantic item cited
 by an episode entering SFT -- the claims the training set itself rests on, re-checked before
 they are baked into an adapter. (2) Every retrieval-eligible (non-falsified) item that has
@@ -36,6 +59,10 @@ that moment regardless of what the gate decided afterwards. An item is stale whe
 ``last_verified_at`` is ``None`` or predates that watermark; before the first sleep the
 watermark is ``None`` and every live item is stale, which is the honest starting position
 (nothing has been re-checked yet).
+
+Staleness compares timestamps LEXICOGRAPHICALLY, which is only valid because every ``now``
+in this codebase is a fixed-width, ``Z``-suffixed UTC ISO-8601 string (``2026-08-24T12:00:00Z``);
+mixed UTC offsets or variable-width fractional seconds would silently break the ordering.
 
 *Enumerating the items to re-check goes through the episodes' families.* ``MemoryStore``
 exposes no "every semantic item" query -- only ``semantic_for(unit_id, family)`` and
@@ -227,7 +254,7 @@ class SleepRecord:
     slice_before: int
     slice_after: int
     accepted: bool
-    refalsify: dict
+    refalsify: dict[str, int]
     gpu_s: float | None
     created_at: str
 
@@ -272,7 +299,8 @@ class SleepController:
         self._seed = seed
         self._last_accepted_count = 0
         self._last_refalsified_at: str | None = None
-        self._sleep_index = 0
+        # Seeded from disk, not from zero -- see the module docstring's resume note.
+        self._sleep_index = registry.count()
 
     def maybe_sleep(self, solved_task_keys: list[str], now: str) -> SleepRecord | None:
         """Sleep if enough verified episodes have accumulated; return the record, else ``None``.
@@ -298,12 +326,19 @@ class SleepController:
         accepted = (before - after) <= ACCEPT_MAX_DROP
 
         if accepted:
-            self._server.load(adapter_dir, adapter_id)
+            # Resolved at the call site so the absolute-path invariant VllmAdapterLoader
+            # documents is true by construction, whatever the Trainer seam handed back.
+            self._server.load(Path(adapter_dir).resolve(), adapter_id)
             self._registry.record(adapter_id, set_hash, BASE_DIGEST, True, now)
+            # A SNAPSHOT of the total, never an advance-by-threshold: a sleep consumes every
+            # verified episode that existed when it fired, not `threshold` of them (review
+            # finding 2). Advancing by threshold would leave a phantom surplus behind and
+            # fire the next sleep early, on episodes already consolidated.
             self._last_accepted_count = self._store.verified_count()
         else:
-            # No server call and no counter reset: the loser never serves, and the episodes
-            # it failed to consolidate stay unconsolidated (see the module docstring).
+            # No server call and no counter reset: a rejected adapter is never SELECTED as
+            # the serving adapter (a real SliceRunner must load it to measure `after` at
+            # all), and the episodes it failed to consolidate stay unconsolidated.
             self._registry.record(adapter_id, set_hash, BASE_DIGEST, False, now)
 
         self._sleep_index += 1
@@ -335,7 +370,11 @@ class SleepController:
         return [targets[item_id] for item_id in sorted(targets)]
 
     def _is_stale(self, item: SemanticItem) -> bool:
-        """Retrieval-eligible and not re-checked since the previous sleep."""
+        """Retrieval-eligible and not re-checked since the previous sleep.
+
+        The comparison below is lexicographic on ISO-8601 strings, valid only for the
+        fixed-width, ``Z``-suffixed UTC form every timestamp in this codebase uses.
+        """
         if item.falsified_by is not None:
             return False  # not retrieval-eligible: retrieval filters these out entirely
         if self._last_refalsified_at is None:

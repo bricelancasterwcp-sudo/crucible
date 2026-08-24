@@ -11,6 +11,7 @@ as failures. ``infra_rate`` reports them separately. Each check below is mutatio
 * Dropping the per-kind measured-only filter breaks ``test_per_kind_rates_are_measured_only``
   -- ``second`` becomes 1/2 instead of 1/1.
 """
+import json
 from dataclasses import fields
 
 import pytest
@@ -123,3 +124,32 @@ def test_arm_lens_to_dict_is_complete():
     # Dropping any field from to_dict makes this FAIL.
     lens = build_lens(_mixed())
     assert set(lens.to_dict()) == {f.name for f in fields(ArmLens)}
+
+
+# --- S3 (Task 11): adapter lineage --------------------------------------------------------
+#
+# ``adapter_ids`` is the DISTINCT set of adapters that stamped this arm's records, in
+# first-seen (attempt) order -- the lens's answer to "which adapters served this run".
+# ``None`` (the base model, before the first accepted sleep) is not an adapter and never
+# appears. Order is attempt order, never sorted, so the sequence reads as the run's
+# adapter history.
+
+def test_arm_lens_defaults_adapter_ids_to_empty():
+    assert build_lens(_mixed()).adapter_ids == ()
+
+
+def test_adapter_ids_are_distinct_and_in_first_seen_order():
+    recs = [
+        _task(task_key="k1", adapter_id=None),
+        _task(task_key="k2", adapter_id="ad-b"),
+        _task(task_key="k3", adapter_id="ad-b"),
+        _task(task_key="k4", adapter_id="ad-a"),
+        _task(task_key="k5", adapter_id="ad-b"),
+    ]
+    assert build_lens(recs).adapter_ids == ("ad-b", "ad-a")
+
+
+def test_arm_lens_round_trips_with_adapter_ids():
+    lens = build_lens([_task(adapter_id="ad-b")])
+    back = ArmLens.from_dict(json.loads(json.dumps(lens.to_dict())))
+    assert back == lens and back.adapter_ids == ("ad-b",)

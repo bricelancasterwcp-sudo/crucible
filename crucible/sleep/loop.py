@@ -302,6 +302,16 @@ class SleepController:
         # Seeded from disk, not from zero -- see the module docstring's resume note.
         self._sleep_index = registry.count()
 
+    @property
+    def threshold(self) -> int:
+        """The verified-episode trigger this controller was configured with (read-only).
+
+        Exposed so the caller that WIRED the controller (``crucible.run.full``) can report
+        what a run is configured with without keeping a second copy of the number that could
+        drift from the one the trigger actually uses.
+        """
+        return self._threshold
+
     def maybe_sleep(self, solved_task_keys: list[str], now: str) -> SleepRecord | None:
         """Sleep if enough verified episodes have accumulated; return the record, else ``None``.
 

@@ -12,12 +12,22 @@ Coercing that ``None`` to ``False`` would silently turn "we don't know" into "it
 and bias every rate the lens computes, so ``from_dict`` restores it verbatim (``cls(**d)``,
 no coercion) and ``to_dict`` never drops it. That property is what the mutation check bites.
 
-Every field on both records is a JSON-native scalar (``str``/``float``/``int``/``bool``/
-``None``) -- there are no tuple or enum fields -- so ``to_dict`` is a plain ``asdict`` and
-``from_dict`` a plain ``cls(**d)``, exact inverses with nothing to reshape. The jsonl files
-follow the S1 store convention (``crucible/stream/store.py``): one JSON object per line,
+``ExecRecord``'s fields are all JSON-native scalars (``str``/``float``/``int``/``bool``/
+``None``), so its ``to_dict`` is a plain ``asdict`` and its ``from_dict`` a plain
+``cls(**d)``. ``TaskRecord`` carries ONE tuple (``retrieved_ids``, added for S3's A_full),
+so its pair reshapes exactly that field and nothing else. The jsonl files follow the S1
+store convention (``crucible/stream/store.py``): one JSON object per line,
 ``sort_keys=True`` so identical records are identical bytes, UTF-8 pinned so the bytes do
 not depend on the writer's locale.
+
+*The two S3 fields are trailing, defaulted, and read with ``.get``.* ``retrieved_ids`` and
+``adapter_id`` are stamped only by the A_full hooks (:mod:`crucible.run.full`); every S2
+arm leaves them at their defaults, and an S2-era ``task_records.jsonl`` line -- written
+before either field existed -- still loads, because ``from_dict`` reads both with ``.get``
+rather than requiring the key. That matters on the resume path: the driver reads back the
+records an earlier process wrote and would otherwise refuse a run it started itself.
+``retrieved_ids == ()`` means "nothing was retrieved" and ``adapter_id is None`` means "the
+base model served this attempt" -- the None-vs-zero discipline applied to both.
 """
 from __future__ import annotations
 
@@ -64,6 +74,10 @@ class TaskRecord:
     was actually run, ``None`` when the attempt was never scored (infra failure, or not
     measured). ``tampered`` flags an attempt that reached the hidden oracle illegitimately.
     ``tokens`` and ``gpu_s`` are ``None`` when the serving path did not report them.
+
+    ``retrieved_ids`` (the memory items whose text was in this attempt's prompt) and
+    ``adapter_id`` (the sleep-trained adapter that served it, ``None`` for the base model)
+    are stamped by the A_full hooks alone -- see the module docstring.
     """
 
     task_key: str
@@ -83,16 +97,24 @@ class TaskRecord:
     tokens: int | None
     wall_s: float
     gpu_s: float | None
+    retrieved_ids: tuple[str, ...] = ()
+    adapter_id: str | None = None
 
     def to_dict(self) -> dict:
-        """JSON-ready form. Every field is a JSON-native scalar -- ``hidden_pass`` included,
-        ``None`` and all -- so ``asdict`` carries the whole record with nothing dropped."""
-        return asdict(self)
+        """JSON-ready form. Every field is carried -- ``hidden_pass`` included, ``None`` and
+        all -- with ``retrieved_ids`` as a list so a file round trip is exact."""
+        d = asdict(self)
+        d["retrieved_ids"] = list(self.retrieved_ids)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "TaskRecord":
-        """Inverse of :meth:`to_dict`. A plain ``cls(**d)`` restores ``hidden_pass=None`` as
-        ``None`` -- never coerced to ``False`` -- keeping "not measured" distinct from "failed"."""
+        """Inverse of :meth:`to_dict`. ``hidden_pass`` is restored verbatim -- never coerced
+        to ``False`` -- keeping "not measured" distinct from "failed"; the two S3 fields are
+        read with ``.get`` so an S2-era line still loads (see the module docstring)."""
+        d = dict(d)
+        d["retrieved_ids"] = tuple(d.get("retrieved_ids", ()))
+        d["adapter_id"] = d.get("adapter_id")
         return cls(**d)
 
 

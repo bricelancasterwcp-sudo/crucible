@@ -104,3 +104,39 @@ def test_written_lines_are_sorted_key_json(tmp_path):
     write_records(tmp_path, [_task()], [_exec()])
     line = (tmp_path / "task_records.jsonl").read_text(encoding="utf-8").splitlines()[0]
     assert line == json.dumps(json.loads(line), sort_keys=True)
+
+
+# --- S3 (Task 11): the two trailing fields A_full stamps ---------------------------------
+#
+# ``retrieved_ids`` is the memory column E1 is measured on (empty tuple <=> no-hit, the
+# None-vs-zero discipline applied to a sequence) and ``adapter_id`` is the sleep lineage the
+# lens reduces. Both are TRAILING and DEFAULTED, so every S2-era positional construction --
+# and every S2-era jsonl line, written before either field existed -- still means what it
+# meant. ``test_task_record_to_dict_is_complete`` above catches a field dropped from
+# ``to_dict`` automatically; these pin the tuple shape and the backward-compatible read.
+
+def test_task_record_defaults_the_s3_fields_to_empty_and_none():
+    t = _task()
+    assert t.retrieved_ids == () and t.adapter_id is None
+
+
+def test_task_record_s3_fields_round_trip_through_json():
+    t = _task(retrieved_ids=("sem-a", "sem-b"), adapter_id="ad-0123456789abcdef")
+    back = TaskRecord.from_dict(json.loads(json.dumps(t.to_dict())))
+    assert back == t
+    assert back.retrieved_ids == ("sem-a", "sem-b")   # a tuple, not the list JSON carries
+
+
+def test_task_record_reads_an_s2_era_line_that_predates_the_s3_fields():
+    d = _task().to_dict()
+    d.pop("retrieved_ids"); d.pop("adapter_id")
+    back = TaskRecord.from_dict(d)
+    assert back.retrieved_ids == () and back.adapter_id is None
+    assert back.hidden_pass is True                   # nothing else shifted
+
+
+def test_s3_fields_survive_the_filesystem_round_trip(tmp_path):
+    recs = [_task(retrieved_ids=("sem-a",), adapter_id="ad-1"),
+            _task(task_key="k2", retrieved_ids=(), adapter_id=None)]
+    write_records(tmp_path, recs, [])
+    assert read_task_records(tmp_path) == recs

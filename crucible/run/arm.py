@@ -75,8 +75,17 @@ class ArmConfig:
 # cannot silently serve the instruct model raw -- which would reproduce the ~6% empty
 # completions the §4.7 gate rejects and corrupt the very records the experiment scores. The
 # 9B baseline keeps chat=False pending its own §4.7 probe (may flip if that model is instruct).
+#
+# ``A_full`` is A_noMem's ArmConfig in every field that reaches the server: the SAME model,
+# the SAME serving surface, the SAME search budget and seed. That is deliberate and it is
+# the reason ArmConfig grows no memory/sleep/value columns -- ``ArmConfig`` is the SERVING
+# IDENTITY, and the two arms differ by the pre-registered column (memory + value v1 + sleep)
+# alone, which lives in the HOOKS the driver is handed (:mod:`crucible.run.full`). Putting a
+# `use_memory` flag here instead would make the arms differ in a second place that
+# ``attempt_task`` could read, and every honest comparison depends on it not being able to.
 ARMS: dict[str, ArmConfig] = {
     "A_noMem": ArmConfig("A_noMem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
+    "A_full": ArmConfig("A_full", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
     "B_search": ArmConfig("B_search", "Qwen/Qwen3.5-9B", True, chat=False),
     "B_naive": ArmConfig("B_naive", "Qwen/Qwen3.5-9B", False, chat=False),
 }
@@ -113,8 +122,9 @@ def _naive_attempt(cfg: ArmConfig, unit: Unit, proposer, value, *,
 
 
 def attempt_task(cfg: ArmConfig, unit: Unit, taskspec: TaskSpec, proposer, value,
-                 *, memory: str | None = None) -> tuple[TaskRecord, list[ExecRecord]]:
-    """Attempt ``taskspec``'s repair under arm ``cfg``; return its record + exec records.
+                 *, memory: str | None = None
+                 ) -> tuple[TaskRecord, list[ExecRecord], SearchResult]:
+    """Attempt ``taskspec``'s repair under arm ``cfg``; return record + exec records + result.
 
     Runs the search (or the single-shot control), takes the final submission, and computes
     THE OUTCOME via :func:`run_hidden` -- the driver-side hidden oracle, never charged, never
@@ -125,6 +135,15 @@ def attempt_task(cfg: ArmConfig, unit: Unit, taskspec: TaskSpec, proposer, value
     ``memory`` is the S3 retrieved-memory block, passed straight down to the search (or to the
     single-shot control). ``None`` -- the default, and what A_noMem and the B arms pass -- makes
     every prompt byte-for-byte its S2 self, so the arms differ only by the pre-registered column.
+
+    The third return value is the raw :class:`~crucible.search.loop.SearchResult`. The record
+    is a REDUCTION of it (it drops the root prompt, the submitted module and the symptom's
+    failing tests), and S3's memory organ needs exactly those three: an episode stores the
+    prompt sleep will train on and the module it landed, and a lesson cites the tests that
+    flipped. Recomputing them from the record is impossible and re-deriving them by re-running
+    anything is a second measurement of an attempt that already happened -- so the result
+    travels out with the record it summarises. S2 callers unpack the first two and are
+    otherwise unaffected.
     """
     if getattr(proposer, "model", None) != cfg.model:
         raise ValueError(f"arm {cfg.name!r} expects model {cfg.model!r}, "
@@ -153,4 +172,4 @@ def attempt_task(cfg: ArmConfig, unit: Unit, taskspec: TaskSpec, proposer, value
     # its ``infra_error`` is None (the hidden run's infra is the TaskRecord's, not this row's).
     execs = [ExecRecord(taskspec.task_key, cfg.name, result.best_node_id,
                         result.visible_reward, result.executions_charged > 0, wall_s, None)]
-    return record, execs
+    return record, execs, result

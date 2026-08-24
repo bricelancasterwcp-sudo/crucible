@@ -54,7 +54,14 @@ def _add_stream(sub) -> None:
 
 
 def _add_arm(sub) -> None:
-    """The S2 ``arm`` subcommands: pilot (ceiling) / run (one arm over a task set)."""
+    """The S2 ``arm`` subcommands: pilot (ceiling) / run (one arm over a task set).
+
+    ``SLEEP_THRESHOLD_DEFAULT`` is imported here rather than restated, the same way
+    ``_add_stream`` imports ``ALLOWED_RUNGS``: the number the CLI advertises is the number
+    the sleep trigger actually uses, and the import stays local to the one function that
+    needs it (this module defers every import out of its top level).
+    """
+    from crucible.sleep.loop import SLEEP_THRESHOLD_DEFAULT
     a = sub.add_parser("arm").add_subparsers(dest="acmd", required=True)
     pl = a.add_parser("pilot"); pl.add_argument("stream_dir", type=Path)
     pl.add_argument("--base-url", required=True); pl.add_argument("--model", default=DEFAULT_PILOT_MODEL)
@@ -68,6 +75,14 @@ def _add_arm(sub) -> None:
     rn.add_argument("--arm", required=True); rn.add_argument("--base-url", required=True)
     rn.add_argument("--tasks", default="phase1"); rn.add_argument("--out", type=Path, default=Path("runs"))
     rn.add_argument("--chat", action=argparse.BooleanOptionalAction, default=None)
+    # A_full only (every other arm ignores both). --memory-db defaults to None here, not to a
+    # path, because the real default (``<out>/<arm>/memory.sqlite3``) depends on two other
+    # flags; resolving it at parse time would bake in whatever --out happened to be declared
+    # first. --sleep-threshold's default is the spec's N (R-S3-3), imported rather than
+    # restated so the CLI cannot drift from the trigger it configures; the S3 exit smoke
+    # overrides it to 4 (spec S9).
+    rn.add_argument("--memory-db", type=Path, default=None)
+    rn.add_argument("--sleep-threshold", type=int, default=SLEEP_THRESHOLD_DEFAULT)
 
 
 def _run_stream(a) -> int:
@@ -140,9 +155,18 @@ def _task_keys(manifest, tasks: str) -> list[str]:
 
 
 def _arm_run(a) -> int:
-    """Run one named arm over the chosen task set and print where the records landed."""
+    """Run one named arm over the chosen task set and print where the records landed.
+
+    A_full -- and ONLY A_full -- gets the memory organ, value v1 and the sleep loop, wired as
+    the driver's ``hooks``. Every other arm passes ``hooks=None`` and keeps v0's
+    ``ConstantValue`` (spec S6: A_noMem's pilot already ran on it; arms differ by exactly the
+    pre-registered column). The gate is the arm NAME because ``ArmConfig`` is deliberately
+    memory-free -- see ``crucible.run.arm``'s ARMS comment -- and it is a hard gate: nothing
+    on the non-A_full path so much as opens a store.
+    """
     from crucible.run.arm import ARMS
     from crucible.run.driver import run_arm
+    from crucible.run.full import FULL_ARM, build_full_hooks
     from crucible.stream import store
     from crucible.value.model import ConstantValue
     if a.arm not in ARMS:
@@ -154,7 +178,14 @@ def _arm_run(a) -> int:
     if proposer is None:
         return PROPOSER_ERROR_EXIT
     keys = _task_keys(store.read_manifest(a.stream_dir), a.tasks)
-    out_path = run_arm(cfg, a.stream_dir, keys, proposer, ConstantValue(), a.out)
+    value, hooks = ConstantValue(), None
+    if cfg.name == FULL_ARM:
+        from crucible.value.online import OnlineValue
+        value = OnlineValue()
+        hooks = build_full_hooks(cfg, a.stream_dir, a.out, base_url=a.base_url, value=value,
+                                 chat=chat, memory_db=a.memory_db,
+                                 sleep_threshold=a.sleep_threshold)
+    out_path = run_arm(cfg, a.stream_dir, keys, proposer, value, a.out, hooks=hooks)
     print(f"records written to {out_path}"); return 0
 
 

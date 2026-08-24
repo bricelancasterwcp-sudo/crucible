@@ -45,7 +45,7 @@ class FakeProposer:
 
 def test_a_nomem_correct_repair_gives_hidden_pass_and_verified_visible():
     fake = FakeProposer(ARMS["A_noMem"].model, [CORRECT])
-    rec, execs = attempt_task(ARMS["A_noMem"], U, SPEC, fake, ConstantValue())
+    rec, execs, _result = attempt_task(ARMS["A_noMem"], U, SPEC, fake, ConstantValue())
     assert rec.hidden_pass is True
     assert rec.status == "verified_visible"
     assert rec.visible_reward == 1.0
@@ -56,7 +56,7 @@ def test_a_nomem_correct_repair_gives_hidden_pass_and_verified_visible():
 
 def test_b_naive_is_single_shot_one_generate_no_refinement():
     fake = FakeProposer(ARMS["B_naive"].model, [CORRECT])
-    rec, execs = attempt_task(ARMS["B_naive"], U, SPEC, fake, ConstantValue())
+    rec, execs, _result = attempt_task(ARMS["B_naive"], U, SPEC, fake, ConstantValue())
     assert len(fake.calls) == 1          # exactly one generate call: no refinement
     assert fake.calls[0]["n"] == 1       # single candidate
     assert rec.executions_charged <= 1
@@ -65,7 +65,7 @@ def test_b_naive_is_single_shot_one_generate_no_refinement():
 def test_visible_pass_hidden_fail_is_not_scored_as_pass():
     # THE INVARIANT: hidden_pass comes from run_hidden, never the visible reward.
     fake = FakeProposer(ARMS["A_noMem"].model, [DISCRIMINATOR])
-    rec, execs = attempt_task(ARMS["A_noMem"], U, SPEC, fake, ConstantValue())
+    rec, execs, _result = attempt_task(ARMS["A_noMem"], U, SPEC, fake, ConstantValue())
     assert rec.visible_reward == 1.0     # the submission DID pass every visible test
     assert rec.hidden_pass is False      # ... but the hidden oracle says it is wrong
 
@@ -75,7 +75,7 @@ def test_hidden_infra_error_leaves_hidden_pass_none(monkeypatch):
     infra = TestReport((), (), (), (), 0.0, "sandbox exploded")
     monkeypatch.setattr("crucible.run.arm.run_hidden", lambda *a, **k: infra)
     fake = FakeProposer(ARMS["A_noMem"].model, [CORRECT])
-    rec, execs = attempt_task(ARMS["A_noMem"], U, SPEC, fake, ConstantValue())
+    rec, execs, _result = attempt_task(ARMS["A_noMem"], U, SPEC, fake, ConstantValue())
     assert rec.hidden_pass is None
     assert rec.infra_error == "sandbox exploded"
 

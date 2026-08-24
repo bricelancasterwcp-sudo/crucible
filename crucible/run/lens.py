@@ -12,9 +12,15 @@ it is EXCLUDED from the success denominator, NEVER charged as a failure. Coercin
 
 The per-kind rates (``succ_phase1``/``second``/``novel``) apply the SAME measured-only
 filter, restricted to ``kind == "first"/"second"/"novel"``. Every rate is 0.0 on an empty
-denominator -- no ``ZeroDivisionError``. ``ArmLens`` is frozen; all its fields are
-JSON-native scalars, so ``to_dict`` is a plain ``asdict`` and ``from_dict`` a plain
-``cls(**d)``, exact inverses.
+denominator -- no ``ZeroDivisionError``. ``ArmLens`` is frozen; every field but the
+trailing ``adapter_ids`` is a JSON-native scalar, and that one tuple is the only thing
+``to_dict``/``from_dict`` reshape, so the pair stays exact inverses.
+
+``adapter_ids`` is A_full's sleep lineage: the DISTINCT adapter ids that stamped this arm's
+records, in first-seen (attempt) order -- the run's adapter history, not a set. ``None``
+(the base model, i.e. every attempt before the first accepted sleep, and every attempt of
+every arm that never sleeps) is not an adapter and never appears; an S2 arm's lens
+therefore carries the empty tuple.
 """
 from __future__ import annotations
 
@@ -39,14 +45,20 @@ class ArmLens:
     landing_rate: float
     abstain_rate: float
     infra_rate: float
+    adapter_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
-        """JSON-ready form. Every field is a JSON-native scalar, so ``asdict`` is exact."""
-        return asdict(self)
+        """JSON-ready form: ``adapter_ids`` becomes a list so a file round trip is exact."""
+        d = asdict(self)
+        d["adapter_ids"] = list(self.adapter_ids)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "ArmLens":
-        """Inverse of :meth:`to_dict`; no field needs coercion to restore equality."""
+        """Inverse of :meth:`to_dict`; ``adapter_ids`` is read with ``.get`` so a lens
+        written before the field existed still loads as the base-model run it was."""
+        d = dict(d)
+        d["adapter_ids"] = tuple(d.get("adapter_ids", ()))
         return cls(**d)
 
 
@@ -63,6 +75,9 @@ def build_lens(task_recs) -> ArmLens:
     restricted to ``kind == "first"/"second"/"novel"``. ``infra_rate`` = fraction with
     ``hidden_pass is None`` OR ``infra_error`` set. ``landing_rate`` = mean ``landed``,
     ``abstain_rate`` = fraction with ``status == "abstain"``. Empty input -> all rates 0.0.
+    ``adapter_ids`` = the distinct non-``None`` ``adapter_id`` values in first-seen order
+    (``dict.fromkeys`` preserves it); records order is never sorted, so this reads as the
+    run's adapter history.
 
     Raises ``ValueError`` if the records do not all share one arm.
     """
@@ -85,4 +100,5 @@ def build_lens(task_recs) -> ArmLens:
         landing_rate=_rate([r.landed for r in recs]),
         abstain_rate=_rate([r.status == "abstain" for r in recs]),
         infra_rate=_rate([r.hidden_pass is None or r.infra_error is not None for r in recs]),
+        adapter_ids=tuple(dict.fromkeys(r.adapter_id for r in recs if r.adapter_id is not None)),
     )

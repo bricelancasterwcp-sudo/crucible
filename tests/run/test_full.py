@@ -1,0 +1,594 @@
+"""Task 11 -- A_full: the hooks that turn the S2 driver into the memory arm.
+
+A_full is not a different driver. It is the SAME driver with three hook calls
+(:class:`crucible.run.full.ArmHooks`) and the memory/value/sleep organs behind them, so
+everything these tests pin is a wiring claim, not an algorithm claim -- the algorithms
+(retrieval, distillation, falsification, the value model, the calibrator, the sleep loop)
+already have their own suites.
+
+Five things here are load-bearing.
+
+*``hooks=None`` must leave the S2 arms untouched, argument list included.*
+``test_hooks_none_calls_attempt_task_with_the_s2_argument_list`` monkeypatches
+``attempt_task`` with a spy whose signature is EXACTLY S2's -- no ``**kwargs``, no
+``memory`` parameter -- so a driver that started passing ``memory=None`` unconditionally
+fails on the ``TypeError``, not on a subtle record diff. Its companion assertion (the
+records come back with ``retrieved_ids == ()`` and ``adapter_id is None``) pins that the
+``dataclasses.replace`` stamp is not applied when there are no hooks.
+
+*Lessons are written ONLY for verified episodes; episodes are written for every attempt.*
+``test_after_task_writes_a_lesson_only_for_a_verified_attempt`` is the (a) mutation pin:
+distilling an unverified episode mints a lesson from an attempt that never produced a
+working fix, and ``distill`` itself would raise -- so the mutant that removes the
+``verified`` gate does not merely fail this test, it crashes the arm.
+
+*The retrieved ids really travel from ``before_task`` to the record.*
+``test_after_task_returns_the_retrieved_ids_from_before_task`` and the end-to-end
+``test_full_drive_stamps_the_retrieved_ids_of_a_second_exposure`` are the (b) mutation pin:
+a hook that always returned ``()`` would leave "did this task get memory" unanswerable from
+the records, which is the column E1 is measured on.
+
+*The value model is trained ONLY on measured outcomes.* ``hidden_pass is None`` means the
+attempt was never scored; folding it in as a ``False`` would teach the model that infra
+failures are repair failures. Pinned on both sides (``..._updates_value_exactly_once...``
+and ``..._does_not_update_value_when_hidden_pass_is_none``), for the calibrator too.
+
+*Sleep fires BETWEEN tasks, and only the driver's own loop decides when.*
+``test_full_drive_fires_a_sleep_between_tasks_and_stamps_the_adapter`` runs the real
+driver over a real stream with fake GPU seams and asserts both halves: the trainer was
+called, and the records written AFTER the accepted sleep carry the new adapter id (the
+lens's adapter lineage comes from exactly that stamp).
+
+Run WRAPPED (R-T2-6): the drive tests build a stream and execute real sandbox attempts.
+"""
+from __future__ import annotations
+
+import gzip
+import json
+import pathlib
+from dataclasses import replace
+
+import pytest
+
+import crucible.run.driver as driver
+from crucible.memory.schema import content_id
+from crucible.memory.store import MemoryStore
+from crucible.run.arm import ARMS, ArmConfig
+from crucible.run.driver import run_arm, utc_now
+from crucible.run.full import (
+    ArmHooks,
+    DriverSliceRunner,
+    FullHooks,
+    RECALIBRATE_WINDOW,
+)
+from crucible.run.lens import build_lens
+from crucible.run.records import ExecRecord, TaskRecord, read_task_records
+from crucible.run.types import Candidate
+from crucible.search.loop import SearchResult
+from crucible.sleep.loop import FakeServerAdapter, FakeSliceRunner, SleepController, SleepRecord
+from crucible.sleep.registry import AdapterRegistry
+from crucible.sleep.train import FakeTrainer
+from crucible.stream import store as stream_store
+from crucible.stream.compose import TaskSpec
+from crucible.stream.pipeline import BuildConfig, build_stream
+from crucible.stream.units import Unit, sha256_text
+from crucible.uncertainty.conformal import Calibrator, provenance_class
+from crucible.value.online import OnlineValue
+
+FIX = pathlib.Path(__file__).resolve().parents[1] / "fixtures"
+NOW = "2026-08-24T12:00:00Z"
+
+# --- unit-level fixtures (no sandbox) ---------------------------------------------------
+CORRECT = "def add(a, b):\n    return a + b\n"
+BUGGY = "def add(a, b):\n    return a - b\n"
+VIS = "from unit_x import add as candidate\ndef test_v0():\n    assert candidate(1, 2) == 3\n"
+HID = "from unit_x import add as candidate\ndef test_h0():\n    assert candidate(0, 0) == 0\n"
+U = Unit("X/0", "unit_x", "add", BUGGY, VIS, HID, sha256_text(BUGGY), 1, 1, ())
+SPEC = TaskSpec("k1", "X/0", "ARITH", "X/0|ARITH", 1, "first", ((1, 0), (2, 0)), False, 1)
+
+
+def _record(**kw) -> TaskRecord:
+    base = dict(
+        task_key=SPEC.task_key, arm="A_full", unit_id=SPEC.unit_id, family=SPEC.family,
+        phase=SPEC.phase, kind=SPEC.kind, landed=True, status="verified_visible",
+        confidence=0.6, visible_reward=1.0, executions_charged=2, hidden_pass=True,
+        tampered=False, infra_error=None, tokens=None, wall_s=1.0, gpu_s=None,
+    )
+    base.update(kw)
+    return TaskRecord(**base)
+
+
+def _result(**kw) -> SearchResult:
+    base = dict(
+        best_patch=CORRECT, best_node_id="n7", visible_reward=1.0, executions_charged=2,
+        landed=True, nodes=3, status="verified_visible", confidence=0.6,
+        root_prompt="Fix the bug.", symptom_failed=("test_v0",),
+    )
+    base.update(kw)
+    return SearchResult(**base)
+
+
+class _SpyValue(OnlineValue):
+    """``OnlineValue`` plus call logs -- the "exactly once per measured task" probe."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.begun: list[tuple[str, bool]] = []
+        self.by_id: list[tuple[str, bool]] = []
+
+    def begin_task(self, family: str, retrieval_hit: bool) -> None:
+        self.begun.append((family, retrieval_hit))
+        super().begin_task(family, retrieval_hit)
+
+    def update_by_id(self, node_id: str, outcome: bool) -> bool:
+        self.by_id.append((node_id, outcome))
+        return super().update_by_id(node_id, outcome)
+
+
+class _SpyCalibrator(Calibrator):
+    """``Calibrator`` plus call logs for ``observe`` / ``recalibrate``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.observed: list[tuple[float, str, bool]] = []
+        self.windows: list[int] = []
+
+    def observe(self, score: float, cls: str, outcome: bool) -> None:
+        self.observed.append((score, cls, outcome))
+        super().observe(score, cls, outcome)
+
+    def recalibrate(self, window: int) -> None:
+        self.windows.append(window)
+        super().recalibrate(window)
+
+
+class _SpyTrainer:
+    """``FakeTrainer`` with a call log (the sleep-fired pin needs a COUNT)."""
+
+    def __init__(self) -> None:
+        self._inner = FakeTrainer()
+        self.calls: list[int] = []
+
+    def train(self, pairs, seed, out_dir):
+        self.calls.append(len(pairs))
+        return self._inner.train(pairs, seed, out_dir)
+
+
+class _Rig:
+    """A ``FullHooks`` plus every seam behind it, so a test can assert on any of them."""
+
+    def __init__(self, tmp_path, *, threshold=999, units=None, counts=(1, 1, 1, 1), seed=0):
+        self.store = MemoryStore(tmp_path / "memory.sqlite3")
+        self.value = _SpyValue()
+        self.calibrator = _SpyCalibrator()
+        self.trainer = _SpyTrainer()
+        self.server = FakeServerAdapter()
+        self.runner = FakeSliceRunner(counts)
+        self.registry = AdapterRegistry(tmp_path / "adapters.jsonl")
+        self.adapters_dir = tmp_path / "adapters"
+        units = units if units is not None else {"X/0": U}
+        self.controller = SleepController(
+            self.store, self.trainer, self.server, self.runner, self.registry,
+            unit_loader=lambda uid: units[uid], adapters_dir=self.adapters_dir,
+            threshold=threshold, seed=seed,
+        )
+        self.sleep_records_path = tmp_path / "sleep_records.jsonl"
+        self.hooks = FullHooks(self.store, self.value, self.calibrator, self.controller,
+                               self.registry, sleep_records_path=self.sleep_records_path)
+
+
+@pytest.fixture
+def rig(tmp_path):
+    return _Rig(tmp_path)
+
+
+# --- the arm config ---------------------------------------------------------------------
+
+def test_a_full_is_a_nomem_s_serving_identity():
+    """Arms differ by HOOKS, never by the served model: A_full and A_noMem must be the
+    same proposer on the same serving surface, or the E1 comparison is confounded."""
+    a_full, a_nomem = ARMS["A_full"], ARMS["A_noMem"]
+    assert a_full == ArmConfig("A_full", a_nomem.model, True, chat=a_nomem.chat)
+    assert (a_full.k, a_full.width, a_full.seed) == (a_nomem.k, a_nomem.width, a_nomem.seed)
+
+
+def test_full_hooks_satisfies_the_arm_hooks_protocol(rig):
+    assert isinstance(rig.hooks, ArmHooks)
+
+
+# --- before_task ------------------------------------------------------------------------
+
+def test_before_task_on_an_empty_organ_is_a_no_hit(rig):
+    block = rig.hooks.before_task(U, SPEC)
+
+    assert block is None                                  # None, never "" (None-vs-zero)
+    assert rig.value.begun == [("ARITH", False)]          # the task context IS set, no-hit
+
+
+def test_before_task_returns_the_retrieved_block_and_marks_a_hit(rig):
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(), _result(), NOW)   # mints a lesson
+
+    block = rig.hooks.before_task(U, replace(SPEC, task_key="k2", phase=2, kind="second"))
+
+    assert block is not None and "Prior verified fix" in block
+    assert rig.value.begun[-1] == ("ARITH", True)         # retrieval_hit reaches the value model
+
+
+# --- after_task -------------------------------------------------------------------------
+
+def test_after_task_writes_an_episode_for_every_attempt_verified_or_not(rig):
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(hidden_pass=False, status="believed"),
+                         _result(), NOW)
+
+    episodes = rig.store.episodes()
+    assert len(episodes) == 1
+    assert episodes[0].verified is False
+    assert episodes[0].item_id == content_id("episode", {"task_key": "k1", "arm": "A_full"})
+
+
+def test_after_task_writes_a_lesson_only_for_a_verified_attempt(rig):
+    """MUTATION (a): distilling an unverified episode. ``distill`` refuses one outright, so
+    a mutant that drops the gate crashes the arm rather than merely mis-recording it."""
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(hidden_pass=False), _result(), NOW)
+    assert rig.store.semantic_family("ARITH") == []
+
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(hidden_pass=True), _result(), NOW)
+    lessons = rig.store.semantic_family("ARITH")
+    assert len(lessons) == 1
+    assert lessons[0].cited_episode_id == content_id("episode", {"task_key": "k1", "arm": "A_full"})
+
+
+def test_a_tampered_pass_is_not_a_verified_episode(rig):
+    # episode_verified = hidden_pass is True AND untampered -- the pre-reg definition.
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(hidden_pass=True, tampered=True), _result(), NOW)
+
+    assert rig.store.episodes()[0].verified is False
+    assert rig.store.semantic_family("ARITH") == []
+
+
+def test_the_lesson_cites_the_symptom_tests_as_flipped_and_killing(rig):
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(), _result(symptom_failed=("test_v0", "test_v1")), NOW)
+
+    lesson = rig.store.semantic_family("ARITH")[0]
+    assert lesson.flipped_tests == ("test_v0", "test_v1")
+    assert lesson.killing_tests == ("test_v0", "test_v1")
+    assert lesson.mutated_spans == (SPEC.span,)
+    assert "return a + b" in lesson.landed_diff        # diffed against the MUTATED source
+
+
+def test_the_lesson_diffs_both_sites_of_a_stacked_task(rig):
+    spec2 = replace(SPEC, span2=((3, 0), (4, 0)))
+    rig.hooks.before_task(U, spec2)
+    rig.hooks.after_task(U, spec2, _record(), _result(), NOW)
+
+    assert rig.store.semantic_family("ARITH")[0].mutated_spans == (spec2.span, spec2.span2)
+
+
+def test_the_episode_carries_the_root_prompt_and_the_landed_module(rig):
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(), _result(root_prompt="ROOT", best_patch=CORRECT), NOW)
+
+    ep = rig.store.episodes()[0]
+    assert ep.root_prompt == "ROOT"                  # what sleep trains on: the prompt as SENT
+    assert ep.landed_module == CORRECT
+    assert ep.created_at == NOW and ep.valid_at == NOW and ep.last_verified_at == NOW
+
+
+def test_an_unlanded_attempt_stores_no_landed_module(rig):
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(landed=False, hidden_pass=False),
+                         _result(landed=False, best_patch=""), NOW)
+
+    assert rig.store.episodes()[0].landed_module is None
+
+
+def test_after_task_updates_value_exactly_once_on_a_measured_outcome(rig):
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(hidden_pass=False), _result(best_node_id="n9"), NOW)
+
+    assert rig.value.by_id == [("n9", False)]
+    assert rig.calibrator.observed == [(0.6, provenance_class(False, 1), False)]
+
+
+def test_after_task_does_not_update_value_when_hidden_pass_is_none(rig):
+    """``None`` is "never scored". Folding it in as a ``False`` would train the value model
+    (and the calibrator) that an infra failure is a repair failure."""
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(hidden_pass=None, infra_error="oom"), _result(), NOW)
+
+    assert rig.value.by_id == []
+    assert rig.calibrator.observed == []
+    assert len(rig.store.episodes()) == 1            # ... but the episode is still written
+
+
+def test_after_task_returns_the_retrieved_ids_from_before_task(rig):
+    """MUTATION (b): a hook that always returns ``()`` leaves "did this task get memory"
+    unanswerable from the records -- the column E1 is measured on."""
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.after_task(U, SPEC, _record(), _result(), NOW)
+    lesson_id = rig.store.semantic_family("ARITH")[0].item_id
+
+    spec2 = replace(SPEC, task_key="k2", phase=2, kind="second")
+    rig.hooks.before_task(U, spec2)
+    retrieved_ids, adapter_id = rig.hooks.after_task(U, spec2, _record(task_key="k2"),
+                                                     _result(), NOW)
+
+    assert lesson_id in retrieved_ids
+    assert adapter_id is None                        # nothing accepted yet
+    assert rig.store.episodes()[-1].memory_item_ids == retrieved_ids
+
+
+def test_after_task_stamps_the_latest_accepted_adapter(rig):
+    rig.registry.record("ad-0123456789abcdef", "h" * 64, "d" * 64, True, NOW)
+    rig.registry.record("ad-rejectedrejected", "g" * 64, "d" * 64, False, NOW)
+
+    rig.hooks.before_task(U, SPEC)
+    _ids, adapter_id = rig.hooks.after_task(U, SPEC, _record(), _result(), NOW)
+
+    assert adapter_id == "ad-0123456789abcdef"       # never the rejected candidate
+
+
+def test_after_task_refuses_a_task_before_task_never_opened(rig):
+    # Without before_task there is no retrieval context: memory_item_ids would silently be
+    # empty and the value model's retrieval_hit feature would be a lie. Fail loudly instead.
+    with pytest.raises(ValueError):
+        rig.hooks.after_task(U, SPEC, _record(), _result(), NOW)
+
+
+# --- between_tasks / sleep --------------------------------------------------------------
+
+def test_between_tasks_below_the_threshold_does_nothing(tmp_path):
+    r = _Rig(tmp_path, threshold=2)
+    r.hooks.before_task(U, SPEC)
+    r.hooks.after_task(U, SPEC, _record(), _result(), NOW)
+
+    r.hooks.between_tasks(["k1"], NOW)
+
+    assert r.trainer.calls == [] and r.hooks.sleep_records == []
+    assert r.calibrator.windows == []
+
+
+def test_between_tasks_sleeps_at_the_threshold_and_recalibrates_on_accept(tmp_path):
+    r = _Rig(tmp_path, threshold=1, counts=(3, 3))
+    r.hooks.before_task(U, SPEC)
+    r.hooks.after_task(U, SPEC, _record(), _result(), NOW)
+
+    r.hooks.between_tasks(["k1"], NOW)
+
+    assert len(r.trainer.calls) == 1
+    assert len(r.hooks.sleep_records) == 1 and r.hooks.sleep_records[0].accepted is True
+    assert r.calibrator.windows == [RECALIBRATE_WINDOW]     # exchangeability broken by SFT
+    assert r.server.calls                                    # the winner was hot-swapped
+
+
+def test_a_rejected_sleep_does_not_recalibrate(tmp_path):
+    r = _Rig(tmp_path, threshold=1, counts=(9, 5))           # drop of 4 > ACCEPT_MAX_DROP
+    r.hooks.before_task(U, SPEC)
+    r.hooks.after_task(U, SPEC, _record(), _result(), NOW)
+
+    r.hooks.between_tasks(["k1"], NOW)
+
+    assert r.hooks.sleep_records[0].accepted is False
+    assert r.calibrator.windows == []
+    assert r.server.calls == []
+
+
+def test_sleep_records_are_appended_to_disk_and_round_trip(tmp_path):
+    r = _Rig(tmp_path, threshold=1, counts=(3, 3))
+    r.hooks.before_task(U, SPEC)
+    r.hooks.after_task(U, SPEC, _record(), _result(), NOW)
+    r.hooks.between_tasks(["k1"], NOW)
+
+    lines = r.sleep_records_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert SleepRecord.from_dict(json.loads(lines[0])) == r.hooks.sleep_records[0]
+    assert lines[0] == json.dumps(json.loads(lines[0]), sort_keys=True)
+
+
+# --- the driver seam --------------------------------------------------------------------
+
+def _recs():
+    out = []
+    for n in ("mini_humaneval.jsonl.gz", "mini_mbpp.jsonl.gz"):
+        with gzip.open(FIX / n, "rt") as fh:
+            out += [json.loads(line) for line in fh]
+    return out
+
+
+@pytest.fixture(scope="module")
+def stream(tmp_path_factory):
+    """The 3-record fixture stream (2 classes x 2 phases = 4 tasks), built once."""
+    root = tmp_path_factory.mktemp("stream")
+    cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=3, max_hidden=2, jobs=2)
+    return build_stream(cfg, root, recs=_recs(), log=lambda *a: None)
+
+
+class FakeProposer:
+    """Returns scripted module sources in call order; counts every generate call."""
+
+    def __init__(self, model, texts):
+        self.model = model
+        self._texts = list(texts)
+        self.calls = []
+        self.prompts = []
+
+    def generate(self, prompt, *, n, seed, max_tokens=1024, temperature=0.7):
+        idx = len(self.calls)
+        self.calls.append({"n": n, "seed": seed, "temperature": temperature})
+        self.prompts.append(prompt)
+        text = self._texts[idx % len(self._texts)]
+        return [Candidate(text, None, 1.0) for _ in range(n)]
+
+
+def _class_pair(stream):
+    """One class's (phase-1 key, phase-2 key) plus a second class's phase-1 key."""
+    man = stream_store.read_manifest(stream)
+    (first_a, second_a), (first_b, _second_b) = [man.classes[c] for c in sorted(man.classes)][:2]
+    return first_a, first_b, second_a
+
+
+def _naive_full(name="A_full"):
+    """A single-shot arm under A_full's name: one generate per task, crisp counts."""
+    return ArmConfig(name, "fake/model", use_search=False)
+
+
+def test_hooks_none_calls_attempt_task_with_the_s2_argument_list(stream, tmp_path, monkeypatch):
+    """The byte-identity guard. The spy's signature is EXACTLY S2's -- a driver that
+    started passing ``memory=`` unconditionally dies on the TypeError."""
+    keys = list(_class_pair(stream))[:2]
+    seen = []
+
+    def s2_only(cfg, unit, taskspec, proposer, value):      # NO memory parameter, no **kw
+        seen.append(taskspec.task_key)
+        rec = _record(task_key=taskspec.task_key, arm=cfg.name, unit_id=taskspec.unit_id,
+                      family=taskspec.family, phase=taskspec.phase, kind=taskspec.kind)
+        return rec, [ExecRecord(taskspec.task_key, cfg.name, "n0", 1.0, True, 0.1, None)], _result()
+
+    monkeypatch.setattr(driver, "attempt_task", s2_only)
+    out = run_arm(_naive_full("drv"), stream, keys, FakeProposer("fake/model", [CORRECT]),
+                  OnlineValue(), tmp_path / "out", log=lambda *a: None, hooks=None)
+
+    assert seen == keys
+    recs = read_task_records(out)
+    # The replace-stamp is NOT applied without hooks.
+    assert all(r.retrieved_ids == () and r.adapter_id is None for r in recs)
+
+
+def _drive_rig(stream, tmp_path, *, threshold=999, counts=(1, 1, 1, 1)):
+    units = {u: stream_store.read_unit(stream, u) for u in stream_store.read_manifest(stream).unit_ids}
+    r = _Rig(tmp_path, threshold=threshold, units=units, counts=counts)
+    return r
+
+
+def test_full_drive_writes_one_episode_per_task_and_lessons_only_for_verified(stream, tmp_path):
+    """End-to-end through the REAL attempt_task: three attempts, two of them verified."""
+    first_a, first_b, second_a = _class_pair(stream)
+    keys = [first_a, first_b, second_a]
+    by_key = {t.task_key: t for t in stream_store.read_manifest(stream).tasks}
+    units = {k: stream_store.read_unit(stream, by_key[k].unit_id) for k in keys}
+    wrong = f"def {units[first_b].entry_point}(*a, **k):\n    return None\n"
+    texts = [units[first_a].module_src, wrong, units[second_a].module_src]
+
+    r = _drive_rig(stream, tmp_path)
+    proposer = FakeProposer("fake/model", texts)
+    out = run_arm(_naive_full(), stream, keys, proposer, r.value, tmp_path / "out",
+                  log=lambda *a: None, hooks=r.hooks)
+
+    recs = read_task_records(out)
+    assert len(proposer.calls) == 3                       # one generate per task: no extras
+    assert len(r.store.episodes()) == 3                   # an episode for EVERY attempt
+    verified = [ep for ep in r.store.episodes() if ep.verified]
+    assert {ep.task_key for ep in verified} == {first_a, second_a}
+    lessons = [item for fam in {t.family for t in by_key.values()}
+               for item in r.store.semantic_family(fam)]
+    assert {item.cited_episode_id for item in lessons} == {ep.item_id for ep in verified}
+    # value trained once per MEASURED task, and never twice for one task.
+    assert len(r.value.by_id) == sum(1 for rec in recs if rec.hidden_pass is not None)
+
+
+def test_full_drive_stamps_the_retrieved_ids_of_a_second_exposure(stream, tmp_path):
+    """MUTATION (b), end to end: the phase-2 task of a class whose phase-1 attempt was
+    verified must carry the lesson's id on its record."""
+    first_a, _first_b, second_a = _class_pair(stream)
+    keys = [first_a, second_a]
+    by_key = {t.task_key: t for t in stream_store.read_manifest(stream).tasks}
+    units = {k: stream_store.read_unit(stream, by_key[k].unit_id) for k in keys}
+
+    r = _drive_rig(stream, tmp_path)
+    proposer = FakeProposer("fake/model", [units[first_a].module_src, units[second_a].module_src])
+    out = run_arm(_naive_full(), stream, keys, proposer, r.value, tmp_path / "out",
+                  log=lambda *a: None, hooks=r.hooks)
+
+    recs = {rec.task_key: rec for rec in read_task_records(out)}
+    assert recs[first_a].retrieved_ids == ()              # nothing to retrieve on first exposure
+    assert recs[second_a].retrieved_ids != ()             # ... the lesson from the first
+    # The block really reached the model, and on the second exposure only.
+    assert "Prior experience with this code" in proposer.prompts[1]
+    assert "Prior experience with this code" not in proposer.prompts[0]
+
+
+def test_full_drive_fires_a_sleep_between_tasks_and_stamps_the_adapter(stream, tmp_path):
+    first_a, _first_b, second_a = _class_pair(stream)
+    keys = [first_a, second_a]
+    by_key = {t.task_key: t for t in stream_store.read_manifest(stream).tasks}
+    units = {k: stream_store.read_unit(stream, by_key[k].unit_id) for k in keys}
+
+    r = _drive_rig(stream, tmp_path, threshold=1, counts=(2, 2, 2, 2))
+    proposer = FakeProposer("fake/model", [units[first_a].module_src, units[second_a].module_src])
+    out = run_arm(_naive_full(), stream, keys, proposer, r.value, tmp_path / "out",
+                  log=lambda *a: None, hooks=r.hooks)
+
+    recs = {rec.task_key: rec for rec in read_task_records(out)}
+    assert len(r.trainer.calls) == 2                       # a sleep after each verified task
+    first_adapter = r.hooks.sleep_records[0].adapter_id
+    assert recs[first_a].adapter_id is None                # attempted before any sleep: base
+    # The stamp is the adapter that SERVED the attempt, not whatever is latest when the run
+    # ends -- task 2 ran under sleep 1's adapter, and sleep 2 fired only after it was recorded.
+    assert recs[second_a].adapter_id == first_adapter
+    assert r.registry.latest_accepted() == r.hooks.sleep_records[1].adapter_id != first_adapter
+    assert build_lens(read_task_records(out)).adapter_ids == (first_adapter,)
+
+
+def test_the_clock_is_fixed_width_utc_and_lexicographically_ordered():
+    stamp = utc_now()
+    assert len(stamp) == 20 and stamp.endswith("Z") and stamp[10] == "T"
+    assert stamp > "2026-01-01T00:00:00Z"                   # lexicographic ordering holds
+
+
+# --- the slice runner (thin seam; LIVE verification is Task 12's smoke) -----------------
+
+def test_slice_runner_loads_the_adapter_and_counts_hidden_passes(stream, tmp_path):
+    first_a, first_b, _second_a = _class_pair(stream)
+    keys = [first_a, first_b]
+    by_key = {t.task_key: t for t in stream_store.read_manifest(stream).tasks}
+    units = {k: stream_store.read_unit(stream, by_key[k].unit_id) for k in keys}
+    wrong = f"def {units[first_b].entry_point}(*a, **k):\n    return None\n"
+
+    server = FakeServerAdapter()
+    built = []
+
+    def proposer_for(model):
+        built.append(model)
+        return FakeProposer(model, [units[first_a].module_src, wrong])
+
+    runner = DriverSliceRunner(_naive_full(), stream, proposer_for=proposer_for,
+                              server=server, adapters_dir=tmp_path / "adapters")
+
+    assert runner.solved(keys, "ad-cafe") == 1              # only the correct repair passes
+    assert server.calls == [((tmp_path / "adapters" / "ad-cafe").resolve(), "ad-cafe")]
+    assert built == ["ad-cafe"]                             # the proposer serves the ADAPTER
+
+
+def test_slice_runner_on_the_base_model_loads_nothing(stream, tmp_path):
+    first_a, _first_b, _second_a = _class_pair(stream)
+    by_key = {t.task_key: t for t in stream_store.read_manifest(stream).tasks}
+    unit = stream_store.read_unit(stream, by_key[first_a].unit_id)
+    server = FakeServerAdapter()
+    cfg = _naive_full()
+
+    runner = DriverSliceRunner(cfg, stream, proposer_for=lambda m: FakeProposer(m, [unit.module_src]),
+                               server=server, adapters_dir=tmp_path / "adapters")
+
+    assert runner.solved([first_a], None) == 1
+    assert server.calls == []                               # nothing to hot-swap for the base
+
+
+def test_slice_runner_samples_greedily(stream, tmp_path):
+    """K=1 GREEDY: one candidate, temperature 0 -- a regression gate must not re-roll dice."""
+    first_a, _first_b, _second_a = _class_pair(stream)
+    by_key = {t.task_key: t for t in stream_store.read_manifest(stream).tasks}
+    unit = stream_store.read_unit(stream, by_key[first_a].unit_id)
+    proposer = FakeProposer("fake/model", [unit.module_src])
+
+    runner = DriverSliceRunner(_naive_full(), stream, proposer_for=lambda m: proposer,
+                               server=FakeServerAdapter(), adapters_dir=tmp_path / "adapters")
+    runner.solved([first_a], None)
+
+    assert [c["n"] for c in proposer.calls] == [1]
+    assert [c["temperature"] for c in proposer.calls] == [0.0]

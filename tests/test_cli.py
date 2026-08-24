@@ -78,3 +78,99 @@ def test_cli_build_reports_not_enough_classes_as_exit_2_at_stack2(tmp_path, monk
         raise NotEnoughClasses("classes taken 1 < C=2")
     monkeypatch.setattr(pipeline, "build_stream", boom)
     assert main(["stream", "build", "--rung", "stack2", "--C", "2", "--out", str(tmp_path)]) == 2
+
+
+# --- S3 (Task 11): the A_full run flags -----------------------------------------------
+#
+# Two claims, both wiring: (1) ``--arm A_full`` grows ``--memory-db`` and
+# ``--sleep-threshold`` and both reach the hooks, (2) EVERY OTHER ARM constructs NO memory
+# store at all. (2) is the mutation pin that matters -- an A_noMem run that opened an organ
+# (even a fresh, unused one) would mean the two arms no longer differ by exactly the
+# pre-registered column, and nothing in an A_noMem record would show it.
+
+@pytest.fixture(scope="module")
+def _stream(tmp_path_factory):
+    from crucible.stream.pipeline import BuildConfig, build_stream
+    cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=3, max_hidden=2, jobs=2)
+    return build_stream(cfg, tmp_path_factory.mktemp("cli-stream"), recs=_recs(),
+                        log=lambda *a: None)
+
+
+class _NoProposer:
+    """Stands in for a served proposer: identity is asserted at construction in the real one."""
+
+    def __init__(self, model):
+        self.model = model
+
+
+def _stub_run(monkeypatch, seen):
+    """Replace the real ``run_arm`` and proposer construction; capture what the CLI wired."""
+    import crucible.cli as cli
+    import crucible.run.driver as driver_module
+    monkeypatch.setattr(cli, "_proposer_or_none", lambda url, model, chat=False: _NoProposer(model))
+
+    def fake_run_arm(cfg, stream_dir, keys, proposer, value, out_dir, *, log=print, hooks=None):
+        seen.update(cfg=cfg, value=value, hooks=hooks, out_dir=out_dir, keys=keys)
+        return out_dir / cfg.name
+
+    monkeypatch.setattr(driver_module, "run_arm", fake_run_arm)
+
+
+def test_cli_arm_run_a_full_wires_the_memory_db_and_sleep_threshold(_stream, tmp_path, monkeypatch):
+    from crucible.cli import main
+    from crucible.value.online import OnlineValue
+    seen = {}
+    _stub_run(monkeypatch, seen)
+
+    db = tmp_path / "custom" / "memory.sqlite3"
+    rc = main(["arm", "run", str(_stream), "--arm", "A_full", "--base-url", "http://x",
+               "--out", str(tmp_path / "runs"), "--memory-db", str(db),
+               "--sleep-threshold", "4"])
+
+    assert rc == 0
+    assert seen["hooks"] is not None
+    assert isinstance(seen["value"], OnlineValue)      # A_full runs value v1, not the constant
+    assert db.exists()                                 # the organ was opened where asked
+    assert seen["hooks"].sleep_threshold == 4
+
+
+def test_cli_arm_run_a_full_defaults_the_memory_db_under_the_arm_dir(_stream, tmp_path, monkeypatch):
+    from crucible.cli import main
+    seen = {}
+    _stub_run(monkeypatch, seen)
+
+    rc = main(["arm", "run", str(_stream), "--arm", "A_full", "--base-url", "http://x",
+               "--out", str(tmp_path / "runs")])
+
+    assert rc == 0
+    assert (tmp_path / "runs" / "A_full" / "memory.sqlite3").exists()
+    assert seen["hooks"].sleep_threshold == 16         # spec S5 / R-S3-3 default
+
+
+def test_cli_arm_run_a_nomem_never_constructs_a_memory_store(_stream, tmp_path, monkeypatch):
+    """MUTATION (c): hooks (and therefore an organ) built for a non-A_full arm."""
+    import crucible.memory.store as store_module
+    import crucible.run.full as full_module
+    from crucible.cli import main
+    from crucible.value.model import ConstantValue
+    seen = {}
+    _stub_run(monkeypatch, seen)
+
+    def boom(*a, **kw):
+        raise AssertionError("A_noMem must never construct a MemoryStore")
+
+    # Both names: the one A_full's wiring actually looks up (``full`` imported it at module
+    # level) and the defining module, so no construction path can slip past the boom.
+    monkeypatch.setattr(full_module, "MemoryStore", boom)
+    monkeypatch.setattr(store_module, "MemoryStore", boom)
+    rc = main(["arm", "run", str(_stream), "--arm", "A_noMem", "--base-url", "http://x",
+               "--out", str(tmp_path / "runs")])
+
+    assert rc == 0
+    assert seen["hooks"] is None
+    assert isinstance(seen["value"], ConstantValue)    # A_noMem keeps v0 (spec S6)
+
+
+def test_cli_arm_run_rejects_an_unknown_arm(_stream, tmp_path):
+    from crucible.cli import main
+    assert main(["arm", "run", str(_stream), "--arm", "A_nope", "--base-url", "http://x"]) == 2

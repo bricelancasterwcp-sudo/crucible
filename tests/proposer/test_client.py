@@ -41,6 +41,16 @@ def _serve(served_model=MODEL):
             req = json.loads(self.rfile.read(n) or b"{}")
             self.captured.clear()
             self.captured.update(req)
+            self.captured["__path__"] = self.path
+            if self.path == "/v1/chat/completions":
+                # Chat shape: text under message.content, logprobs under a `content` list.
+                choice = {"message": {"role": "assistant", "content": _COMPLETION},
+                          "finish_reason": "stop"}
+                choice["logprobs"] = {
+                    "content": [{"token": "t", "logprob": lp} for lp in _TOKEN_LOGPROBS]
+                }
+                self._json(200, {"choices": [dict(choice) for _ in range(req.get("n", 1))]})
+                return
             choice = {"text": _COMPLETION, "finish_reason": "stop"}
             if req.get("prompt") != _NO_LOGPROBS_PROMPT:
                 choice["logprobs"] = {
@@ -145,5 +155,55 @@ def test_default_max_tokens_is_the_pinned_budget():
     try:
         VLLMProposer(url, MODEL).generate("p", n=1, seed=1)
         assert H.captured["max_tokens"] == MAX_NEW_TOKENS
+    finally:
+        srv.shutdown()
+
+
+def test_chat_mode_posts_to_chat_endpoint_with_messages_and_decodes_content():
+    """chat=True routes to /v1/chat/completions, sends the prompt as a user message, and decodes
+    message.content through the codec (the fix for instruct models emitting empty raw completions)."""
+    srv, url, H = _serve()
+    try:
+        cands = VLLMProposer(url, MODEL, chat=True).generate("fix the bug", n=2, seed=7)
+        assert H.captured["__path__"] == "/v1/chat/completions"
+        assert H.captured["messages"] == [{"role": "user", "content": "fix the bug"}]
+        assert "prompt" not in H.captured  # chat mode must not send a raw prompt
+        assert len(cands) == 2
+        for c in cands:
+            assert isinstance(c, Candidate)
+            assert c.text.strip() == "def add(a, b):\n    return a + b"  # fence stripped
+    finally:
+        srv.shutdown()
+
+
+def test_chat_mode_scores_come_from_content_logprobs():
+    """Chat logprobs live under logprobs.content[].logprob, not a flat token_logprobs list;
+    the two Candidate scores must still be computed from them identically to the raw path."""
+    srv, url, _ = _serve()
+    try:
+        c = VLLMProposer(url, MODEL, chat=True).generate("x", n=1, seed=1)[0]
+        assert c.mean_logprob == pytest.approx(sum(_TOKEN_LOGPROBS) / len(_TOKEN_LOGPROBS))
+        expected = sum(math.exp(lp) for lp in _TOKEN_LOGPROBS) / len(_TOKEN_LOGPROBS)
+        assert c.self_certainty == pytest.approx(expected)
+    finally:
+        srv.shutdown()
+
+
+def test_chat_mode_empty_content_is_a_nonlanding_candidate():
+    """An instruct model can still return an empty message; that must decode to a non-landing
+    Candidate (source that does not parse), exactly like an empty raw completion."""
+    from crucible.proposer.codec import extract_module
+
+    srv, url, H = _serve()
+    try:
+        # Point the fake at an empty-content response by monkeypatching the module constant.
+        import tests.proposer.test_client as T
+        saved = T._COMPLETION
+        T._COMPLETION = ""
+        try:
+            c = VLLMProposer(url, MODEL, chat=True).generate("x", n=1, seed=1)[0]
+            assert not extract_module(c.text or "").ok
+        finally:
+            T._COMPLETION = saved
     finally:
         srv.shutdown()

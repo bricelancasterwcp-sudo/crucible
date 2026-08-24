@@ -28,7 +28,7 @@ import json
 import sys
 from pathlib import Path
 
-DEFAULT_PILOT_MODEL = "Qwen/Qwen3.5-2B"   # ARMS["A_noMem"].model -- the frozen ceiling proposer
+DEFAULT_PILOT_MODEL = "Qwen/Qwen2.5-Coder-1.5B-Instruct"  # ARMS["A_noMem"].model (amendment A2)
 PROPOSER_ERROR_EXIT = 3                    # served identity mismatch / unreachable server
 
 
@@ -52,9 +52,14 @@ def _add_arm(sub) -> None:
     pl.add_argument("--base-url", required=True); pl.add_argument("--model", default=DEFAULT_PILOT_MODEL)
     pl.add_argument("--n", type=int, default=30); pl.add_argument("--seed", type=int, default=0)
     pl.add_argument("--out", type=Path, default=Path("runs"))
+    # Chat serving is the default: the amended pilot proposer (1.5B-Instruct) needs its chat
+    # template applied (--no-chat for a base model served raw). See arm.py amendment A2.
+    pl.add_argument("--chat", action=argparse.BooleanOptionalAction, default=True)
     rn = a.add_parser("run"); rn.add_argument("stream_dir", type=Path)
     rn.add_argument("--arm", required=True); rn.add_argument("--base-url", required=True)
     rn.add_argument("--tasks", default="phase1"); rn.add_argument("--out", type=Path, default=Path("runs"))
+    # Off by default (base B arms served raw); pass --chat for the instruct A_noMem proposer.
+    rn.add_argument("--chat", action=argparse.BooleanOptionalAction, default=False)
 
 
 def _run_stream(a) -> int:
@@ -80,17 +85,19 @@ def _run_stream(a) -> int:
     return 2
 
 
-def _proposer_or_none(base_url: str, model: str):
+def _proposer_or_none(base_url: str, model: str, chat: bool = False):
     """A ``VLLMProposer`` for ``(base_url, model)``, or ``None`` after a one-line error.
 
-    Construction asserts served identity, so a mismatched checkpoint or an unreachable server
-    raises ``IdentityMismatch`` (connection failures are folded into it upstream). Caught here
-    and printed as one line -- the caller returns :data:`PROPOSER_ERROR_EXIT`, never a traceback.
+    ``chat`` selects the chat-completions serving surface (required for an instruct proposer;
+    see arm.py amendment A2). Construction asserts served identity, so a mismatched checkpoint
+    or an unreachable server raises ``IdentityMismatch`` (connection failures are folded into it
+    upstream). Caught here and printed as one line -- the caller returns
+    :data:`PROPOSER_ERROR_EXIT`, never a traceback.
     """
     from crucible.proposer.client import VLLMProposer
     from crucible.proposer.identity import IdentityMismatch
     try:
-        return VLLMProposer(base_url, model)
+        return VLLMProposer(base_url, model, chat=chat)
     except (IdentityMismatch, OSError) as e:
         print(f"proposer error: {e}", file=sys.stderr)
         return None
@@ -100,7 +107,7 @@ def _arm_pilot(a) -> int:
     """Run the ceiling pilot and print its verdict as JSON."""
     from crucible.run.pilot import ceiling_pilot
     from crucible.value.model import ConstantValue
-    proposer = _proposer_or_none(a.base_url, a.model)
+    proposer = _proposer_or_none(a.base_url, a.model, a.chat)
     if proposer is None:
         return PROPOSER_ERROR_EXIT
     verdict = ceiling_pilot(a.stream_dir, a.out, proposer, ConstantValue(), n=a.n, seed=a.seed)
@@ -127,7 +134,7 @@ def _arm_run(a) -> int:
     if a.arm not in ARMS:
         print(f"unknown arm {a.arm!r}; known: {sorted(ARMS)}", file=sys.stderr); return 2
     cfg = ARMS[a.arm]
-    proposer = _proposer_or_none(a.base_url, cfg.model)
+    proposer = _proposer_or_none(a.base_url, cfg.model, a.chat)
     if proposer is None:
         return PROPOSER_ERROR_EXIT
     keys = _task_keys(store.read_manifest(a.stream_dir), a.tasks)

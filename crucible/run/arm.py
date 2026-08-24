@@ -62,8 +62,14 @@ class ArmConfig:
     seed: int = 0
 
 
+# Amendment A2 (2026-08-23, pre-lock): the small-arm proposer is Qwen2.5-Coder-1.5B-Instruct,
+# not Qwen3.5-2B. The 2B (a Qwen3-VL base) failed the §4.7 landing gate on the full-module
+# codec by repetition-degeneration that no budget or sampler penalty could fix; the 1.5B is
+# the pre-registered §2 alternative and clears the gate when chat-served (must be run with
+# VLLMProposer(chat=True) so its instruct chat template is applied). See
+# docs/findings/S2-ceiling-pilot.md §7. B_search/B_naive keep the 9B pending its own §4.7 probe.
 ARMS: dict[str, ArmConfig] = {
-    "A_noMem": ArmConfig("A_noMem", "Qwen/Qwen3.5-2B", True),
+    "A_noMem": ArmConfig("A_noMem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True),
     "B_search": ArmConfig("B_search", "Qwen/Qwen3.5-9B", True),
     "B_naive": ArmConfig("B_naive", "Qwen/Qwen3.5-9B", False),
 }

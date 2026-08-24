@@ -62,36 +62,82 @@ def _mean(xs: list[float]) -> float | None:
     return sum(xs) / len(xs) if xs else None
 
 
-def _scores(logprobs: dict | None) -> tuple[float | None, float | None]:
-    """``(mean_logprob, self_certainty)`` for one choice's ``logprobs`` block.
+def _scores_from_toks(toks: list) -> tuple[float | None, float | None]:
+    """``(mean_logprob, self_certainty)`` from a list of chosen-token logprobs.
 
-    ``token_logprobs`` is the per-token logprob of the *chosen* token. The mean is the
+    The per-token value is the logprob of the *chosen* token. ``mean(logprob)`` is the
     length-normalised sequence logprob; ``mean(exp(lp))`` is the average chosen-token
-    probability -- a certainty proxy that lands in ``[0, 1]`` because each ``exp(lp) <= 1``.
-    ``None`` entries (e.g. a leading token with no predecessor) are dropped; an absent or
-    empty block yields ``(None, None)`` so the score reads as unknown downstream.
+    probability -- a certainty proxy in ``[0, 1]`` because each ``exp(lp) <= 1``. ``None``
+    entries (e.g. a leading token with no predecessor) are dropped; an empty list yields
+    ``(None, None)`` so the score reads as *unknown* downstream. Shared by both serving
+    shapes (raw completions and chat) so the two paths score identically.
     """
-    if not logprobs:
-        return None, None
-    toks = [lp for lp in (logprobs.get("token_logprobs") or []) if lp is not None]
+    toks = [lp for lp in toks if lp is not None]
     if not toks:
         return None, None
     return _mean(toks), _mean([math.exp(lp) for lp in toks])
 
 
-class VLLMProposer:
-    """Draws ``Candidate``s from a vLLM OpenAI-compatible ``/v1/completions`` endpoint."""
+def _scores(logprobs: dict | None) -> tuple[float | None, float | None]:
+    """Raw ``/v1/completions`` logprobs shape: ``{"token_logprobs": [lp, ...]}``."""
+    if not logprobs:
+        return None, None
+    return _scores_from_toks(logprobs.get("token_logprobs") or [])
 
-    def __init__(self, base_url: str, model: str) -> None:
+
+def _chat_scores(logprobs: dict | None) -> tuple[float | None, float | None]:
+    """Chat ``/v1/chat/completions`` logprobs shape: ``{"content": [{"logprob": lp}, ...]}``.
+
+    Chat completions carry per-token logprobs under ``content`` rather than a flat
+    ``token_logprobs`` list. Absent (some servers omit them in chat mode) yields
+    ``(None, None)`` -- a Candidate then reads as unknown, which the search already tolerates
+    (the scores are not load-bearing until S3's value/uncertainty organs).
+    """
+    if not logprobs:
+        return None, None
+    return _scores_from_toks([c.get("logprob") for c in (logprobs.get("content") or [])])
+
+
+class VLLMProposer:
+    """Draws ``Candidate``s from a vLLM OpenAI-compatible endpoint.
+
+    ``chat`` selects the serving surface. A *base* model (e.g. Qwen3.5-2B) is served in raw
+    ``/v1/completions`` mode: the prompt is sent verbatim. An *instruct* model
+    (Qwen2.5-Coder-1.5B-Instruct, the amended small-arm proposer -- spec §2 amendment A2) must
+    be served in ``/v1/chat/completions`` mode so vLLM applies its chat template; serving an
+    instruct model raw makes it emit empty completions (~6% here), which the §4.7 landing
+    pre-check caught (see docs/findings/S2-ceiling-pilot.md §7). Either surface returns
+    codec-decoded ``Candidate``s with the same two logprob scores.
+    """
+
+    def __init__(self, base_url: str, model: str, *, chat: bool = False) -> None:
         # Fail loud and early if the server serves a different checkpoint than we expect.
         assert_identity(base_url, model)
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.chat = chat
 
     def generate(
         self, prompt: str, *, n: int, seed: int, max_tokens: int = MAX_NEW_TOKENS, temperature: float = 0.7
     ) -> list[Candidate]:
-        """POST one completion request for ``n`` samples; decode each choice to a ``Candidate``."""
+        """POST one request for ``n`` samples; decode each choice to a ``Candidate``.
+
+        Routes to chat or raw completions per ``self.chat``; both honour the same pinned
+        ``temperature``/``max_tokens`` and request per-token logprobs for the Candidate scores.
+        """
+        if self.chat:
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "n": n,
+                "logprobs": True,
+                "top_logprobs": 1,
+                "seed": seed,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            body = self._post("/v1/chat/completions", payload)
+            return [self._candidate_chat(choice) for choice in body["choices"]]
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -117,7 +163,18 @@ class VLLMProposer:
 
     @staticmethod
     def _candidate(choice: dict) -> Candidate:
-        """One choice -> ``Candidate``: codec-decoded source + the two logprob scores."""
+        """One raw choice -> ``Candidate``: codec-decoded ``text`` + the two logprob scores."""
         landed = extract_module(choice.get("text", ""))
         mean_logprob, self_certainty = _scores(choice.get("logprobs"))
+        return Candidate(landed.module_src, mean_logprob, self_certainty)
+
+    @staticmethod
+    def _candidate_chat(choice: dict) -> Candidate:
+        """One chat choice -> ``Candidate``: codec-decoded ``message.content`` + logprob scores.
+
+        A missing/None ``content`` (an instruct model can still return an empty message) decodes
+        to a non-landing Candidate, exactly as an empty raw completion does.
+        """
+        landed = extract_module((choice.get("message") or {}).get("content") or "")
+        mean_logprob, self_certainty = _chat_scores(choice.get("logprobs"))
         return Candidate(landed.module_src, mean_logprob, self_certainty)

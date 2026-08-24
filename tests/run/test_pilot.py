@@ -31,7 +31,7 @@ from crucible.stream.pipeline import BuildConfig, build_stream
 from crucible.value.model import ConstantValue
 
 FIX = pathlib.Path(__file__).resolve().parents[1] / "fixtures"
-PILOT_MODEL = "Qwen/Qwen3.5-2B"          # == ARMS["A_noMem"].model; the proposer must serve it
+PILOT_MODEL = "Qwen/Qwen2.5-Coder-1.5B-Instruct"  # == ARMS["A_noMem"].model (amendment A2)
 
 
 def _recs():

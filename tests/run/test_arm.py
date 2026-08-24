@@ -78,7 +78,7 @@ def test_hidden_infra_error_leaves_hidden_pass_none(monkeypatch):
 
 
 def test_arm_registry_matches_frozen_spec():
-    assert ARMS["A_noMem"] == ArmConfig("A_noMem", "Qwen/Qwen3.5-2B", True)
+    assert ARMS["A_noMem"] == ArmConfig("A_noMem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True)  # A2
     assert ARMS["B_search"] == ArmConfig("B_search", "Qwen/Qwen3.5-9B", True)
     assert ARMS["B_naive"] == ArmConfig("B_naive", "Qwen/Qwen3.5-9B", False)
     assert ARMS["B_naive"].use_search is False

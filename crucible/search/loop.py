@@ -78,6 +78,15 @@ class SearchResult:
     passes the whole visible suite, so those are precisely the tests it flipped. Both are
     trailing and defaulted, and ``from_dict`` fills them in when absent, so an S2-era record
     -- written before either existed -- still loads.
+
+    An EMPTY ``symptom_failed`` is deliberately ambiguous between two situations: the symptom
+    run produced no verdict at all (``infra_error`` set -- nothing was measured), and it
+    produced a verdict in which nothing failed. This dataclass does not distinguish them
+    because a consumer must not act on either: both mean *no test is known to have flipped*,
+    so neither yields a citable claim. A consumer needing the distinction has the symptom
+    report itself; a consumer that does not (Task 11 feeds this straight into a lesson's
+    ``flipped_tests``) is already safe, since ``falsify`` classifies an empty
+    ``flipped_tests`` as a broken citation and refuses to measure it.
     """
 
     best_patch: str

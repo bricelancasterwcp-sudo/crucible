@@ -7,6 +7,7 @@ Computing the outcome from the visible report fabricates the experiment's primar
 
 Run WRAPPED (R-T2-6): the attempt touches the sandbox through ``search`` + ``run_hidden``.
 """
+from crucible.run import arm
 from crucible.run.arm import ARMS, ArmConfig, attempt_task
 from crucible.run.types import Candidate
 from crucible.sandbox.report import TestReport
@@ -34,9 +35,11 @@ class FakeProposer:
         self.model = model
         self._texts = texts
         self.calls: list[dict] = []
+        self.prompts: list[str] = []
 
     def generate(self, prompt, *, n, seed, max_tokens=1024, temperature=0.7):
         self.calls.append({"n": n, "seed": seed})
+        self.prompts.append(prompt)
         return [Candidate(self._texts[i % len(self._texts)], None, 1.0) for i in range(n)]
 
 
@@ -90,3 +93,71 @@ def test_chat_serving_is_an_arm_property_not_a_cli_default():
     Binding chat to the arm stops `arm run --arm A_noMem` (no --chat) from silently serving raw."""
     assert ARMS["A_noMem"].chat is True
     assert ARMS["B_search"].chat is False and ARMS["B_naive"].chat is False
+
+
+# --- S3: the memory seam through attempt_task --------------------------------
+#
+# ``attempt_task`` is the ONLY place the driver's retrieved block gets handed to an arm. If
+# either hand-off is ever dropped, A_full silently runs memory-free and the headline A_full
+# vs A_noMem comparison becomes a null by construction -- a failure that no assertion about
+# search internals can catch, because search would still be doing everything right with the
+# argument it was (not) given. These two tests pin both hand-offs at that seam.
+
+MEM_BLOCK = ("## Prior experience with this code\n"
+             "- ARITH: a prior repair changed `a - b` to `a + b` and passed its hidden suite.")
+
+
+def test_attempt_task_hands_the_memory_block_to_the_search(monkeypatch):
+    real_search = arm.search
+    captured: list[dict] = []
+
+    def spy_search(unit, proposer, value, **kw):
+        captured.append(kw)
+        return real_search(unit, proposer, value, **kw)
+
+    monkeypatch.setattr(arm, "search", spy_search)
+    fake = FakeProposer(ARMS["A_noMem"].model, [CORRECT])
+    attempt_task(ARMS["A_noMem"], U, SPEC, fake, ConstantValue(), memory=MEM_BLOCK)
+    assert MEM_BLOCK in fake.prompts[0]            # it really reached the model, and ...
+    assert captured[0]["memory"] is MEM_BLOCK      # ... as the very object, not a rebuild
+
+
+def test_attempt_task_defaults_the_search_to_no_memory(monkeypatch):
+    # A_noMem's own call: the kwarg is present and None, so the arm is byte-for-byte its S2
+    # self. A mutant that drops the kwarg fails on the KeyError, not on a None-vs-absent nicety.
+    real_search = arm.search
+    captured: list[dict] = []
+
+    def spy_search(unit, proposer, value, **kw):
+        captured.append(kw)
+        return real_search(unit, proposer, value, **kw)
+
+    monkeypatch.setattr(arm, "search", spy_search)
+    fake = FakeProposer(ARMS["A_noMem"].model, [CORRECT])
+    attempt_task(ARMS["A_noMem"], U, SPEC, fake, ConstantValue())
+    assert captured[0]["memory"] is None
+    assert all("Prior experience" not in p for p in fake.prompts)
+
+
+def test_attempt_task_hands_the_memory_block_to_the_naive_control(monkeypatch):
+    # The single-shot path (use_search=False). The spy wraps the REAL ``_naive_attempt``, so
+    # the prompt, the root_prompt and the symptom_failed asserted here are the genuine ones.
+    real_naive = arm._naive_attempt
+    captured: dict = {}
+
+    def spy_naive(cfg, unit, proposer, value, **kw):
+        captured.update(kw)
+        result = real_naive(cfg, unit, proposer, value, **kw)
+        captured["result"] = result
+        return result
+
+    monkeypatch.setattr(arm, "_naive_attempt", spy_naive)
+    fake = FakeProposer(ARMS["B_naive"].model, [CORRECT])
+    attempt_task(ARMS["B_naive"], U, SPEC, fake, ConstantValue(), memory=MEM_BLOCK)
+
+    assert len(fake.prompts) == 1                  # still single-shot: one prompt, no refinement
+    assert MEM_BLOCK in fake.prompts[0]
+    assert captured["memory"] is MEM_BLOCK
+    result = captured["result"]
+    assert result.root_prompt == fake.prompts[0]   # the prompt as SENT, not a reconstruction
+    assert result.symptom_failed == ("test_v0",)   # the buggy module fails the one visible test

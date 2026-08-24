@@ -70,7 +70,8 @@ def build_prompt(unit: Unit, symptom: TestReport, *, feedback: str | None = None
     reason from, before the codec order it must obey. ``None`` means *no memory organ*, and
     it is load-bearing that ``None`` adds NOTHING: A_noMem passes ``memory=None`` and its
     prompt must stay byte-for-byte the S2 text, or the arms differ by more than the one
-    pre-registered column and the comparison stops being a comparison.
+    pre-registered column and the comparison stops being a comparison. An empty or
+    whitespace-only block is treated exactly as ``None`` -- see the guard below.
     """
     parts: list[str] = [
         _PREAMBLE,
@@ -90,8 +91,13 @@ def build_prompt(unit: Unit, symptom: TestReport, *, feedback: str | None = None
         _render_symptom(symptom),
         "",
     ]
-    if memory is not None:
-        parts += [memory.rstrip("\n"), ""]
+    # Empty/blank is *nothing retrieved*, not an empty section -- emitting one would drop a
+    # stray blank line into a prompt that must otherwise be A_noMem's byte for byte. The guard
+    # is local on purpose: ``retrieve()`` returns None rather than "", but this template must
+    # not depend on a contract enforced two files away. Edges are stripped of newlines only,
+    # so the block stands alone as its own section with its internal formatting intact.
+    if memory is not None and memory.strip():
+        parts += [memory.strip("\n"), ""]
     parts.append(_INSTRUCTION)
     if feedback is not None:
         parts += ["", "## Feedback on your previous attempt", feedback]

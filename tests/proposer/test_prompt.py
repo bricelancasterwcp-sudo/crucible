@@ -86,3 +86,18 @@ def test_memory_and_feedback_coexist_on_a_refinement_prompt():
     assert MEM in p
     assert "attempt 1 still failed test_v0" in p
     assert p.index(MEM) < p.index(INSTRUCTION_MARK) < p.index("attempt 1 still failed")
+
+
+def test_empty_or_blank_memory_is_no_memory_not_an_empty_section():
+    # An empty block is *nothing retrieved*, not a section with nothing in it: emitting one
+    # would drop a stray blank line into a prompt that must otherwise be A_noMem's byte for
+    # byte. ``retrieve()`` returns None rather than "" today, but this template must not
+    # depend on a contract enforced two files away.
+    for blank in ("", "\n", "\n\n", "   ", "  \n \n"):
+        assert build_prompt(U, SYM, memory=blank) == GOLDEN_NO_MEMORY, repr(blank)
+
+
+def test_memory_block_edges_are_normalised_so_the_section_stands_alone():
+    # Leading/trailing newlines on the retrieved block must not add blank lines around the
+    # section; the block's own internal formatting is left untouched.
+    assert build_prompt(U, SYM, memory="\n" + MEM + "\n\n") == build_prompt(U, SYM, memory=MEM)

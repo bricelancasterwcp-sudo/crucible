@@ -1,7 +1,7 @@
 """Structural pre-checks (spec §4.8.1-3): does a composed stream match itself across phases?
 
 Task 16 runs :func:`precheck` before it writes or replays a stream and refuses any stream
-whose report ``.ok`` is False. Each of the seven named checks appears in the report whether
+whose report ``.ok`` is False. Each of the eight named checks appears in the report whether
 it passed or not -- a check that is merely absent is indistinguishable from one nobody ran,
 so the report is a census of every gate, not a list of the failures.
 
@@ -11,8 +11,11 @@ to be balanced by construction, and these checks are what prove it after the fac
 matched family mix (``family-distribution-identical``), matched difficulty
 (``killing-count-band``, ``unit-length-identical``), and no systematic timeout confound
 (``timeout-rate-band``, the consumer of Task 13's seeded phase coin flip). ``novel-disjoint``
-guards the control; ``distinct-sites`` guards each class's whole reason to exist; and
-``counts-named`` guards that the census the composer emitted is complete.
+guards the control; ``distinct-sites`` guards each class's whole reason to exist;
+``two-site-at-stack2`` makes a rung-1 label self-verifying -- the rung is what enters
+``stream_hash``, so a rung-0 stream mis-labelled ``stack2`` is indistinguishable from the
+real thing everywhere downstream *except* here; and ``counts-named`` guards that the census
+the composer emitted is complete.
 
 Two degenerate statistics are defined explicitly rather than left to raise.
 
@@ -112,6 +115,12 @@ def precheck(manifest: StreamManifest, units_by_id: dict[str, Unit]) -> Precheck
     bad = [cid for cid, (k1, k2) in manifest.classes.items()
            if k1 not in by_key or k2 not in by_key or sites(by_key[k1]) & sites(by_key[k2])]
     checks.append(Check("distinct-sites", not bad, f"same-site classes={bad[:5]}"))
+
+    # A no-op at every rung but ``stack2``: the guard is on the manifest's own label, so a
+    # rung-0 stream (every ``span2`` None by construction) passes without being looked at.
+    one_site = ([t.task_key for t in manifest.tasks if t.span2 is None]
+                if manifest.rung == "stack2" else [])
+    checks.append(Check("two-site-at-stack2", not one_site, f"single-site tasks={one_site[:5]}"))
 
     missing = [k for k in REQUIRED_COUNTS if k not in manifest.counts]
     checks.append(Check("counts-named", not missing, f"missing={missing}"))

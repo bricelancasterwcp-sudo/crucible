@@ -153,15 +153,22 @@ def test_unknown_rung_is_refused_before_any_work(tmp_path):
 def test_stack2_composes_only_two_site_tasks_and_keeps_the_singles_on_disk(tmp_path):
     # Every task at rung 1 is a two-site mutant: span2 set, two components, and the
     # components' spans are exactly the two sites the task reports.
+    from crucible.stream.precheck import precheck
     cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=6, max_hidden=2, jobs=2, rung="stack2")
     d = build_stream(cfg, tmp_path, recs=_stack_recs(), log=lambda *a: None)
     man = store.read_manifest(d)
     assert man.rung == "stack2" and len(man.tasks) == 4
+    task_mutants = {t.task_key: store.read_mutant(d, t.task_key) for t in man.tasks}
     for t in man.tasks:
         assert t.span2 is not None and t.span2 != t.span
-        m = store.read_mutant(d, t.task_key)
+        m = task_mutants[t.task_key]
         assert len(m.components) == 2
         assert {c.span for c in m.components} == {t.span, t.span2}
+
+    # A real rung-1 stream must clear the gate a run replays it through -- including
+    # two-site-at-stack2, which only a genuinely stacked manifest can pass.
+    rep = precheck(man, {u: store.read_unit(d, u) for u in man.unit_ids})
+    assert rep.ok, [c for c in rep.checks if not c.passed]
 
     # stack-apply is the builder-side census key: pairs that failed to become a stacked
     # mutant. addn's CONST pair always fails -- NumberReplacer yields two mutation
@@ -180,7 +187,16 @@ def test_stack2_composes_only_two_site_tasks_and_keeps_the_singles_on_disk(tmp_p
     stored = [store.read_mutant(d, k) for k in vals]
     singles = [m for m in stored if not m.components]
     assert singles and not (task_keys & {m.key for m in singles})
-    assert any(vals[m.key].valid for m in singles)
+    # The provenance has to be usable, not merely present: EVERY component of EVERY task
+    # must be findable on disk as a single-site mutant its own verdict calls valid. That is
+    # R-S25-1's component half, checked the way a reader would check it -- by the component
+    # coordinates, which are stated against the original source and so match the single's
+    # (operator, occurrence, span) exactly. Storing only the invalid singles, or only the
+    # first unit's, leaves this subset short.
+    valid_single_sites = {(m.operator, m.occurrence, m.span) for m in singles if vals[m.key].valid}
+    for t in man.tasks:
+        comps = {(c.operator, c.occurrence, c.span) for c in task_mutants[t.task_key].components}
+        assert comps <= valid_single_sites, (t.task_key, comps - valid_single_sites)
     # and what compose was offered was the stacked mutants alone -- the census counts them,
     # not the far larger pool of valid singles they were built from.
     assert man.counts["valid_mutants"] == sum(vals[m.key].valid for m in stored if m.components)

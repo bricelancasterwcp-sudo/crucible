@@ -15,7 +15,8 @@ def test_precheck_passes_on_a_well_formed_stream():
     rep = precheck(m, {u.unit_id: u for u in units})
     assert rep.ok, [c for c in rep.checks if not c.passed]
     assert {c.name for c in rep.checks} == {"family-distribution-identical", "killing-count-band", "unit-length-identical",
-                                            "timeout-rate-band", "novel-disjoint", "distinct-sites", "counts-named"}
+                                            "timeout-rate-band", "novel-disjoint", "distinct-sites", "counts-named",
+                                            "two-site-at-stack2"}
 
 def test_precheck_fails_when_a_second_task_shares_the_site():
     units, validated = _world(8)
@@ -73,3 +74,47 @@ def test_bands():
     d, band, ok = two_proportion_band(10, 100, 60, 100)
     assert not ok
     assert mean_band([1, 2, 3, 4], [1, 2, 3, 4])[2] and not mean_band([1, 1, 1, 1, 1], [9, 9, 9, 9, 9])[2]
+
+
+def _stack2(m):
+    """``m`` re-labelled rung 1, with every task given a plausible second site.
+
+    The rung is a *label* on the manifest -- it is what enters ``stream_hash`` -- so a
+    manifest can claim ``stack2`` while carrying single-site tasks. That is precisely the
+    mislabelling ``two-site-at-stack2`` exists to catch, so the fixture builds the honest
+    version here and each test breaks it in one place.
+    """
+    tasks = tuple(replace(t, span2=((t.span[0][0] + 10, 1), (t.span[0][0] + 10, 2))) for t in m.tasks)
+    return replace(m, rung="stack2", tasks=tasks)
+
+
+def test_two_site_check_is_a_no_op_below_stack2():
+    # Every rung-0 task has span2 None by construction. The check must pass anyway --
+    # dropping its rung guard turns every rung-0 stream red, which is what this pins.
+    units, validated = _world(8)
+    m = _full_counts(compose(units, validated, seed=0, C=4, n_nov=2))
+    assert m.rung == "base" and all(t.span2 is None for t in m.tasks)
+    rep = precheck(m, {u.unit_id: u for u in units})
+    assert rep.ok
+    assert next(c for c in rep.checks if c.name == "two-site-at-stack2").passed
+
+
+def test_two_site_check_passes_on_an_honest_stack2_manifest():
+    units, validated = _world(8)
+    m = _stack2(_full_counts(compose(units, validated, seed=0, C=4, n_nov=2)))
+    rep = precheck(m, {u.unit_id: u for u in units})
+    assert rep.ok, [c for c in rep.checks if not c.passed]
+
+
+def test_two_site_check_names_a_stack2_task_with_no_second_site():
+    # One task's span2 nulled: the report must go not-ok, EXACTLY this check must be the
+    # one that failed, and the offending task must be named rather than merely counted.
+    units, validated = _world(8)
+    m = _stack2(_full_counts(compose(units, validated, seed=0, C=4, n_nov=2)))
+    victim = m.tasks[0]
+    broken = replace(m, tasks=(replace(victim, span2=None),) + m.tasks[1:])
+    rep = precheck(broken, {u.unit_id: u for u in units})
+    assert not rep.ok
+    failed = [c.name for c in rep.checks if not c.passed]
+    assert failed == ["two-site-at-stack2"]
+    assert victim.task_key in next(c for c in rep.checks if c.name == "two-site-at-stack2").detail

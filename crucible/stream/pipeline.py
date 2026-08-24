@@ -36,7 +36,9 @@ and validated identically at both rungs -- they are what the stacker composes fr
 their verdicts are the provenance R-S25-1's component half is checked against -- but at
 ``stack2`` only the two-site mutants become tasks. So the singles' mutants and validations
 are stored at every rung and ``validated`` (what compose sees) holds the stacked pairs
-alone. An unknown rung is refused before any work rather than falling through to base:
+alone -- so at ``stack2`` the composition census in ``counts`` is over the stacked
+candidates only, and the singles' verdicts sit on disk without being census-counted.
+An unknown rung is refused before any work rather than falling through to base:
 a mis-spelled rung that silently built a rung-0 stream would be a mis-labelled experiment,
 and the stream hash would not give it away (the label is what got hashed).
 """

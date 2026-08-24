@@ -85,3 +85,18 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
   review); S3 must re-verify LoRA-attach on the 1.5B before A_full (spec calls it LoRA-safe, but
   unverified). Bigger-model alt = Apache **7B** coder (3B is `license:other`, excluded). Full record:
   `docs/findings/S2-ceiling-pilot.md §7`.
+- **RESOLVED (2026-08-23) — gate cleared, pilot ran, p0 recorded.** Amendment **A2** (Brice-approved):
+  small-arm proposer → `Qwen2.5-Coder-1.5B-Instruct` **chat-served** (client chat path added +
+  tested + verified live; §2). §4.7 landing pre-check chat-served = **1.00 (30/30), PASSES**.
+  Ceiling pilot (A_noMem, 1.5B chat, 30 phase-1 tasks, K=8): **p0 = 0.767, too_easy = true**
+  (p0 > 0.70). A_noMem (search, no memory) already solves 23/30 → the base stream is too easy for
+  the memory experiment; the pilot did its job catching an undiscriminating ceiling before the run.
+  Records: `runs/pilot-a2-15bc/A_noMem/`. Full record: `docs/findings/S2-ceiling-pilot.md §7–§8`.
+- **Deferred — hardening ladder is NOT implemented** (spec §4.8.4 / §10 S2 "apply the hardening
+  ladder if needed"). The pilot's `too_easy` verdict prescribes `FIRST_HARDENING_RUNG` = "stack two
+  mutations per unit", but `rung` is only a label in the stream hash — the mutation engine
+  (`mutants.py`) injects ONE mutation per task and even prefers *distinct* spans over stacking.
+  Reaching a discriminating stream (p0 ≤ 0.70) therefore needs **new build work**: a stack-2
+  mutation mode + rebuild + re-pilot. Scope decision (build it now as an S2.5 / fold into S4) is
+  Brice's. Until then the base rung stays measured-too-easy; the gating A_full-vs-A_noMem run must
+  wait for a hardened stream.

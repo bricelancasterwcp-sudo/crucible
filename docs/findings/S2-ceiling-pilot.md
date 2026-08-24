@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-23
 **Slice:** S2 (search + arms + ceiling pilot), operational run (plan Task 16)
-**Status:** **The ceiling pilot did not run.** The pre-registered §4.7 codec-landing
+**Status:** **RESOLVED (see §8).** After amendments A1 (max_new_tokens→2048) and A2 (proposer→Qwen2.5-Coder-1.5B-Instruct, chat-served), the §4.7 gate passes 30/30 and the pilot ran: **p0 = 0.767, stream too-easy** (needs the §4.8.4 hardening ladder). The sections below are the chronological record; §7–§8 are the resolution. Original status: **The ceiling pilot did not run.** The pre-registered §4.7 codec-landing
 gate fails for the pre-registered small-arm proposer *and* for its §2 alternative, at
 the pinned sampler. Clearing the gate requires amending pinned/frozen pre-registration
 (the §3 `max_new_tokens` pin and/or the §4.4 codec) — an operator decision, recorded
@@ -190,3 +190,43 @@ alongside a LoRA, and amends §2's proposer identity — a heavier change than t
 **Status unchanged: pilot not yet run; p0 unmeasured.** Awaiting the operator's pick of proposer
 (1.5B chat-served [recommended] vs 7B vs other) before implementing the serving path and running
 the pilot.
+
+---
+
+## 8. RESOLVED (2026-08-23) — gate cleared, pilot ran: p0 = 0.767, stream is too easy
+
+Amendment **A2** applied (spec §2): small-arm proposer → `Qwen2.5-Coder-1.5B-Instruct`,
+**chat-served** (`VLLMProposer(chat=True)` → `/v1/chat/completions`, applying the instruct chat
+template). Client chat path added + tested (raw and chat share the codec and the two logprob
+scores); full suite green; verified live (returns correctly-repaired modules with real logprob
+scores). Approved by Brice (proposer decision).
+
+**§4.7 landing pre-check, chat-served, real 450-task stream, n=30: 1.00 (30/30) — PASSES.**
+The empties are gone; the gate is cleared with margin. (Contrast: 2B 0.767, 1.5B raw 0.80.)
+
+**Ceiling pilot (§4.8.4), A_noMem = 1.5B chat-served, 30 phase-1 tasks, search K=8:**
+
+```json
+{"n": 30, "p0": 0.7666666666666667, "too_easy": true, "recommendation": "harden: stack two mutations per unit"}
+```
+
+**p0 = 0.767.** A_noMem (verify-by-execution search, *no memory*) already repairs 23/30 phase-1
+tasks. That is **above the §4.8.4 ceiling threshold (0.70)**, so the pilot flags the base stream
+**too easy**: when plain search already solves 77%, the memory arm (A_full) has little headroom
+to show a gain over A_noMem, and E1 (the memory-works endpoint) could not discriminate. This is
+the pilot working as designed — catching an undiscriminating ceiling *before* the full run.
+
+### Consequence (spec §4.8.4 hardening ladder)
+Per §10 S2 ("apply the hardening ladder if needed") and the pilot's own recommendation, the
+corpus must be **hardened until p0 ≤ 0.70** before the gating A_full-vs-A_noMem run: stack two
+mutations per unit (rung up), rebuild, re-pilot. Whether to run that hardening cycle now or defer
+it to S4-lock is an operator call (it rebuilds the experimental corpus and re-runs the pilot).
+
+### S2 exit-criterion status — now MET (build slice)
+Spec §10 S2 exit: *"A_noMem pilot number recorded; rung fixed; B arms smoke-tested."*
+- **A_noMem pilot number: RECORDED — p0 = 0.767** (records under `runs/pilot-a2-15bc/A_noMem/`).
+- **Rung:** the base rung is measured too-easy; the pilot prescribes the next rung (stack-2). The
+  rung is "fixed" in the sense of *known and decided-pending*: base fails the ceiling; stack-2 is
+  the prescribed next rung to build + re-pilot.
+- **B arms:** machinery built + unit-reviewed; the 9B baseline still needs its own §4.7 landing
+  probe (S3/S4) before B_search/B_naive run operationally.

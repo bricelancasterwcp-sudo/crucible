@@ -30,6 +30,19 @@ def test_for_candidate_starts_unexecuted():
     assert node.parent_id is None
 
 
+def test_for_candidate_defaults_to_depth_zero():
+    # The root node is built without a depth: it is depth 0 by construction.
+    assert Node.for_candidate(_cand("root\n")).depth == 0
+
+
+def test_for_candidate_records_the_depth_it_was_built_at():
+    # ``depth`` is the value model's feature surface (S3): it must survive on the node,
+    # not only in the search loop's private bookkeeping dict.
+    node = Node.for_candidate(_cand("child\n"), parent_id="parent-id", depth=3)
+    assert node.depth == 3
+    assert node.parent_id == "parent-id"
+
+
 # --- visible_reward: the denominator is the whole measured suite ------------
 
 

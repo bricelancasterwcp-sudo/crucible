@@ -69,7 +69,15 @@ class SearchResult:
     ``status`` is one of ``verified_visible`` (reward ``1.0``), ``abstain`` (best reward and
     value confidence both below :data:`ABSTAIN_THRESHOLD`), or ``believed``. ``confidence`` is
     the value score of the best node, clamped to ``[0, 1]``. ``to_dict``/``from_dict`` are exact
-    inverses -- every field is a JSON-native scalar.
+    inverses -- every field is a JSON-native scalar or a tuple of them.
+
+    The two trailing fields are what S3's memory organ reads back out of a finished search:
+    ``root_prompt`` is the ROOT seeding prompt exactly as sent (memory block included -- it is
+    what the episode stores and what sleep trains on), and ``symptom_failed`` is the visible
+    tests the FREE symptom run did not pass (failed + timed out + errored). A verified fix
+    passes the whole visible suite, so those are precisely the tests it flipped. Both are
+    trailing and defaulted, and ``from_dict`` fills them in when absent, so an S2-era record
+    -- written before either existed -- still loads.
     """
 
     best_patch: str
@@ -80,12 +88,21 @@ class SearchResult:
     nodes: int
     status: str
     confidence: float
+    root_prompt: str = ""
+    symptom_failed: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        """JSON-ready form: ``symptom_failed`` becomes a list so a file round-trip is exact."""
+        d = asdict(self)
+        d["symptom_failed"] = list(self.symptom_failed)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "SearchResult":
+        """Inverse of :meth:`to_dict`, tolerant of S2-era dicts that predate the S3 fields."""
+        d = dict(d)
+        d["root_prompt"] = d.get("root_prompt", "")
+        d["symptom_failed"] = tuple(d.get("symptom_failed", ()))
         return cls(**d)
 
 
@@ -145,6 +162,8 @@ class _Ctx:
     wall_cap_s: float
     tree: Tree
     rex: RexScheduler
+    memory: str | None = None
+    root_prompt: str = ""
     pending: dict[str, Node] = field(default_factory=dict)
     seen: set[str] = field(default_factory=set)
     depth: dict[str, int] = field(default_factory=dict)
@@ -152,7 +171,7 @@ class _Ctx:
 
 def _add_candidate(ctx: _Ctx, cand: Candidate, parent_id: str, node_depth: int) -> None:
     """Add one candidate as a fresh node + REx arm, unless its rewrite was already seen."""
-    node = Node.for_candidate(cand, parent_id=parent_id)
+    node = Node.for_candidate(cand, parent_id=parent_id, depth=node_depth)
     if node.node_id in ctx.seen:
         return
     ctx.seen.add(node.node_id)
@@ -163,8 +182,13 @@ def _add_candidate(ctx: _Ctx, cand: Candidate, parent_id: str, node_depth: int) 
 
 
 def _seed_roots(ctx: _Ctx, root: Node) -> None:
-    """Seed the tree with ``width`` root candidates drawn from the free-symptom prompt."""
-    prompt = build_prompt(ctx.unit, ctx.symptom)
+    """Seed the tree with ``width`` root candidates drawn from the free-symptom prompt.
+
+    The prompt is kept on the ctx verbatim (memory block and all) so :func:`_finalize` reports
+    the text that was actually sent, not a reconstruction that could drift from it.
+    """
+    prompt = build_prompt(ctx.unit, ctx.symptom, memory=ctx.memory)
+    ctx.root_prompt = prompt
     for cand in ctx.proposer.generate(prompt, n=ctx.width, seed=ctx.seed):
         _add_candidate(ctx, cand, root.node_id, 1)
 
@@ -172,7 +196,8 @@ def _seed_roots(ctx: _Ctx, root: Node) -> None:
 def _expand(ctx: _Ctx, node: Node) -> None:
     """Refine a failing node: build a feedback prompt and add ``width`` children as arms."""
     depth = ctx.depth[node.node_id]
-    prompt = build_prompt(ctx.unit, ctx.symptom, feedback=_feedback(node.report))
+    prompt = build_prompt(ctx.unit, ctx.symptom, feedback=_feedback(node.report),
+                          memory=ctx.memory)
     for cand in ctx.proposer.generate(prompt, n=ctx.width, seed=ctx.seed + depth):
         _add_candidate(ctx, cand, node.node_id, depth + 1)
 
@@ -248,23 +273,32 @@ def _finalize(ctx: _Ctx, executions_charged: int) -> SearchResult:
         nodes=len(ctx.seen),
         status=_status(reward, confidence),
         confidence=confidence,
+        root_prompt=ctx.root_prompt,
+        symptom_failed=(tuple(ctx.symptom.failed) + tuple(ctx.symptom.timed_out)
+                        + tuple(ctx.symptom.errored)),
     )
 
 
 def search(unit: Unit, proposer: Proposer, value, *, seed: int, k: int = 8, width: int = 4,
+           memory: str | None = None,
            per_test_timeout_s: float = 5.0, wall_cap_s: float = 60.0) -> SearchResult:
     """Budgeted propose->execute->refine search; returns the final submission (spec S4.6).
 
     ``value`` may be any object with ``score(node) -> float`` (or ``None``). Determinism: the REx
     rng is seeded ``f"{seed}:search:{unit.unit_id}"`` and the proposer seed is passed through, so
     an identical ``(unit, proposer, value, seed, ...)`` reproduces the search exactly.
+
+    ``memory`` is the S3 retrieved-memory block. It reaches EVERY prompt this search builds --
+    the root seeding prompt and every refinement prompt alike -- because a block that fades
+    after the first round would make "the agent had memory" true only of the first attempt.
+    ``None`` (A_noMem) adds nothing to any prompt: the arm is byte-for-byte its S2 self.
     """
     symptom = run(unit, unit.module_src, None,          # rule 1: the FREE symptom, never charged
                   per_test_timeout_s=per_test_timeout_s, wall_cap_s=wall_cap_s)
     rng = random.Random(f"{seed}:search:{unit.unit_id}")
     root = Node.for_candidate(Candidate(unit.module_src, None, None))
     ctx = _Ctx(unit, proposer, value, symptom, seed, width, per_test_timeout_s, wall_cap_s,
-               Tree(root), RexScheduler(rng=rng))
+               Tree(root), RexScheduler(rng=rng), memory=memory)
     ctx.seen.add(root.node_id)
     ctx.depth[root.node_id] = 0
     _seed_roots(ctx, root)

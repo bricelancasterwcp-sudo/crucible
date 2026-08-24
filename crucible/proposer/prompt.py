@@ -17,8 +17,8 @@ The withheld evaluation set is not named, described, or alluded to -- the model 
 a real repair from the visible evidence alone, not pattern-match to a leaked target.
 
 ``build_prompt`` is a pure function of its arguments: no randomness, no clock, no
-environment. The same ``(unit, symptom, feedback)`` always yields byte-identical text, so
-a run is reproducible from its recorded inputs.
+environment. The same ``(unit, symptom, feedback, memory)`` always yields byte-identical
+text, so a run is reproducible from its recorded inputs.
 """
 from __future__ import annotations
 
@@ -57,11 +57,20 @@ def _render_symptom(symptom: TestReport) -> str:
     return "\n".join(lines)
 
 
-def build_prompt(unit: Unit, symptom: TestReport, *, feedback: str | None = None) -> str:
+def build_prompt(unit: Unit, symptom: TestReport, *, feedback: str | None = None,
+                 memory: str | None = None) -> str:
     """Assemble the deterministic repair prompt for ``unit`` given its ``symptom``.
 
     On refinement, ``feedback`` (what the previous attempt got wrong) is appended so the
     model can correct course. Returns byte-identical text for identical inputs.
+
+    ``memory`` is the S3 retrieved-memory block (``crucible.memory.retrieve``), which already
+    carries its own ``## Prior experience with this code`` header; it is inserted as its own
+    section between the Symptom and the instruction -- after the evidence the agent must
+    reason from, before the codec order it must obey. ``None`` means *no memory organ*, and
+    it is load-bearing that ``None`` adds NOTHING: A_noMem passes ``memory=None`` and its
+    prompt must stay byte-for-byte the S2 text, or the arms differ by more than the one
+    pre-registered column and the comparison stops being a comparison.
     """
     parts: list[str] = [
         _PREAMBLE,
@@ -80,8 +89,10 @@ def build_prompt(unit: Unit, symptom: TestReport, *, feedback: str | None = None
         "The visible test suite was executed once and reported:",
         _render_symptom(symptom),
         "",
-        _INSTRUCTION,
     ]
+    if memory is not None:
+        parts += [memory.rstrip("\n"), ""]
+    parts.append(_INSTRUCTION)
     if feedback is not None:
         parts += ["", "## Feedback on your previous attempt", feedback]
     return "\n".join(parts) + "\n"

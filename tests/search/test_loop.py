@@ -16,6 +16,8 @@ The four invariants each test pins:
   (d) a candidate whose run returns an ``infra_error`` -> that execution is neither charged
       nor REx-updated, and a later good candidate still solves.
 """
+import json
+
 import pytest
 
 from crucible.run.types import Candidate
@@ -239,3 +241,151 @@ def test_posterior_drives_refinement_order(monkeypatch):
 def test_search_result_round_trip():
     r = SearchResult("def f():\n    pass\n", "abc123", 0.5, 3, True, 7, "believed", 0.42)
     assert SearchResult.from_dict(r.to_dict()) == r
+
+
+# --- S3: the retrieved-memory block threaded through the whole search --------
+#
+# A_full = search + memory. The block must reach EVERY prompt the search builds (root seeding
+# AND refinement), and A_noMem -- which passes memory=None -- must behave byte-for-byte as it
+# did in S2, so the two arms differ only by the pre-registered columns.
+
+MEM_BLOCK = ("## Prior experience with this code\n"
+             "- ARITH: a prior repair changed `a - b` to `a + b` and passed its hidden suite.")
+
+
+class ProbeProposer:
+    """Records every prompt it is asked to complete; emits a distinct variant each call.
+
+    Distinct texts mean refinement children are genuinely new nodes (nothing dedups away), so
+    the tree really grows past depth 1 and refinement prompts are really built and captured.
+    """
+
+    model = "fake"
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self._i = 0
+
+    def generate(self, prompt, *, n, seed, max_tokens=1024, temperature=0.7):
+        self.prompts.append(prompt)
+        out = []
+        for _ in range(n):
+            self._i += 1
+            out.append(Candidate(f"# variant {self._i}\n{BUG}", None, 0.4))
+        return out
+
+
+@pytest.mark.timeout(60)
+def test_memory_block_reaches_every_prompt_including_refinements(monkeypatch):
+    # Canned reports: no sandbox, instant, and every REx draw is seeded -> deterministic.
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    probe = ProbeProposer()
+    search(_unit(), probe, ConstantValue(0.3), seed=11, k=4, width=2, memory=MEM_BLOCK)
+    assert len(probe.prompts) >= 2
+    # The refinement path was actually exercised (a feedback prompt names still-failing tests).
+    assert any("still failing:" in p for p in probe.prompts)
+    missing = [i for i, p in enumerate(probe.prompts) if MEM_BLOCK not in p]
+    assert missing == [], f"prompts without the memory block: {missing}"
+
+
+@pytest.mark.timeout(60)
+def test_no_memory_means_no_block_in_any_prompt(monkeypatch):
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    for kwargs in ({}, {"memory": None}):            # A_noMem, implicit and explicit
+        probe = ProbeProposer()
+        search(_unit(), probe, ConstantValue(0.3), seed=11, k=4, width=2, **kwargs)
+        assert probe.prompts
+        assert all("Prior experience" not in p for p in probe.prompts)
+
+
+@pytest.mark.timeout(60)
+def test_explicit_memory_none_reproduces_the_s2_search_exactly(monkeypatch):
+    # A_noMem byte-identity: threading ``memory`` must not perturb the arm by one byte --
+    # not the prompts it sends, not the result it returns.
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    p1 = ProbeProposer()
+    r1 = search(_unit(), p1, ConstantValue(0.3), seed=13, k=4, width=2)
+    p2 = ProbeProposer()
+    r2 = search(_unit(), p2, ConstantValue(0.3), seed=13, k=4, width=2, memory=None)
+    assert p1.prompts == p2.prompts
+    d1, d2 = r1.to_dict(), r2.to_dict()
+    for d in (d1, d2):                               # the two S3-only columns, compared apart
+        d.pop("root_prompt")
+        d.pop("symptom_failed")
+    assert d1 == d2
+    assert r1.root_prompt == r2.root_prompt
+    assert r1.symptom_failed == r2.symptom_failed
+
+
+@pytest.mark.timeout(60)
+def test_root_prompt_is_the_root_seeding_prompt_with_the_memory_block(monkeypatch):
+    # This is what the episode stores and sleep trains on: the ROOT prompt as actually sent.
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    probe = ProbeProposer()
+    r = search(_unit(), probe, ConstantValue(0.3), seed=17, k=2, width=1, memory=MEM_BLOCK)
+    assert r.root_prompt == probe.prompts[0]
+    assert MEM_BLOCK in r.root_prompt
+    assert "still failing:" not in r.root_prompt      # the root prompt, not a refinement one
+
+
+@pytest.mark.timeout(60)
+def test_symptom_failed_is_the_free_symptoms_failing_tests(monkeypatch):
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    r = search(_unit(), ProbeProposer(), ConstantValue(0.3), seed=19, k=1, width=1)
+    assert r.symptom_failed == ("test_v0", "test_v1")
+
+
+@pytest.mark.timeout(60)
+def test_symptom_failed_includes_timed_out_and_errored_but_not_passed(monkeypatch):
+    # A verified fix flips every test the symptom did not pass, so hangs and collection
+    # errors belong in this tuple exactly as failures do (they are failures to pass).
+    def sym_run(u, patch, subset, **kw):
+        if patch == u.module_src:
+            return TestReport(("test_ok",), ("test_v0",), ("test_slow",), ("test_boom",),
+                              0.0, None)
+        return TestReport((), ("test_v0",), (), (), 0.0, None)
+
+    monkeypatch.setattr(loop_mod, "run", sym_run)
+    r = search(_unit(), ProbeProposer(), ConstantValue(0.3), seed=19, k=1, width=1)
+    assert r.symptom_failed == ("test_v0", "test_slow", "test_boom")
+
+
+@pytest.mark.timeout(60)
+def test_node_depth_matches_the_loops_depth_bookkeeping(monkeypatch):
+    # ``ctx.depth`` stays the loop's bookkeeping; ``node.depth`` is the value model's feature
+    # surface (Task 7). They must agree for every node the search builds.
+    monkeypatch.setattr(loop_mod, "run", _canned_run)
+    seen: dict = {}
+    real_finalize = loop_mod._finalize
+
+    def spy_finalize(ctx, charged):
+        seen["ctx"] = ctx
+        return real_finalize(ctx, charged)
+
+    monkeypatch.setattr(loop_mod, "_finalize", spy_finalize)
+    search(_unit(), ProbeProposer(), ConstantValue(0.3), seed=23, k=4, width=2)
+    ctx = seen["ctx"]
+    nodes = list(ctx.tree._by_id.values())
+    assert nodes
+    for node in nodes:
+        assert node.depth == ctx.depth[node.node_id]
+    assert max(node.depth for node in nodes) >= 2      # refinement really nested
+
+
+def test_search_result_round_trips_the_s3_fields_through_json():
+    r = SearchResult("def f():\n    pass\n", "abc123", 0.5, 3, True, 7, "believed", 0.42,
+                     root_prompt="ROOT\n## Prior experience with this code\n- x",
+                     symptom_failed=("test_a", "test_b"))
+    back = SearchResult.from_dict(json.loads(json.dumps(r.to_dict())))
+    assert back == r
+    assert back.symptom_failed == ("test_a", "test_b")   # tuple survives the JSON list
+
+
+def test_search_result_from_dict_loads_an_s2_era_dict():
+    # S2 records predate both fields; they must load, not raise, with the empty defaults.
+    s2 = {"best_patch": "p", "best_node_id": "n", "visible_reward": 1.0,
+          "executions_charged": 2, "landed": True, "nodes": 3,
+          "status": "verified_visible", "confidence": 0.9}
+    r = SearchResult.from_dict(s2)
+    assert r.root_prompt == ""
+    assert r.symptom_failed == ()

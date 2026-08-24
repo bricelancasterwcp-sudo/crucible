@@ -62,6 +62,11 @@ class Node:
     Mutable by design: ``report`` and ``status`` are ``None``/``"unexecuted"`` until the
     node is run, then set together via :meth:`apply_report`. ``node_id`` is the sha256 of
     ``candidate.text`` -- the cached-result key, so the same rewrite is the same node.
+
+    ``depth`` is how many refinement rounds deep this node sits (root 0, its children 1, ...).
+    The search loop keeps its own depth dict for bookkeeping; this field is the value model's
+    feature surface -- a node carries its own depth wherever it is scored, so a scorer never
+    has to reach back into the loop's private state to learn how refined a candidate is.
     """
 
     node_id: str
@@ -69,11 +74,13 @@ class Node:
     parent_id: str | None
     report: TestReport | None = None
     status: str = UNEXECUTED
+    depth: int = 0
 
     @classmethod
-    def for_candidate(cls, candidate: Candidate, parent_id: str | None = None) -> "Node":
-        """Build an unexecuted node, keying ``node_id`` off ``candidate.text``."""
-        return cls(sha256_text(candidate.text), candidate, parent_id)
+    def for_candidate(cls, candidate: Candidate, parent_id: str | None = None,
+                      depth: int = 0) -> "Node":
+        """Build an unexecuted node at ``depth``, keying ``node_id`` off ``candidate.text``."""
+        return cls(sha256_text(candidate.text), candidate, parent_id, depth=depth)
 
     def visible_reward(self) -> float:
         """Fraction of visible tests passing; 0.0 if unexecuted."""

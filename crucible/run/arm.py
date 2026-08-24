@@ -82,16 +82,22 @@ ARMS: dict[str, ArmConfig] = {
 }
 
 
-def _naive_attempt(cfg: ArmConfig, unit: Unit, proposer, value) -> SearchResult:
+def _naive_attempt(cfg: ArmConfig, unit: Unit, proposer, value, *,
+                   memory: str | None = None) -> SearchResult:
     """The single-shot control (``B_naive``): one free symptom, one candidate, no refinement.
 
     One free (uncharged) visible run learns the symptom for the prompt; ``generate`` is called
     exactly once with ``n=1``; the sole candidate's visible suite is run once -- the single
     charged execution (0 if that run threw infra, which is never charged, ruling R7). No REx,
     no tree, no refinement: the honest no-search baseline.
+
+    ``memory`` is threaded for signature parity with :func:`search`, and the resulting
+    ``SearchResult`` carries the same ``root_prompt``/``symptom_failed`` the search arms report,
+    so the memory organ reads one shape of result whichever arm produced it.
     """
     symptom = run(unit, unit.module_src, None)                 # free symptom, never charged
-    cand = proposer.generate(build_prompt(unit, symptom), n=1, seed=cfg.seed)[0]
+    prompt = build_prompt(unit, symptom, memory=memory)
+    cand = proposer.generate(prompt, n=1, seed=cfg.seed)[0]
     node = Node.for_candidate(cand)
     report = run(unit, cand.text, None)                        # the one charged visible execution
     charged = 0 if report.infra_error is not None else 1
@@ -100,11 +106,14 @@ def _naive_attempt(cfg: ArmConfig, unit: Unit, proposer, value) -> SearchResult:
     reward = node.visible_reward()
     status = VERIFIED_VISIBLE if reward >= 1.0 else BELIEVED
     return SearchResult(cand.text, node.node_id, reward, charged,
-                        bool(cand.text.strip()), 1, status, _value_score(value, node))
+                        bool(cand.text.strip()), 1, status, _value_score(value, node),
+                        root_prompt=prompt,
+                        symptom_failed=(tuple(symptom.failed) + tuple(symptom.timed_out)
+                                        + tuple(symptom.errored)))
 
 
 def attempt_task(cfg: ArmConfig, unit: Unit, taskspec: TaskSpec, proposer, value,
-                 ) -> tuple[TaskRecord, list[ExecRecord]]:
+                 *, memory: str | None = None) -> tuple[TaskRecord, list[ExecRecord]]:
     """Attempt ``taskspec``'s repair under arm ``cfg``; return its record + exec records.
 
     Runs the search (or the single-shot control), takes the final submission, and computes
@@ -112,15 +121,20 @@ def attempt_task(cfg: ArmConfig, unit: Unit, taskspec: TaskSpec, proposer, value
     seen by the agent. ``hidden_pass`` is the hidden report's ``all_passed`` when it produced
     a verdict, else ``None`` (an infra failure is "not measured", never a fail). The proposer
     must be serving the arm's declared model, or the attempt is not the one configured.
+
+    ``memory`` is the S3 retrieved-memory block, passed straight down to the search (or to the
+    single-shot control). ``None`` -- the default, and what A_noMem and the B arms pass -- makes
+    every prompt byte-for-byte its S2 self, so the arms differ only by the pre-registered column.
     """
     if getattr(proposer, "model", None) != cfg.model:
         raise ValueError(f"arm {cfg.name!r} expects model {cfg.model!r}, "
                          f"proposer serves {getattr(proposer, 'model', None)!r}")
     started = time.monotonic()
     if cfg.use_search:
-        result = search(unit, proposer, value, seed=cfg.seed, k=cfg.k, width=cfg.width)
+        result = search(unit, proposer, value, seed=cfg.seed, k=cfg.k, width=cfg.width,
+                        memory=memory)
     else:
-        result = _naive_attempt(cfg, unit, proposer, value)
+        result = _naive_attempt(cfg, unit, proposer, value, memory=memory)
 
     rh = run_hidden(unit, result.best_patch)                   # THE OUTCOME ORACLE (uncharged)
     hidden_pass = rh.all_passed if rh.infra_error is None else None   # None = not measured

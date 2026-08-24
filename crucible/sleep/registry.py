@@ -5,10 +5,20 @@ regression gate; win or lose, the outcome is recorded here -- an accepted adapte
 never got written down would be indistinguishable from one that was never trained, and a
 rejected one that got silently dropped would make "why does the server still have the old
 adapter loaded" impossible to answer from the file alone. Every ``record`` call appends
-exactly one line; nothing here ever rewrites or deletes a prior line, so the whole
-training history survives a crash mid-cycle -- the same append-only discipline
-``crucible.stream.store``'s ``validations.jsonl`` uses, for the same reason (a dropped
-outcome must not look like an outcome that never happened).
+exactly one line; nothing here ever rewrites or deletes a prior line -- the same
+append-only discipline ``crucible.stream.store``'s ``validations.jsonl`` uses, for the same
+reason (a dropped outcome must not look like an outcome that never happened).
+
+*A crash DURING a ``record`` call's write is tolerated; a crash that corrupts an already-
+completed line is not (fix, review finding 2).* A process killed mid-``write()`` can leave
+a torn, unparseable FINAL line on disk -- that ``record`` call never actually committed a
+row, so ``_read_all`` drops an unparseable final line silently rather than raising (see its
+own docstring). This is not the same claim as "the whole training history survives a crash
+mid-cycle": it survives a crash mid-*append*, because the append that was interrupted never
+counted as a row in the first place. An unparseable line that is NOT the last one is a
+different, worse failure -- some earlier, already-completed write left the file corrupted
+underneath later writes that still landed -- and ``_read_all`` still raises loudly on that,
+exactly as it did before this fix.
 
 *``adapter_id`` is identity, not description (the same rule ``schema.py``'s
 ``content_id`` follows).* ``adapter_id_for`` mints it as ``"ad-" + episode_set_hash[:16]``
@@ -95,11 +105,33 @@ class AdapterRegistry:
             fh.write(json.dumps(rec.to_dict(), sort_keys=True) + "\n")
 
     def _read_all(self) -> list[AdapterRecord]:
-        """Every row in write order, or ``[]`` if nothing has been recorded yet."""
+        """Every row in write order, or ``[]`` if nothing has been recorded yet.
+
+        Tolerates exactly one failure mode: the FINAL non-blank line failing to parse as
+        JSON -- what a crash mid-``record()`` write leaves behind. That call's row never
+        actually committed, so there is nothing to recover and the torn tail is dropped,
+        the same way a database WAL discards an incomplete final entry (see the module
+        docstring). A non-blank line BEFORE the final one that fails to parse is a
+        different, worse thing: a completed write left that byte range malformed while
+        later writes still landed after it -- real corruption, not a torn append -- so
+        that case still raises ``json.JSONDecodeError`` rather than silently skipping data
+        loss in the middle of the ledger.
+        """
         if not self._path.exists():
             return []
         with open(self._path, encoding="utf-8") as fh:
-            return [AdapterRecord.from_dict(json.loads(line)) for line in fh if line.strip()]
+            lines = [line for line in fh if line.strip()]
+        records: list[AdapterRecord] = []
+        last_index = len(lines) - 1
+        for i, line in enumerate(lines):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                if i == last_index:
+                    break  # torn write: this record() call never completed -- nothing to recover
+                raise
+            records.append(AdapterRecord.from_dict(payload))
+        return records
 
     def latest_accepted(self) -> str | None:
         """The most recently recorded ``accepted=True`` adapter id, or ``None`` if none yet.

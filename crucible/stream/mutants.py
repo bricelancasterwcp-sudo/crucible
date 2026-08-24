@@ -47,6 +47,25 @@ Span = tuple[tuple[int, int], tuple[int, int]]
 
 
 @dataclass(frozen=True)
+class Component:
+    """One of a stacked mutant's two constituent mutations, coordinates against the ORIGINAL source."""
+    operator: str
+    occurrence: int
+    span: Span
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["span"] = [list(d["span"][0]), list(d["span"][1])]
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Component":
+        d = dict(d)
+        d["span"] = (tuple(d["span"][0]), tuple(d["span"][1]))
+        return cls(**d)
+
+
+@dataclass(frozen=True)
 class MutantSpec:
     """A mutation that *could* be applied: where it is, what makes it, which family it counts as.
 
@@ -66,7 +85,9 @@ class Mutant:
     """One applied mutation: the mutated source, its diff, and the key both hash to.
 
     Field order is frozen -- downstream tasks construct ``Mutant`` positionally, and
-    ``key`` becomes ``TaskSpec.task_key`` unchanged.
+    ``key`` becomes ``TaskSpec.task_key`` unchanged. ``components`` is () for single-site
+    mutations and a two-element tuple for stacked mutations in file order, with
+    top-level coordinates equal to the early component's.
     """
 
     unit_id: str
@@ -77,11 +98,13 @@ class Mutant:
     span: Span
     mutated_src: str
     diff: str
+    components: tuple["Component", ...] = ()
 
     def to_dict(self) -> dict:
         """JSON-ready form: the nested span tuples become lists so a file round-trip is exact."""
         d = asdict(self)
         d["span"] = [list(d["span"][0]), list(d["span"][1])]
+        d["components"] = [c.to_dict() for c in self.components]
         return d
 
     @classmethod
@@ -89,6 +112,7 @@ class Mutant:
         """Inverse of :meth:`to_dict`; restores the tuple shape so equality holds."""
         d = dict(d)
         d["span"] = (tuple(d["span"][0]), tuple(d["span"][1]))
+        d["components"] = tuple(Component.from_dict(c) for c in d.pop("components", []))
         return cls(**d)
 
 

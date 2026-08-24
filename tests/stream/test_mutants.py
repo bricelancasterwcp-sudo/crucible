@@ -145,3 +145,25 @@ def test_sample_specs_prefers_distinct_spans():
         chosen = sample_specs(specs, per_family=2, rng=random.Random(seed))
         assert len(chosen) == 2
         assert len({s.span for s in chosen}) == 2, f"seed {seed} sampled the same span twice"
+
+
+def test_component_round_trips():
+    from crucible.stream.mutants import Component
+    c = Component("Op", 3, ((2, 1), (2, 5)))
+    assert Component.from_dict(c.to_dict()) == c
+    assert c.to_dict()["span"] == [[2, 1], [2, 5]]
+
+
+def test_mutant_components_round_trip_and_default():
+    from crucible.stream.mutants import Component
+    m = Mutant("u", "k", "Op", 0, "ARITH", ((1, 0), (1, 2)), "s", "d")   # positional, no components
+    assert m.components == ()
+    m2 = Mutant("u", "k", "Op", 0, "ARITH", ((1, 0), (1, 2)), "s", "d",
+                components=(Component("Op", 0, ((1, 0), (1, 2))), Component("Op2", 1, ((2, 0), (2, 2)))))
+    assert Mutant.from_dict(m2.to_dict()) == m2
+
+
+def test_mutant_from_dict_accepts_pre_stack2_records():
+    d = Mutant("u", "k", "Op", 0, "ARITH", ((1, 0), (1, 2)), "s", "d").to_dict()
+    d.pop("components")                       # a record written before this field existed
+    assert Mutant.from_dict(d).components == ()

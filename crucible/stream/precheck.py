@@ -118,7 +118,10 @@ def precheck(manifest: StreamManifest, units_by_id: dict[str, Unit]) -> Precheck
 
     # A no-op at every rung but ``stack2``: the guard is on the manifest's own label, so a
     # rung-0 stream (every ``span2`` None by construction) passes without being looked at.
-    one_site = ([t.task_key for t in manifest.tasks if t.span2 is None]
+    # ``span2 == span`` is the same failure wearing a second site's clothes -- one site
+    # named twice is still one bug -- and ``distinct-sites`` cannot see it, because a
+    # degenerate task's site *set* is just ``{span}`` and can be disjoint from its partner's.
+    one_site = ([t.task_key for t in manifest.tasks if t.span2 is None or t.span2 == t.span]
                 if manifest.rung == "stack2" else [])
     checks.append(Check("two-site-at-stack2", not one_site, f"single-site tasks={one_site[:5]}"))
 

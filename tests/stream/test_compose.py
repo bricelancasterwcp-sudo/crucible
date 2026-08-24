@@ -391,6 +391,30 @@ def test_stack_apply_is_a_seeded_census_key_and_extra_counts_merge():
     assert man2.counts["stack-apply"] == 7
 
 
+def test_extra_counts_fills_a_seeded_zero_and_never_overwrites_a_measurement():
+    """The census hand-off is not a tamper path.
+
+    A bare ``counts.update(extra_counts)`` lets a caller rewrite a value compose itself
+    *measured* -- ``equivalent``, say -- and the manifest would report the new number with
+    nothing on disk to say it was ever otherwise. So the merge is narrowed to exactly what
+    it exists for: a key of the closed vocabulary (``EXCLUSION_REASONS``) that is still
+    sitting at its seeded zero, i.e. one compose could not have observed.
+    """
+    units, validated = _world(8)
+    man = compose(units, validated, seed=0, C=4, n_nov=2, rung="base")
+    assert man.counts["equivalent"] > 0                 # measured by compose, not a seeded zero
+    with pytest.raises(ValueError):                     # would clobber that measurement
+        compose(units, validated, seed=0, C=4, n_nov=2, rung="base",
+                extra_counts={"equivalent": 7})
+    with pytest.raises(ValueError):                     # outside the closed vocabulary
+        compose(units, validated, seed=0, C=4, n_nov=2, rung="base",
+                extra_counts={"invented-reason": 1})
+    ok = compose(units, validated, seed=0, C=4, n_nov=2, rung="base",
+                 extra_counts={"stack-apply": 3})       # a seeded zero: still merges
+    assert ok.counts["stack-apply"] == 3
+    assert ok.counts["equivalent"] == man.counts["equivalent"]
+
+
 def test_short_anchored_walk_raises_rather_than_shipping_a_short_stream():
     """The census is existential, the walk is anchored -- and the guard is over the walk.
 

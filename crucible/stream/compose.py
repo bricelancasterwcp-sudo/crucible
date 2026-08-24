@@ -372,7 +372,10 @@ def compose(units: list[Unit], validated: dict[str, list[Pair]], *,
 
     ``extra_counts`` merges census keys the *builder* observed and compose never could --
     rung 1's ``stack-apply`` -- into ``counts`` after the closed vocabulary is seeded, so
-    the manifest can report them without compose having to know how they happened.
+    the manifest can report them without compose having to know how they happened. It may
+    only *fill in* such a key: a key outside :data:`EXCLUSION_REASONS`, or one whose seeded
+    zero compose has already measured up, is a :class:`ValueError` rather than a silent
+    overwrite of a measured census value.
     """
     rng = random.Random(f"{seed}:compose")
     valid_by_unit, no_valid, counts = _partition_valid(units, validated)
@@ -399,7 +402,14 @@ def compose(units: list[Unit], validated: dict[str, list[Pair]], *,
     counts["ineligible-class"] = len(ineligible)
     for reason in EXCLUSION_REASONS:
         counts.setdefault(reason, 0)                    # None-vs-zero: unobserved is still named
-    counts.update(extra_counts or {})                   # builder-side census keys, e.g. stack-apply
+    extra = extra_counts or {}
+    bad = sorted(set(extra) - set(EXCLUSION_REASONS))
+    if bad:
+        raise ValueError(f"extra_counts keys outside the closed vocabulary: {bad}")
+    measured = sorted(k for k in extra if counts[k] != 0)
+    if measured:                                        # fill in a seeded zero; never clobber a measurement
+        raise ValueError(f"extra_counts would overwrite measured census values: {measured}")
+    counts.update(extra)                                # builder-side census keys, e.g. stack-apply
     counts.update({"eligible_classes": len(eligible), "classes_taken": len(classes),
                    "units-unused": len(unused),
                    "valid_mutants": sum(len(v) for v in valid_by_unit.values())})

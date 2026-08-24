@@ -118,3 +118,21 @@ def test_two_site_check_names_a_stack2_task_with_no_second_site():
     failed = [c.name for c in rep.checks if not c.passed]
     assert failed == ["two-site-at-stack2"]
     assert victim.task_key in next(c for c in rep.checks if c.name == "two-site-at-stack2").detail
+
+
+def test_two_site_check_names_a_stack2_task_whose_second_site_is_its_first():
+    # The degenerate twin of the nulled span2: span2 == span is a second site in name only,
+    # and one site named twice is still one bug. Nothing else in the report catches it --
+    # distinct-sites reads the task's site *set*, which collapses to {span} and stays
+    # disjoint from the partner's -- so narrowing this check back to "span2 is None" alone
+    # leaves a mislabelled rung-1 stream green. EXACTLY this check must fail, and it must
+    # name the task rather than merely count it.
+    units, validated = _world(8)
+    m = _stack2(_full_counts(compose(units, validated, seed=0, C=4, n_nov=2)))
+    victim = m.tasks[0]
+    broken = replace(m, tasks=(replace(victim, span2=victim.span),) + m.tasks[1:])
+    rep = precheck(broken, {u.unit_id: u for u in units})
+    assert not rep.ok
+    failed = [c.name for c in rep.checks if not c.passed]
+    assert failed == ["two-site-at-stack2"]
+    assert victim.task_key in next(c for c in rep.checks if c.name == "two-site-at-stack2").detail

@@ -24,6 +24,8 @@ serve = [
   "vllm",               # Apache-2.0; primary server (--served-model-name identity)
   "transformers",       # Apache-2.0; model + tokenizer load in the LoRA smoke
   "peft",               # Apache-2.0; LoRA attach
+  "trl",                # Apache-2.0; SFTTrainer for crucible/sleep/train.py's LoraTrainer
+  "datasets",           # Apache-2.0; in-memory Dataset for the sleep-cycle SFT pairs
   "ninja",              # vLLM FlashInfer sampler JIT needs it; also set VLLM_USE_FLASHINFER_SAMPLER=0 (see docs/findings/S1-serving.md)
   "accelerate",         # Apache-2.0; device_map/dtype placement for the smoke
 ]

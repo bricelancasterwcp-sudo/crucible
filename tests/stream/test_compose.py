@@ -314,3 +314,12 @@ def test_dicts_round_trip_through_json():
     td = json.loads(json.dumps(t.to_dict()))
     assert set(td) == {f.name for f in fields(TaskSpec)}
     assert TaskSpec.from_dict(td) == t and isinstance(TaskSpec.from_dict(td).span[0], tuple)
+
+
+def test_rung0_hash_regression():
+    """Pinned on master @ a5d5dd9 (pre-stack2). If this moves, the rung-0 rng
+    sequence or hash inputs changed — spec §6 forbids that. Do NOT re-pin to
+    make it pass; find the drift."""
+    units, validated = _world(8)
+    man = compose(units, validated, seed=0, C=4, n_nov=2, rung="base")
+    assert man.stream_hash == "42953644bb923f7ffb6e742ef65fe042835c3178cd0b2974536014b759c9448d"

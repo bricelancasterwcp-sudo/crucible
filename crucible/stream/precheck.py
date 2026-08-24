@@ -33,11 +33,15 @@ import math
 from collections import Counter
 from dataclasses import asdict, dataclass
 
-from .compose import StreamManifest
+from .compose import EXCLUSION_REASONS, StreamManifest
 from .units import Unit
 
-REQUIRED_COUNTS = ("hidden-only", "equivalent", "infra", "syntax", "ineligible-class", "unit-no-valid",
-                   "eligible_classes", "valid_mutants")
+REQUIRED_COUNTS = EXCLUSION_REASONS + ("eligible_classes", "valid_mutants")
+"""The census keys ``counts-named`` requires: every :data:`compose.EXCLUSION_REASONS` reason
+(so a new reason -- e.g. ``stack-apply`` -- is required here the moment it exists there,
+never by a second hand-copied list falling out of sync) plus the two non-reason keys compose
+always seeds, ``eligible_classes`` and ``valid_mutants``.
+"""
 
 
 @dataclass(frozen=True)
@@ -101,9 +105,12 @@ def precheck(manifest: StreamManifest, units_by_id: dict[str, Unit]) -> Precheck
     inter = {t.unit_id for t in novel} & {t.unit_id for t in first}
     checks.append(Check("novel-disjoint", not inter, f"overlap={sorted(inter)}"))
 
+    def sites(t) -> set:
+        return {t.span} | ({t.span2} if t.span2 else set())
+
     by_key = {t.task_key: t for t in manifest.tasks}
     bad = [cid for cid, (k1, k2) in manifest.classes.items()
-           if k1 not in by_key or k2 not in by_key or by_key[k1].span == by_key[k2].span]
+           if k1 not in by_key or k2 not in by_key or sites(by_key[k1]) & sites(by_key[k2])]
     checks.append(Check("distinct-sites", not bad, f"same-site classes={bad[:5]}"))
 
     missing = [k for k in REQUIRED_COUNTS if k not in manifest.counts]

@@ -11,12 +11,18 @@ and the earlier component is re-selected on that intermediate source by EXACT sp
 match -- a strictly later edit cannot move an earlier span. Not exactly one match ==
 drop (``stack-apply``).
 
+The pairing layer above ``compose_pair`` is a greedy span partition: a span is used at
+most once across all pairs drawn from one (unit, family) group, so the two stacked
+mutants a class is later built from have disjoint site-sets by construction rather than
+by a check that could be forgotten.
+
 ``spans_overlap`` treats span ends as INCLUSIVE (conservative): cosmic-ray end-position
 semantics are not something this module should bet the stream on, so a boundary-touching
 pair is rejected rather than risk an ill-defined composition.
 """
 from __future__ import annotations
 
+import random
 import warnings
 
 from cosmic_ray.ast import ast_nodes, get_ast
@@ -69,3 +75,55 @@ def compose_pair(unit: Unit, ma: Mutant, mb: Mutant) -> Mutant | None:
                   early.occurrence, early.family, early.span, stacked, diff,
                   components=(Component(early.operator, early.occurrence, early.span),
                               Component(late.operator, late.occurrence, late.span)))
+
+
+def sample_pairs(singles: list[Mutant], *, rng: random.Random,
+                 max_pairs: int) -> list[tuple[Mutant, Mutant]]:
+    """Up to ``max_pairs`` span-disjoint candidate pairs from one (unit, family)'s mutants.
+
+    A span is used at most once across ALL returned pairs, so every two stacked mutants
+    built from one family have disjoint site-sets by construction -- which is exactly
+    compose's rung-1 class-eligibility condition. The caller pre-orders ``singles``
+    (non-timeout preference); within a span the first listed mutant wins.
+    """
+    by_span: dict[Span, Mutant] = {}
+    for m in singles:
+        by_span.setdefault(m.span, m)
+    spans = sorted(by_span)
+    rng.shuffle(spans)
+    pairs: list[tuple[Mutant, Mutant]] = []
+    used: set[Span] = set()
+    for i, a in enumerate(spans):
+        if len(pairs) >= max_pairs:
+            break
+        if a in used:
+            continue
+        for b in spans[i + 1:]:
+            if b not in used and not spans_overlap(a, b):
+                used.update((a, b))
+                pairs.append((by_span[a], by_span[b]))
+                break
+    return pairs
+
+
+def stack_unit(unit: Unit, valid_singles: list, *, rng: random.Random,
+               max_pairs: int) -> tuple[list[Mutant], int]:
+    """Stacked candidates from one (unit, family)'s valid singles, plus stack-apply drops.
+
+    ``valid_singles`` is ``[(Mutant, Validation)]`` with every entry valid (R-S25-1's
+    component half is enforced by the caller passing only valid singles). Non-timeout
+    singles are preferred as pair members: shuffle then stable-sort, mirroring
+    compose's ``_prefer_non_timeout``.
+    """
+    pool = list(valid_singles)
+    rng.shuffle(pool)
+    pool.sort(key=lambda mv: mv[1].kills_by_timeout)
+    pairs = sample_pairs([m for m, _ in pool], rng=rng, max_pairs=max_pairs)
+    stacked, dropped = [], 0
+    for a, b in pairs:
+        st = compose_pair(unit, a, b)
+        if st is None:
+            dropped += 1
+        else:
+            stacked.append(st)
+    return stacked, dropped

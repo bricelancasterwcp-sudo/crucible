@@ -10,7 +10,8 @@ brief's implementer-choice clause; see the module docstring in
 rationale (crepes targets conformal *regression* intervals, not binary-outcome isotonic
 calibration, so adopting it here would be the awkward fit the brief warns about).
 
-Three properties are mutation-checked (see the Task 8 report for the literal kill runs):
+Four properties are mutation-checked (see the Task 8 report and its review-fix addendum
+for the literal kill runs):
 
 1. **Honest cold start.** Before ``MIN_OBS=10`` observations land in a class, ``confidence``
    returns the RAW score unchanged -- a mutant that fits early anyway is caught by
@@ -24,6 +25,15 @@ Three properties are mutation-checked (see the Task 8 report for the literal kil
    gate convention (``landing >= 0.95`` passes) -- ``p == ABSTAIN_P`` exactly does NOT
    abstain. A mutant that flips ``<`` to ``<=`` is caught by
    :func:`test_should_abstain_false_exactly_at_threshold`.
+4. **The fit is a pure function of the observation multiset, not insertion order.** Review
+   finding (fixed): ``_fit_isotonic`` used to run PAVA directly over the raw pair list, so
+   two exact-tied scores with different outcomes could pool differently into a neighbouring
+   block depending on which ``observe()`` call happened first (verified computationally:
+   the multiset ``{(5, 0), (5, 1), (6, 0.5)}`` gave ``predict(5.0) == 0.0`` in one insertion
+   order and ``0.5`` in the other). Fixed by pooling identical scores to a weighted mean
+   BEFORE PAVA runs (sklearn's ``_make_unique`` approach). A mutant that removes that
+   pre-pooling step is caught by :func:`test_fit_isotonic_pools_ties_before_running_pava`
+   and :func:`test_confidence_is_order_independent_at_tied_scores`.
 
 **On the recalibrate "flip" test:** isotonic regression is BY DEFINITION a monotone
 non-decreasing function of score -- ``fit(x1) <= fit(x2)`` whenever ``x1 <= x2`` is the
@@ -50,6 +60,8 @@ from crucible.uncertainty.conformal import (
     MIN_OBS,
     PROVENANCE_CLASSES,
     Calibrator,
+    _fit_isotonic,
+    _predict,
     provenance_class,
 )
 
@@ -125,6 +137,51 @@ def test_confidence_discriminates_after_20_informative_pairs():
     assert high > low
     assert high != 0.9
     assert low != 0.1
+
+
+# --- tie pooling: the fit is a pure function of the multiset (review fix) --------
+
+
+def test_fit_isotonic_pools_ties_before_running_pava():
+    # THE mutation guard at the fix site: the reviewer's exact triple, computationally
+    # verified to diverge (0.0 vs 0.5 at the tied score 5.0) before pre-pooling was added.
+    # Both insertion orders of the SAME multiset must now fit identically.
+    order_a = [(5.0, 0.0), (5.0, 1.0), (6.0, 0.5)]
+    order_b = [(5.0, 1.0), (5.0, 0.0), (6.0, 0.5)]
+
+    anchors_a = _fit_isotonic(order_a)
+    anchors_b = _fit_isotonic(order_b)
+
+    assert _predict(anchors_a, 5.0) == _predict(anchors_b, 5.0)
+    assert anchors_a == anchors_b  # the whole fit matches, not just the one probe point
+
+
+def test_confidence_is_order_independent_at_tied_scores():
+    # End-to-end version of the same guard through the public API a real caller uses.
+    # `outcome` is bool-only, so the reviewer's (6, 0.5) point is reproduced as two
+    # observations at x=6 (one True, one False -- mean 0.5), added identically in both
+    # variants. Filler observations (also identical in both variants) clear MIN_OBS
+    # without touching the tied region -- only the insertion order of the (5, 0)/(5, 1)
+    # pair differs between order_a and order_b.
+    cls = "hit-p1"
+
+    order_a = Calibrator()
+    for _ in range(7):
+        order_a.observe(score=0.0, cls=cls, outcome=False)
+    order_a.observe(score=5.0, cls=cls, outcome=False)
+    order_a.observe(score=5.0, cls=cls, outcome=True)
+    order_a.observe(score=6.0, cls=cls, outcome=True)
+    order_a.observe(score=6.0, cls=cls, outcome=False)
+
+    order_b = Calibrator()
+    for _ in range(7):
+        order_b.observe(score=0.0, cls=cls, outcome=False)
+    order_b.observe(score=5.0, cls=cls, outcome=True)
+    order_b.observe(score=5.0, cls=cls, outcome=False)
+    order_b.observe(score=6.0, cls=cls, outcome=True)
+    order_b.observe(score=6.0, cls=cls, outcome=False)
+
+    assert order_a.confidence(5.0, cls) == order_b.confidence(5.0, cls)
 
 
 # --- class independence (mutation guard: a shared/global fit must be killed) -----

@@ -49,6 +49,17 @@ existing ``crucible.search.loop.ABSTAIN_THRESHOLD`` rule (reward + raw value con
 both low) -- callers are expected to abstain if EITHER rule fires, not to swap one for the
 other.
 
+**The fit is a pure function of the observation multiset, not of insertion order.**
+:func:`_fit_isotonic` pools every pair sharing the same score into one weighted-mean point
+BEFORE running PAVA (see its docstring) -- without that pre-pooling step, two exact-tied
+scores with different outcomes could land in either order depending on which ``observe()``
+call happened first, and PAVA's merge-on-monotonicity-violation check does not fire between
+two blocks with EQUAL means, so a third, unrelated block could end up pooled in or not
+depending on that arbitrary tie order. Pinned by
+``test_fit_isotonic_pools_ties_before_running_pava`` and
+``test_confidence_is_order_independent_at_tied_scores`` (both in
+``tests/uncertainty/test_conformal.py``).
+
 All state here is in-memory for one run; :meth:`Calibrator.snapshot`/:meth:`restore` exist
 for record-keeping only (arm records already carry the observations), not persistence.
 """
@@ -84,21 +95,42 @@ def _fit_isotonic(pairs: list[tuple[float, float]]) -> list[tuple[float, float]]
     (score, outcome-as-0-or-1), by squared error.
 
     Returns ``(x_max, mean_y)`` anchors sorted ascending by ``x_max``, one per pooled
-    block; :func:`_predict` walks them to find the block covering a query score. The
-    classic stack-based PAVA: process points in ascending score order, and whenever the
-    newly-appended block's mean is LOWER than its predecessor's (a monotonicity violation),
-    merge them into one block and keep checking backward -- a merge can cascade through
-    several prior blocks in one step (see the module docstring for why a fully
-    score-decreasing input pools into a single flat block).
+    block; :func:`_predict` walks them to find the block covering a query score.
+
+    **Ties are pooled to a weighted mean BEFORE PAVA runs** (sklearn's ``_make_unique``
+    approach): every pair sharing the same ``x`` is collapsed into one ``(x, sum_y,
+    weight)`` point first, using plain dict accumulation, which is commutative and thus
+    independent of ``pairs``' iteration order. Skipping this step made the fit a function
+    of INSERTION ORDER among exact ties, not just the observation multiset -- the stack
+    merge below only pools two blocks when their MEANS violate monotonicity, and two
+    same-``x`` singleton blocks with equal means never trigger that check, so which of them
+    ended up adjacent to a *third*, unrelated block (and therefore whether that unrelated
+    block got pooled in) depended on which same-``x`` point was appended first. Fixed and
+    pinned by ``test_fit_isotonic_pools_ties_before_running_pava`` (mutation-checked:
+    removing this pooling step is caught by that test and by
+    ``test_confidence_is_order_independent_at_tied_scores``).
+
+    Once ties are pooled, each unique ``x`` appears exactly once, in ascending order, and
+    the classic stack-based PAVA runs over those: whenever the newly-appended block's mean
+    is LOWER than its predecessor's (a monotonicity violation), merge them into one block
+    and keep checking backward -- a merge can cascade through several prior blocks in one
+    step (see the module docstring for why a fully score-decreasing input pools into a
+    single flat block).
     """
-    ordered = sorted(pairs, key=lambda pair: pair[0])
+    pooled: dict[float, list[float]] = {}
+    for x, y in pairs:
+        bucket = pooled.setdefault(x, [0.0, 0.0])  # [sum_y, weight]
+        bucket[0] += y
+        bucket[1] += 1.0
+    ordered = sorted(pooled.items())  # ascending by x; each x appears exactly once
+
     blocks: list[list[float]] = []  # each: [sum_y, weight, x_max]
-    for x, y in ordered:
-        blocks.append([y, 1.0, x])
+    for x, (sum_y, weight) in ordered:
+        blocks.append([sum_y, weight, x])
         while len(blocks) >= 2 and (blocks[-2][0] / blocks[-2][1]) > (blocks[-1][0] / blocks[-1][1]):
-            sum_y, weight, _ = blocks.pop()
+            block_sum_y, block_weight, _ = blocks.pop()
             prev_sum_y, prev_weight, _ = blocks.pop()
-            blocks.append([prev_sum_y + sum_y, prev_weight + weight, x])
+            blocks.append([prev_sum_y + block_sum_y, prev_weight + block_weight, x])
     return [(x_max, sum_y / weight) for sum_y, weight, x_max in blocks]
 
 

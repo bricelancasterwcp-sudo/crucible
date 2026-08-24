@@ -361,11 +361,14 @@ def compose(units: list[Unit], validated: dict[str, list[Pair]], *,
     """Build the stream: ``C`` classes across two phases plus ``n_nov`` held-out novel tasks.
 
     Raises :class:`NotEnoughClasses` rather than returning a short stream -- a run with
-    fewer classes than pre-registered is not the experiment that was registered. The
-    pre-check is over ``_is_eligible``, and at rung 1 that is the weaker of the two site
-    tests: ``_pick_pair`` can still decline a family the census counted as eligible, so
-    the walk can end short of ``C`` without raising. ``counts["classes_taken"]`` is what
-    actually landed -- read it against ``C`` before trusting a rung-1 stream.
+    fewer classes than pre-registered is not the experiment that was registered. That is
+    checked **twice**, because the two site tests are not the same test. The pre-walk
+    check is over ``_is_eligible``, which asks whether *some* two of a family's mutants
+    are disjoint; the walk itself is anchored on ``_pick_pair``'s preferred head, which
+    only scans what follows it. For singles the two always agree. At rung 1 a head can
+    overlap every remaining candidate, so an eligible family can still yield no class and
+    the walk can end short with the pre-check satisfied -- hence the post-walk guard. It
+    draws no randomness and cannot fire at rung 0, so the rung-0 stream is untouched.
 
     ``extra_counts`` merges census keys the *builder* observed and compose never could --
     rung 1's ``stack-apply`` -- into ``counts`` after the closed vocabulary is seeded, so
@@ -383,6 +386,9 @@ def compose(units: list[Unit], validated: dict[str, list[Pair]], *,
     if len(eligible) < C:
         raise NotEnoughClasses(f"eligible classes {len(eligible)} < C={C}")
     classes, p1, p2, unused = _build_classes(valid_by_unit, class_units, C, rng)
+    if len(classes) < C:
+        raise NotEnoughClasses(f"classes taken {len(classes)} < C={C} (eligible {len(eligible)}; the anchored "
+                               f"pair walk can fall short of the existential census at rung 1)")
     p2 = p2 + _pick_novel(valid_by_unit, novel_units, rng)
 
     random.Random(f"{seed}:phase1").shuffle(p1)

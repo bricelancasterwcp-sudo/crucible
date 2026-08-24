@@ -350,8 +350,12 @@ def _stacked_world(n_units=6):
 
 
 def test_compose_pairs_stacked_classes_by_disjoint_site_sets():
+    # C=2, not 3: the anchored walk lands two classes on this world at seed 0 and compose
+    # now refuses to ship a short stream -- see the post-walk guard's own test below. The
+    # fixture keeps tag ``c``, the candidate that overlaps both others, so the
+    # disjointness assertions still have something to catch.
     units, validated = _stacked_world()
-    man = compose(units, validated, seed=0, C=3, n_nov=2, rung="stack2")
+    man = compose(units, validated, seed=0, C=2, n_nov=2, rung="stack2")
     by_key = {t.task_key: t for t in man.tasks}
     for k1, k2 in man.classes.values():
         s1 = {by_key[k1].span, by_key[k1].span2}
@@ -363,7 +367,7 @@ def test_compose_pairs_stacked_classes_by_disjoint_site_sets():
 
 def test_taskspec_span2_round_trips_and_defaults():
     units, validated = _stacked_world()
-    man = compose(units, validated, seed=0, C=3, n_nov=2, rung="stack2")
+    man = compose(units, validated, seed=0, C=2, n_nov=2, rung="stack2")
     assert StreamManifest.from_dict(json.loads(json.dumps(man.to_dict()))) == man
     d = man.tasks[0].to_dict(); d.pop("span2")
     assert TaskSpec.from_dict(d).span2 is None                      # pre-stack2 manifests load
@@ -382,6 +386,27 @@ def test_stack_apply_is_a_seeded_census_key_and_extra_counts_merge():
     man = compose(units, validated, seed=0, C=4, n_nov=2, rung="base")
     assert man.counts["stack-apply"] == 0                           # None-vs-zero
     units, validated = _stacked_world()
-    man2 = compose(units, validated, seed=0, C=3, n_nov=2, rung="stack2",
+    man2 = compose(units, validated, seed=0, C=2, n_nov=2, rung="stack2",
                    extra_counts={"stack-apply": 7})
     assert man2.counts["stack-apply"] == 7
+
+
+def test_short_anchored_walk_raises_rather_than_shipping_a_short_stream():
+    """The census is existential, the walk is anchored -- and the guard is over the walk.
+
+    ``_is_eligible`` asks whether *some* two of a family's mutants are disjoint;
+    ``_pick_pair`` keeps the preferred head and only scans what follows it. For singles
+    the two always agree, so the pre-walk ``len(eligible) < C`` check is sufficient at
+    rung 0. At rung 1 a head can overlap every remaining candidate and that eligible
+    family yields no class, so the walk can end short of ``C`` with the pre-check
+    satisfied. A stream with fewer classes than pre-registered is not the experiment that
+    was registered (spec), so compose raises instead of quietly shipping it.
+
+    This world's census counts four eligible classes; at seed 0 the walk lands two.
+    """
+    units, validated = _stacked_world()
+    ok = compose(units, validated, seed=0, C=2, n_nov=2, rung="stack2")
+    assert ok.counts["eligible_classes"] == 4 and ok.counts["classes_taken"] == 2
+    assert ok.counts["units-unused"] == 0            # the walk reached every class unit and still fell short
+    with pytest.raises(NotEnoughClasses, match=r"classes taken 2 < C=3"):
+        compose(units, validated, seed=0, C=3, n_nov=2, rung="stack2")

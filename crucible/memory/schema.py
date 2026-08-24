@@ -51,6 +51,8 @@ from dataclasses import asdict, dataclass
 
 from ..stream.units import sha256_text
 
+# Redefined rather than imported from stream.mutants: that module pulls in cosmic_ray,
+# and this is a leaf schema module that should stay importable without it.
 Span = tuple[tuple[int, int], tuple[int, int]]
 
 

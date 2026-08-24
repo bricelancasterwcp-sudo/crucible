@@ -69,20 +69,25 @@ SEMANTIC = SemanticItem(
     verification_method="mechanical-template",
 )
 
-EPISODIC_FIELD_NAMES = {
+# Order matters here, not just membership: this is the brief's literal ordered field
+# list, and the ordered-vs-set tests below both derive from this single source so the
+# two checks cannot silently drift apart from each other.
+EPISODIC_FIELD_ORDER = [
     "item_id", "task_key", "arm", "unit_id", "family", "class_id", "phase", "kind",
     "root_prompt", "landed_module", "visible_reward", "executions_charged", "hidden_pass",
     "verified", "memory_item_ids", "created_at", "confidence", "status", "version",
     "source_locator", "valid_at", "invalid_at", "expired_at", "last_verified_at",
     "falsified_by", "verification_method",
-}
+]
+EPISODIC_FIELD_NAMES = set(EPISODIC_FIELD_ORDER)
 
-SEMANTIC_FIELD_NAMES = {
+SEMANTIC_FIELD_ORDER = [
     "item_id", "unit_id", "family", "class_id", "cited_episode_id", "mutated_spans",
     "landed_diff", "flipped_tests", "killing_tests", "created_at", "confidence", "status",
     "version", "source_locator", "valid_at", "invalid_at", "expired_at", "last_verified_at",
     "falsified_by", "verification_method",
-}
+]
+SEMANTIC_FIELD_NAMES = set(SEMANTIC_FIELD_ORDER)
 
 
 def test_episodic_round_trips_through_json():
@@ -103,6 +108,19 @@ def test_episodic_schema_is_complete():
 def test_semantic_schema_is_complete():
     assert set(SEMANTIC.to_dict()) == {f.name for f in fields(SemanticItem)}
     assert set(SEMANTIC.to_dict()) == SEMANTIC_FIELD_NAMES
+
+
+def test_episodic_field_order_matches_the_brief():
+    # The schema-completeness test above compares SETS, which discard order -- a
+    # same-typed adjacent swap (e.g. task_key/arm) would pass that test while
+    # corrupting every downstream POSITIONAL construction (Task 2's store, TaskSpec-
+    # style callers). This is the only test in the file that would catch such a swap,
+    # since every fixture here constructs by keyword, not position.
+    assert [f.name for f in fields(EpisodicRecord)] == EPISODIC_FIELD_ORDER
+
+
+def test_semantic_field_order_matches_the_brief():
+    assert [f.name for f in fields(SemanticItem)] == SEMANTIC_FIELD_ORDER
 
 
 def test_content_id_is_the_sha256_of_kind_plus_identity_fields_sorted_keys():

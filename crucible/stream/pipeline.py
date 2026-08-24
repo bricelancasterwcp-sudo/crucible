@@ -29,6 +29,16 @@ root and ``os.replace``\\d into place -- an atomic rename on one filesystem, so 
 sees the stream whole or not at all. A directory that already exists is content-addressed
 (its name *is* the hash), so it is overwritten in place via the store's idempotent path
 rather than re-staged. ``store``'s interface is untouched; the atomicity lives here.
+
+*The rung is a dispatch, not a label.* ``rung`` already rode through to the manifest and
+into ``stream_hash``; at ``stack2`` it also decides what a *task* is. The singles are built
+and validated identically at both rungs -- they are what the stacker composes from, and
+their verdicts are the provenance R-S25-1's component half is checked against -- but at
+``stack2`` only the two-site mutants become tasks. So the singles' mutants and validations
+are stored at every rung and ``validated`` (what compose sees) holds the stacked pairs
+alone. An unknown rung is refused before any work rather than falling through to base:
+a mis-spelled rung that silently built a rung-0 stream would be a mis-labelled experiment,
+and the stream hash would not give it away (the label is what got hashed).
 """
 from __future__ import annotations
 
@@ -39,13 +49,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..sandbox.runner import run_tests
-from . import evalplus, store
+from . import evalplus, stack, store
 from .build import build_units
-from .compose import compose
+from .compose import Pair, compose
 from .families import all_operator_names
-from .mutants import enumerate_specs, make_mutant, sample_specs
+from .mutants import Mutant, enumerate_specs, make_mutant, sample_specs
 from .precheck import precheck
+from .units import Unit
 from .validate import validate_many
+
+ALLOWED_RUNGS: tuple[str, ...] = ("base", "stack2")
+"""The rungs ``build_stream`` knows how to build. ``base`` is rung 0 (one site per task),
+``stack2`` is rung 1 (two sites per task). Closed on purpose -- see the module docstring."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +73,7 @@ class BuildConfig:
     limit_units: int | None = None
     jobs: int = 8
     rung: str = "base"
+    pairs_per_family: int = 4
     sources: tuple[str, ...] = ("humaneval", "mbpp")
 
 
@@ -98,21 +114,61 @@ def _write_atomic(out_root: Path, manifest, units, mutants, validations, dropped
     return d_final
 
 
+def _stacked_tasks(u: Unit, singles: list[Pair], cfg: BuildConfig) -> tuple[list[Pair], int]:
+    """One unit's rung-1 tasks -- validated two-site mutants -- and its ``stack-apply`` drops.
+
+    Only *valid* singles are offered to the stacker. That is R-S25-1's component half: each
+    of a stacked task's two components is independently a bug the visible suite catches, so
+    the composite is a two-bug task rather than a bug plus a no-op.
+
+    One ``random.Random`` serves every family of the unit and is passed through them in
+    sorted family order, so its state advances across families and the whole unit's pairing
+    is a deterministic function of ``(seed, unit_id)`` -- not of dict insertion order.
+
+    The returned int is every ``compose_pair`` that came back ``None``: apply failures and
+    the shared guards alike. That *is* the definition of the ``stack-apply`` census key --
+    "pairs that failed to become a stacked mutant" -- and the caller hands the total to
+    compose as ``extra_counts`` so the manifest reports it.
+    """
+    rng = random.Random(f"{cfg.seed}:{u.unit_id}:stack")
+    by_fam: dict[str, list[Pair]] = {}
+    for m, v in singles:
+        if v.valid:
+            by_fam.setdefault(m.family, []).append((m, v))
+    stacked: list[Mutant] = []
+    n_drop = 0
+    for fam in sorted(by_fam):
+        st, d = stack.stack_unit(u, by_fam[fam], rng=rng, max_pairs=cfg.pairs_per_family)
+        stacked += st
+        n_drop += d
+    return list(zip(stacked, validate_many(u, stacked, jobs=cfg.jobs))), n_drop
+
+
 def build_stream(cfg: BuildConfig, out_root: Path, *, recs: list[dict] | None = None, log=print) -> Path:
+    if cfg.rung not in ALLOWED_RUNGS:
+        raise ValueError(f"unknown rung {cfg.rung!r}; known: {list(ALLOWED_RUNGS)}")
     recs = _limit(recs if recs is not None else _load_recs(cfg), cfg)
     units, dropped = build_units(recs, seed=cfg.seed, max_hidden=cfg.max_hidden, jobs=cfg.jobs)
     log(f"units built={len(units)} dropped={len(dropped)}")
     ops = all_operator_names()
     validated, mutants, validations = {}, {}, []
+    stack_dropped = 0
     for u in units:
         rng = random.Random(f"{cfg.seed}:{u.unit_id}:specs")
         specs = sample_specs(enumerate_specs(u.module_src, ops), per_family=cfg.per_family, rng=rng)
         ms = [m for m in (make_mutant(u, s) for s in specs) if m is not None]
         vs = validate_many(u, ms, jobs=cfg.jobs)
-        validated[u.unit_id] = list(zip(ms, vs))
-        mutants.update({m.key: m for m in ms}); validations += vs
-        log(f"{u.unit_id}: specs={len(specs)} mutants={len(ms)} valid={sum(v.valid for v in vs)}")
-    manifest = compose(units, validated, seed=cfg.seed, C=cfg.C, n_nov=cfg.n_nov, rung=cfg.rung)
+        mutants.update({m.key: m for m in ms}); validations += vs   # singles: stored at EVERY rung
+        tasks, extra = list(zip(ms, vs)), ""
+        if cfg.rung == "stack2":
+            tasks, n_drop = _stacked_tasks(u, tasks, cfg)                   # only two-site mutants are tasks
+            mutants.update({m.key: m for m, _ in tasks}); validations += [v for _, v in tasks]
+            stack_dropped += n_drop
+            extra = f" stacked={len(tasks)} stack-apply={n_drop}"
+        validated[u.unit_id] = tasks
+        log(f"{u.unit_id}: specs={len(specs)} mutants={len(ms)} valid={sum(v.valid for v in vs)}{extra}")
+    manifest = compose(units, validated, seed=cfg.seed, C=cfg.C, n_nov=cfg.n_nov, rung=cfg.rung,
+                       extra_counts={"stack-apply": stack_dropped} if cfg.rung == "stack2" else None)
     d = _write_atomic(out_root, manifest, units, mutants, validations, dropped)
     rep = precheck(manifest, {u.unit_id: u for u in units})
     log(f"precheck ok={rep.ok} failing={[c.name for c in rep.checks if not c.passed]}")

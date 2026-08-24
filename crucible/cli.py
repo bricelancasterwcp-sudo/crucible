@@ -33,13 +33,21 @@ PROPOSER_ERROR_EXIT = 3                    # served identity mismatch / unreacha
 
 
 def _add_stream(sub) -> None:
-    """The S1 ``stream`` subcommands: build / precheck / smoke."""
+    """The S1 ``stream`` subcommands: build / precheck / smoke.
+
+    ``--rung``'s choices are ``pipeline.ALLOWED_RUNGS`` itself, imported here rather than
+    restated, so a rung added there is offered here the same day and a typo is refused at
+    parse time. The import is local because it pulls the whole build stack (cosmic-ray);
+    every other heavy import in this module is deferred the same way.
+    """
+    from crucible.stream.pipeline import ALLOWED_RUNGS
     s = sub.add_parser("stream").add_subparsers(dest="scmd", required=True)
     b = s.add_parser("build")
     b.add_argument("--seed", type=int, default=0); b.add_argument("--C", type=int, default=200)
     b.add_argument("--n-nov", type=int, default=50); b.add_argument("--per-family", type=int, default=6)
     b.add_argument("--max-hidden", type=int, default=100); b.add_argument("--limit-units", type=int, default=None)
-    b.add_argument("--jobs", type=int, default=8); b.add_argument("--rung", default="base")
+    b.add_argument("--jobs", type=int, default=8); b.add_argument("--rung", default="base", choices=ALLOWED_RUNGS)
+    b.add_argument("--pairs-per-family", type=int, default=4)   # rung-1 pairing cap, per (unit, family)
     b.add_argument("--out", type=Path, default=Path("streams"))
     pc = s.add_parser("precheck"); pc.add_argument("dir", type=Path)
     sm = s.add_parser("smoke"); sm.add_argument("dir", type=Path); sm.add_argument("--n", type=int, default=30)
@@ -67,7 +75,10 @@ def _run_stream(a) -> int:
     if a.scmd == "build":
         from crucible.stream.compose import NotEnoughClasses
         from crucible.stream.pipeline import BuildConfig, build_stream
-        cfg = BuildConfig(a.seed, a.C, a.n_nov, a.per_family, a.max_hidden, a.limit_units, a.jobs, a.rung)
+        # Positional through ``rung``, as BuildConfig's frozen field order allows; the
+        # rung-1 knob rides in by keyword so inserting it cannot silently shift the rest.
+        cfg = BuildConfig(a.seed, a.C, a.n_nov, a.per_family, a.max_hidden, a.limit_units, a.jobs, a.rung,
+                          pairs_per_family=a.pairs_per_family)
         try:
             print(build_stream(cfg, a.out))
         except NotEnoughClasses as e:

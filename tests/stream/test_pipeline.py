@@ -1,4 +1,5 @@
 import gzip, json, pathlib
+import pytest
 from crucible.stream.pipeline import build_stream, BuildConfig, smoke
 from crucible.stream import store
 
@@ -99,3 +100,88 @@ def test_build_time_drops_do_not_change_stream_hash(tmp_path):
     assert store.read_manifest(clean).stream_hash == store.read_manifest(withdrop).stream_hash
     assert store.read_build_dropped(clean) == []
     assert [x.unit_id for x in store.read_build_dropped(withdrop)] == ["HumanEval/9999"]
+
+
+def _stack_recs():
+    """The fixture corpus plus one unit with enough same-family sites to *stack*.
+
+    A rung-1 class needs two site-disjoint stacked mutants, i.e. FOUR distinct spans in one
+    (unit, family) group. The three shipped fixture units top out at two spans per family --
+    one pair, one stacked mutant, no class -- so the corpus is extended here in this file's
+    existing idiom (copy a rec, replace its body) rather than by relaxing what the rung-1
+    test asserts. ``addn`` gives ARITH six spans and SDL five, i.e. two eligible rung-1
+    classes, and its CONST pair cannot compose (see the stack-apply assertion below), so the
+    same build also exercises a nonzero ``stack-apply`` census.
+    """
+    recs = _recs()
+    r = dict(recs[0])
+    r["task_id"] = "HumanEval/1000"
+    r["entry_point"] = "addn"
+    r["prompt"] = 'def addn(a: int, b: int) -> int:\n    """Sum a few ways."""\n'
+    r["canonical_solution"] = ("    p = a + b\n    q = a - b\n    r = a * 3\n"
+                               "    s = b + 7\n    return p + q + r + s\n")
+    r["base_input"] = [[1, 2], [5, 3], [-4, 9], [11, 6]]
+    r["plus_input"] = [[2, 7], [8, 1]]
+    return recs + [r]
+
+
+def test_base_rung_never_stacks(tmp_path, monkeypatch):
+    # The rung branch, from the other side: at rung "base" the stacking layer is not
+    # merely unused, it is never called. An inverted branch dies here rather than in a
+    # census assertion that could be read as a tuning difference.
+    from crucible.stream import stack
+    def boom(*a, **k):
+        raise AssertionError("stack_unit called at rung base")
+    monkeypatch.setattr(stack, "stack_unit", boom)
+    cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=3, max_hidden=2, jobs=2)
+    d = build_stream(cfg, tmp_path, recs=_recs(), log=lambda *a: None)
+    man = store.read_manifest(d)
+    assert man.rung == "base" and all(t.span2 is None for t in man.tasks)
+
+
+def test_unknown_rung_is_refused_before_any_work(tmp_path):
+    # ALLOWED_RUNGS is the closed vocabulary; an unknown rung is a caller error, not a
+    # silent fall-through to base. The check is first, so nothing is built and nothing is
+    # written -- with C at its default this would otherwise die as NotEnoughClasses instead.
+    from crucible.stream.pipeline import ALLOWED_RUNGS
+    assert ALLOWED_RUNGS == ("base", "stack2")
+    with pytest.raises(ValueError):
+        build_stream(BuildConfig(seed=0, rung="tower"), tmp_path, recs=_recs(), log=lambda *a: None)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_stack2_composes_only_two_site_tasks_and_keeps_the_singles_on_disk(tmp_path):
+    # Every task at rung 1 is a two-site mutant: span2 set, two components, and the
+    # components' spans are exactly the two sites the task reports.
+    cfg = BuildConfig(seed=0, C=2, n_nov=0, per_family=6, max_hidden=2, jobs=2, rung="stack2")
+    d = build_stream(cfg, tmp_path, recs=_stack_recs(), log=lambda *a: None)
+    man = store.read_manifest(d)
+    assert man.rung == "stack2" and len(man.tasks) == 4
+    for t in man.tasks:
+        assert t.span2 is not None and t.span2 != t.span
+        m = store.read_mutant(d, t.task_key)
+        assert len(m.components) == 2
+        assert {c.span for c in m.components} == {t.span, t.span2}
+
+    # stack-apply is the builder-side census key: pairs that failed to become a stacked
+    # mutant. addn's CONST pair always fails -- NumberReplacer yields two mutation
+    # positions per literal, so re-selecting the early component by exact span on the
+    # intermediate source finds two hits, not one -- so this stream's count is >= 1 and a
+    # dropped extra_counts shows up as 0 here.
+    assert man.counts["stack-apply"] >= 1
+
+    # Singles are provenance, not tasks (R-S25-1): a stacked task's two components must be
+    # checkable, so the single-site mutants it was composed from stay on disk with their
+    # verdicts -- and not one of them is a task. "Single" is read off the mutant itself
+    # (no components), not off "is not a task": most stacked mutants are not tasks either.
+    task_keys = {t.task_key for t in man.tasks}
+    vals = {v.mutant_key: v for v in store.read_validations(d)}
+    assert task_keys <= set(vals)
+    stored = [store.read_mutant(d, k) for k in vals]
+    singles = [m for m in stored if not m.components]
+    assert singles and not (task_keys & {m.key for m in singles})
+    assert any(vals[m.key].valid for m in singles)
+    # and what compose was offered was the stacked mutants alone -- the census counts them,
+    # not the far larger pool of valid singles they were built from.
+    assert man.counts["valid_mutants"] == sum(vals[m.key].valid for m in stored if m.components)
+    assert man.counts["valid_mutants"] < sum(vals[m.key].valid for m in singles)

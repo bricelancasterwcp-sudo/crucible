@@ -96,12 +96,14 @@ alternative -- catching it and writing ``accepted=False`` -- would file an ops f
 is that a wedged server stops the run instead of quietly degrading it; for a spike whose entire
 output is a measurement, that is the right way round.
 
-*``gpu_s`` is written as ``None`` here, always.* Training happens behind the ``Trainer``
-seam -- possibly on another box -- and this controller reads no clock at all (``now`` is
-caller-supplied, like every timestamp in this codebase). The honest options were "measure it
-somewhere that can" or "invent a number here"; the field is carried in the record so the ops
-path (the smoke) can fill it in from the side that owns the GPU, and ``None`` means NOT
-MEASURED, never zero seconds (the None-vs-zero discipline used throughout this codebase).
+*``gpu_s`` is the wall-clock seconds of the ``Trainer.train`` call* [S4 amendment,
+2026-08-24; was ``None``-always]. The pre-reg Section 3 declares A_full's sleep GPU time an
+asymmetry that "is reported as GPU-minutes per arm" -- an unmeasured ``None`` would break
+that commitment at write-up. Name the lens: this is the train call's WALL time measured by
+``time.monotonic`` around the seam (the card is co-resident with the server, so it is not
+exclusive GPU occupancy). A duration is not a timestamp, so the caller-supplied-``now``
+discipline for recorded times is untouched; a fake trainer yields a legitimate ~0.0, and
+``None`` remains reserved for NOT MEASURED (records written before this amendment).
 
 *``BASE_DIGEST`` is a digest of the base model's IDENTITY, not of its weights.* The registry
 column answers "which frozen base was this adapter attached to". This module never sees the
@@ -118,6 +120,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -283,8 +286,9 @@ class SleepRecord:
     Field order is frozen (later tasks read and construct this). ``refalsify`` is the
     ``FalsifyTally`` as a plain dict so the record stays JSON-native end to end;
     ``slice_task_keys`` records WHICH tasks the gate measured, not just how many, so a
-    surprising accept/reject can be re-run by hand from the record alone. ``gpu_s`` is
-    ``None`` from this controller -- see the module docstring.
+    surprising accept/reject can be re-run by hand from the record alone. ``gpu_s`` is the
+    wall-clock seconds of the ``Trainer.train`` call -- see the module docstring for the
+    lens (``None`` only in records that predate the S4 amendment).
     """
 
     sleep_index: int
@@ -369,7 +373,9 @@ class SleepController:
         pairs = sft_pairs(self._store)
         set_hash = episode_set_hash(pairs)
         adapter_id = adapter_id_for(set_hash)
+        train_started = time.monotonic()
         adapter_dir = self._trainer.train(pairs, self._seed, self._adapters_dir / adapter_id)
+        gpu_s = round(time.monotonic() - train_started, 3)
 
         slice_keys = self._slice(solved_task_keys, sleep_index)
         before = self._slice_runner.solved(list(slice_keys), self._registry.latest_accepted())
@@ -398,7 +404,7 @@ class SleepController:
             sleep_index=sleep_index, adapter_id=adapter_id, episode_set_hash=set_hash,
             episodes_selected=len(pairs), slice_task_keys=slice_keys,
             slice_before=before, slice_after=after, accepted=accepted,
-            refalsify=asdict(tally), gpu_s=None, created_at=now,
+            refalsify=asdict(tally), gpu_s=gpu_s, created_at=now,
         )
 
     def _refalsify(self, now: str) -> FalsifyTally:

@@ -243,7 +243,10 @@ def test_full_pipeline_fills_every_record_field(tmp_path: Path):
     assert record.accepted is True
     assert record.refalsify == {"checked": 0, "passed": 0, "falsified": 0, "infra": 0,
                                 "infra_broken_citation": 0}
-    assert record.gpu_s is None  # never measured here -- see the module docstring
+    # S4 (2026-08-24): gpu_s is the wall-clock seconds of the Trainer.train call --
+    # the pre-reg Section 3 declared asymmetry (A_full's sleep GPU time) must be REPORTED,
+    # so an unmeasured None here would break a pre-registered commitment at write-up.
+    assert isinstance(record.gpu_s, float) and record.gpu_s >= 0.0
     assert record.created_at == "2026-08-24T12:00:00Z"
     rig.store.close()
 
@@ -704,14 +707,26 @@ def test_loop_module_never_imports_a_spend_meter():
     assert "budget" not in Path(loop.__file__).read_text()
 
 
-def test_loop_module_reads_no_clock():
-    # `now` is caller-supplied everywhere in this codebase; a module-level time import
-    # here would be the first step toward a record that cannot be reproduced.
-    tree = ast.parse(Path(loop.__file__).read_text())
+def test_loop_module_reads_no_wall_clock():
+    # `now` is caller-supplied everywhere in this codebase; a wall-clock read here would
+    # be the first step toward a record that cannot be reproduced. The S4 gpu_s amendment
+    # (2026-08-24) legitimately measures a DURATION, so `time` is admitted under a tighter
+    # pin: the ONLY attribute of `time` this module may touch is `monotonic` (a duration
+    # source, not a timestamp), and `datetime` stays banned outright.
+    source = Path(loop.__file__).read_text()
+    tree = ast.parse(source)
     names = set()
     for node in tree.body:
         if isinstance(node, ast.Import):
             names.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.add(node.module.split(".")[0])
-    assert names.isdisjoint({"time", "datetime"}), f"clock import in {loop.__file__}: {names}"
+    assert "datetime" not in names, f"datetime import in {loop.__file__}"
+    time_attrs = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name) and node.value.id == "time"
+    }
+    assert time_attrs <= {"monotonic"}, f"non-monotonic time use in {loop.__file__}: {time_attrs}"
+    assert "monotonic" in time_attrs, "gpu_s measurement (time.monotonic) missing from loop.py"

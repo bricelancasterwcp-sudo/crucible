@@ -103,6 +103,17 @@ def test_ablation_arms_are_a_full_s_serving_identity():
             ARMS["A_full"].k, ARMS["A_full"].width, ARMS["A_full"].seed)
 
 
+def test_phase_b_arms_carry_their_controls_serving_identity():
+    """Phase-B (prereg §3): B_mem must reach the server exactly as the frozen B_search
+    did, and A_mem_exactonly exactly as A_full/A_mem_nosleep — or a rate difference is
+    confounded by serving instead of isolating the store / the retrieval policy."""
+    assert ARMS["B_mem"] == ArmConfig("B_mem", ARMS["B_search"].model, True, chat=True)
+    assert (ARMS["B_mem"].k, ARMS["B_mem"].width, ARMS["B_mem"].seed) == (
+        ARMS["B_search"].k, ARMS["B_search"].width, ARMS["B_search"].seed)
+    assert ARMS["A_mem_exactonly"] == ArmConfig(
+        "A_mem_exactonly", ARMS["A_full"].model, True, chat=True)
+
+
 def test_chat_serving_is_an_arm_property_not_a_cli_default():
     """Every gating proposer is an instruct model and MUST be chat-served (the §2 fallback
     replaced the raw-served base 9B). Binding chat to the arm stops `arm run` without

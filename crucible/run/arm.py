@@ -100,6 +100,13 @@ ARMS: dict[str, ArmConfig] = {
     # ArmConfig grows no memory column: attempt_task must not be able to read the difference.
     "A_mem_nosleep": ArmConfig("A_mem_nosleep", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
     "A_sleep_nomem": ArmConfig("A_sleep_nomem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
+    # Phase-B arms (prereg §3): B_mem and A_mem_exactonly are control comparisons for the
+    # memory and retrieval mechanisms added in S3. Like the ablations above, the difference
+    # from their control (B_search, A_full/A_mem_nosleep) lives in the driver hooks only
+    # (docs/findings/PHASE-B-ARM-HOOKS.md), never in ArmConfig, so attempt_task cannot
+    # read the difference and confound the measurement.
+    "B_mem": ArmConfig("B_mem", "Qwen/Qwen2.5-Coder-14B-Instruct", True, chat=True),
+    "A_mem_exactonly": ArmConfig("A_mem_exactonly", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
 }
 
 

@@ -86,8 +86,12 @@ class ArmConfig:
 ARMS: dict[str, ArmConfig] = {
     "A_noMem": ArmConfig("A_noMem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
     "A_full": ArmConfig("A_full", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
-    "B_search": ArmConfig("B_search", "Qwen/Qwen3.5-9B", True, chat=False),
-    "B_naive": ArmConfig("B_naive", "Qwen/Qwen3.5-9B", False, chat=False),
+    # §2 big-arm FALLBACK, activated 2026-08-24 (findings S2.5-stack2.md §6-§7; lock
+    # record docs/LOCK-A.md): the 9B failed the §4.7 landing gate both raw and chat-served,
+    # so the B arms run the 14B coder (AWQ-served under this SERVED name -- see the SERVE
+    # table). Instruct model => chat-served, like the A arms (the A2 lesson).
+    "B_search": ArmConfig("B_search", "Qwen/Qwen2.5-Coder-14B-Instruct", True, chat=True),
+    "B_naive": ArmConfig("B_naive", "Qwen/Qwen2.5-Coder-14B-Instruct", False, chat=True),
 }
 
 

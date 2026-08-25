@@ -83,18 +83,21 @@ def test_hidden_infra_error_leaves_hidden_pass_none(monkeypatch):
 
 
 def test_arm_registry_matches_frozen_spec():
-    # A2: A_noMem is the chat-served instruct 1.5B; the B arms are raw-served base 9B.
+    # A2 + the activated §2 fallback (2026-08-24): every arm is a chat-served instruct
+    # model now -- the small arms the 1.5B, the B arms the 14B coder (AWQ-served under
+    # this SERVED name; the 9B failed §4.7 both ways, findings S2.5-stack2.md §6-§7).
     assert ARMS["A_noMem"] == ArmConfig("A_noMem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True)
-    assert ARMS["B_search"] == ArmConfig("B_search", "Qwen/Qwen3.5-9B", True, chat=False)
-    assert ARMS["B_naive"] == ArmConfig("B_naive", "Qwen/Qwen3.5-9B", False, chat=False)
+    assert ARMS["B_search"] == ArmConfig("B_search", "Qwen/Qwen2.5-Coder-14B-Instruct", True, chat=True)
+    assert ARMS["B_naive"] == ArmConfig("B_naive", "Qwen/Qwen2.5-Coder-14B-Instruct", False, chat=True)
     assert ARMS["B_naive"].use_search is False
 
 
 def test_chat_serving_is_an_arm_property_not_a_cli_default():
-    """The instruct A_noMem proposer MUST be chat-served; the base B proposers MUST be raw-served.
-    Binding chat to the arm stops `arm run --arm A_noMem` (no --chat) from silently serving raw."""
+    """Every gating proposer is an instruct model and MUST be chat-served (the §2 fallback
+    replaced the raw-served base 9B). Binding chat to the arm stops `arm run` without
+    --chat from silently serving the wrong surface."""
     assert ARMS["A_noMem"].chat is True
-    assert ARMS["B_search"].chat is False and ARMS["B_naive"].chat is False
+    assert ARMS["B_search"].chat is True and ARMS["B_naive"].chat is True
 
 
 # --- S3: the memory seam through attempt_task --------------------------------

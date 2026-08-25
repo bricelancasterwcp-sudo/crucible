@@ -27,5 +27,9 @@ systemctl --user stop ollama 2>/dev/null || pkill -f 'ollama serve' 2>/dev/null 
 # Pull the exact vllm-serve argv (one token per line) from the SERVE table.
 mapfile -t ARGV < <("$PY" -m crucible.run.serving "$MODEL")
 
-echo "[serve_model] launching: VLLM_USE_FLASHINFER_SAMPLER=0 ${ARGV[*]}" >&2
+# S3: the sleep loop hot-swaps LoRA adapters at runtime via POST /v1/load_lora_adapter,
+# which vLLM refuses unless this env var is set. Harmless for arms that never sleep.
+export VLLM_ALLOW_RUNTIME_LORA_UPDATING=true
+
+echo "[serve_model] launching: VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_ALLOW_RUNTIME_LORA_UPDATING=true ${ARGV[*]}" >&2
 exec env VLLM_USE_FLASHINFER_SAMPLER=0 "${ARGV[@]}"

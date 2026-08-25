@@ -154,6 +154,9 @@ class LoraTrainer:
         self._max_length = max_length
 
     def train(self, pairs: list[tuple[str, str]], seed: int, out_dir: Path) -> Path:
+        import os
+        # Fragmentation relief: the smoke measured ~0.7 GiB reserved-but-unallocated.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         import torch
         from datasets import Dataset
         from peft import LoraConfig, get_peft_model
@@ -187,9 +190,15 @@ class LoraTrainer:
         # assistant_only_loss=True (current TRL API, v1.0.0+) masks the loss to the
         # completion turn now that the data is conversational -- see module docstring.
         # NOTE: the SFTConfig kwarg is max_length, not the older max_seq_length.
+        # Batch 1 + accumulation + checkpointing (2026-08-25, S3 smoke): TRL's default
+        # per-device batch of 8 puts eight max_length sequences of activations on the card
+        # AT ONCE, and sleep trains BESIDE the vLLM server on a 16 GiB GPU -- the smoke
+        # OOMed twice before this. Same effective batch (8), a fraction of the peak.
         config = SFTConfig(
             output_dir=str(out_dir), seed=seed, max_length=self._max_length,
             assistant_only_loss=True, packing=False, report_to=[],
+            per_device_train_batch_size=1, gradient_accumulation_steps=8,
+            gradient_checkpointing=True,
         )
         trainer = SFTTrainer(model=peft_model, args=config, train_dataset=dataset, processing_class=tokenizer)
         trainer.train()

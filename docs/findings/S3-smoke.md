@@ -68,7 +68,10 @@ Uncharged numbers, for orientation only (smoke ≠ measurement): `succ_overall 0
   on re-POST was taken through the verify-idempotent path (`d847491`) twice.
 - **Adapter lineage stamping:** 11 pre-adapter tasks stamped `adapter_id: None`, then
   6/5/6/2 tasks under each successive adapter.
-- **Retrieval:** 17/30 tasks carried non-empty `retrieved_ids`.
+- **Retrieval:** 17/30 tasks carried non-empty `retrieved_ids`. Retrieved exemplars include
+  prior landed modules for the same unit, so retrieval hits on second-exposure tasks carry
+  the file-familiarity confound (separated at analysis time by the pre-registered
+  novel-unit split, §4.3/E5).
 
 ## 5. Teardown
 

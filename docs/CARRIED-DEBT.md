@@ -195,6 +195,11 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
 - `gpu_s` on SleepRecords is always `None` (unmeasured-is-None; training sits behind the
   Trainer seam). Measure it in S4 if GPU-minutes-per-arm reporting (§3 declared
   asymmetry) needs the split.
+- **Retrieval exemplar carries a file-familiarity confound (REAL, pre-registered):** the
+  retrieval exemplar hands A_full a prior verified landed module for the same (unit,
+  family), so on second-exposure tasks part of any E1 gain is file-familiarity rather than
+  bug-kind transfer. The §4.3 novel-unit split (E5) is the pre-registered separator; this
+  caveat must accompany E1 reporting at lock.
 
 ### Process lessons
 - **A synthetic resource smoke understates the real footprint:** the trainer smoke's tiny

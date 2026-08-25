@@ -192,6 +192,12 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
 - **Sleep holdout slice is graded on hidden suites** of already-solved tasks — the gate
   sees information the arm's own submissions could not; acceptable for an accept/reject
   guard (it gates weights, not scores), noted for the record.
+- **Crash-window self-exemplar on resume** (final review M-1, parked): the episode row is
+  written before the task record, so a crash between the two writes leaves an orphan
+  episode; on resume the re-attempted task can be served its OWN prior landed module as
+  the exemplar (a one-task self-solve). Sub-second window, bounded to one task, admitted
+  by the resume-coherence check. S4 fix: exclude the current `task_key`'s own episode
+  from the exemplar pool in `retrieve()`.
 - `gpu_s` on SleepRecords is always `None` (unmeasured-is-None; training sits behind the
   Trainer seam). Measure it in S4 if GPU-minutes-per-arm reporting (§3 declared
   asymmetry) needs the split.

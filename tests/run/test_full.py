@@ -1074,3 +1074,10 @@ def test_mem_hooks_after_task_without_before_task_raises(tmp_path):
     hooks = MemHooks(MemoryStore(tmp_path / "memory.sqlite3"))
     with pytest.raises(ValueError, match="without a matching before_task"):
         hooks.after_task(U, SPEC, _record(), _result(), NOW)
+    # A pending task_key that does not match the one after_task is called for is just as
+    # unguarded a case as no pending at all -- a mutant that collapsed the guard to
+    # ``pending is None`` (dropping the task_key compare) would sail through this call and
+    # fabricate retrieved_ids for a task before_task never opened.
+    hooks.before_task(U, SPEC)
+    with pytest.raises(ValueError, match="without a matching before_task"):
+        hooks.after_task(U, replace(SPEC, task_key="k-other"), _record(), _result(), NOW)

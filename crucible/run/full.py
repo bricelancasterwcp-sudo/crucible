@@ -123,17 +123,22 @@ from crucible.value.online import OnlineValue
 FULL_ARM = "A_full"
 """The gating memory arm -- both hook switches on (see ``FULL_FAMILY``)."""
 
-FULL_FAMILY: dict[str, tuple[bool, bool]] = {
-    "A_full": (True, True),
-    "A_mem_nosleep": (True, False),    # prereg A_mem−sleep: explicit memory, no LoRA
-    "A_sleep_nomem": (False, True),    # prereg A_sleep−mem: LoRA, no store in the prompt
+FULL_FAMILY: dict[str, tuple[str, bool]] = {
+    "A_full": ("full", True),
+    "A_mem_nosleep": ("full", False),    # prereg A_mem−sleep: explicit memory, no LoRA
+    "A_sleep_nomem": ("off", True),      # prereg A_sleep−mem: LoRA, no store in the prompt
+    "A_mem_exactonly": ("exact", False), # prereg §4.3: exact-class recall only, no LoRA
 }
-"""The arms these hooks serve, mapped to ``(retrieval_enabled, sleep_enabled)`` -- the CLI
-gates on membership here (see ``cli.py``). The two ablations are EXPLORATORY (non-gating,
-protocol ``docs/findings/ABLATIONS-A.md``): each is A_full minus exactly ONE mechanism,
-with the value model and calibrator kept, so a difference from A_full's measured rates
-reads as that mechanism's marginal contribution and nothing else. They are separate ARM
-NAMES rather than run-time flags on A_full so every record stamps which configuration
+"""The arms these hooks serve, mapped to ``(retrieval_mode, sleep_enabled)`` -- the CLI
+gates on membership here (see ``cli.py``). ``retrieval_mode`` is ``"full"`` (class-exact
+falling back to family-wide, ``retrieve``'s default policy), ``"exact"`` (class-exact only
+-- a stranger unit gets silence rather than a family-wide lesson, see ``exact_only`` on
+:func:`crucible.memory.retrieve.retrieve`), or ``"off"`` (the store is never consulted).
+The two `_nosleep`/`_nomem` ablations and ``A_mem_exactonly`` are all EXPLORATORY
+(non-gating, protocol ``docs/findings/ABLATIONS-A.md``): each is A_full minus exactly ONE
+mechanism, with the value model and calibrator kept, so a difference from A_full's measured
+rates reads as that mechanism's marginal contribution and nothing else. They are separate
+ARM NAMES rather than run-time flags on A_full so every record stamps which configuration
 produced it -- a gate record and an ablation record can never be confused by file mixing."""
 
 MEMORY_DB_FILE = "memory.sqlite3"
@@ -261,9 +266,9 @@ class FullHooks:
                  sleep_controller: SleepController, registry: AdapterRegistry, *,
                  sleep_records_path: Path, proposer: "AdapterProposer | None" = None,
                  recalibrate_window: int = RECALIBRATE_WINDOW,
-                 retrieval_enabled: bool = True, sleep_enabled: bool = True,
+                 retrieval: str = "full", sleep_enabled: bool = True,
                  log=print) -> None:
-        self._retrieval_enabled = retrieval_enabled
+        self._retrieval = retrieval
         self._sleep_enabled = sleep_enabled
         self._store = store
         self._value = value
@@ -296,9 +301,20 @@ class FullHooks:
         return self._sleep.threshold
 
     @property
+    def retrieval_mode(self) -> str:
+        """Which retrieval policy ``before_task`` applies: ``"full"``, ``"exact"``, or
+        ``"off"`` -- see ``FULL_FAMILY``."""
+        return self._retrieval
+
+    @property
     def retrieval_enabled(self) -> bool:
-        """Whether ``before_task`` consults the store (False only for A_sleep_nomem)."""
-        return self._retrieval_enabled
+        """Whether ``before_task`` consults the store at all (== ``retrieval_mode != "off"``).
+
+        Kept alongside ``retrieval_mode`` so the Phase-A on/off assertions survive the mode
+        migration unchanged: ``A_mem_exactonly`` reads ``True`` here, same as ``A_full``,
+        because the store IS consulted -- the difference between "full" and "exact" is
+        WHICH results are eligible once it is, not whether it is asked at all."""
+        return self._retrieval != "off"
 
     @property
     def sleep_enabled(self) -> bool:
@@ -319,12 +335,17 @@ class FullHooks:
         the symptom-conditioned form is not built. Taking the argument keeps the seam open
         for it; ignoring it keeps this implementation honest about what it actually uses.
         """
-        # The A_sleep_nomem ablation NEVER consults the store: the block is structurally
-        # absent, not "retrieved and empty", so the prompt is byte-for-byte the S2 prompt
-        # and item_ids stamp () -- the honest "no memory was offered" record. The organ is
-        # still WRITTEN (after_task is unchanged); only the read side is severed.
-        block = (retrieve(self._store, taskspec.unit_id, taskspec.family)
-                 if self._retrieval_enabled else RetrievedBlock(None, ()))
+        # The A_sleep_nomem ablation ("off") NEVER consults the store: the block is
+        # structurally absent, not "retrieved and empty", so the prompt is byte-for-byte the
+        # S2 prompt and item_ids stamp () -- the honest "no memory was offered" record. The
+        # organ is still WRITTEN (after_task is unchanged); only the read side is severed.
+        # A_mem_exactonly ("exact") consults the store but restricts it to the exact class --
+        # see ``exact_only`` on ``crucible.memory.retrieve.retrieve``.
+        if self._retrieval != "off":
+            block = retrieve(self._store, taskspec.unit_id, taskspec.family,
+                             exact_only=(self._retrieval == "exact"))
+        else:
+            block = RetrievedBlock(None, ())
         hit = block.block is not None
         cls = provenance_class(hit, taskspec.phase)
         self._pending = _Pending(taskspec.task_key, block.item_ids,
@@ -677,7 +698,7 @@ def build_full_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *, base_ur
                      value: OnlineValue, chat: bool, proposer=None,
                      memory_db: Path | None = None,
                      sleep_threshold: int = SLEEP_THRESHOLD_DEFAULT,
-                     retrieval_enabled: bool = True, sleep_enabled: bool = True,
+                     retrieval: str = "full", sleep_enabled: bool = True,
                      log=print) -> FullHooks:
     """Wire A_full's LIVE organs: memory db, calibrator, LoRA trainer, vLLM loader, slice.
 
@@ -725,5 +746,5 @@ def build_full_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *, base_ur
                     else AdapterProposer(proposer, proposer_for, cfg.model))
     return FullHooks(store, value, Calibrator(), controller, registry,
                      sleep_records_path=arm_dir / SLEEP_RECORDS_FILE,
-                     proposer=arm_proposer, retrieval_enabled=retrieval_enabled,
+                     proposer=arm_proposer, retrieval=retrieval,
                      sleep_enabled=sleep_enabled, log=log)

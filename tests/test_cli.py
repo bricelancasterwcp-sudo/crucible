@@ -157,7 +157,8 @@ def test_cli_arm_run_a_full_defaults_the_memory_db_under_the_arm_dir(_stream, tm
 
 @pytest.mark.parametrize("arm,retrieval,sleep", [("A_full", True, True),
                                                  ("A_mem_nosleep", True, False),
-                                                 ("A_sleep_nomem", False, True)])
+                                                 ("A_sleep_nomem", False, True),
+                                                 ("A_mem_exactonly", True, False)])
 def test_cli_arm_run_full_family_wires_the_declared_switches(_stream, tmp_path, monkeypatch,
                                                              arm, retrieval, sleep):
     """The exploratory ablations run through the SAME wiring as A_full -- OnlineValue,
@@ -175,6 +176,8 @@ def test_cli_arm_run_full_family_wires_the_declared_switches(_stream, tmp_path, 
     assert rc == 0
     hooks = seen["hooks"]
     assert (hooks.retrieval_enabled, hooks.sleep_enabled) == (retrieval, sleep)
+    assert hooks.retrieval_mode == {"A_full": "full", "A_mem_nosleep": "full",
+                                    "A_sleep_nomem": "off", "A_mem_exactonly": "exact"}[arm]
     assert isinstance(seen["value"], OnlineValue)
     assert seen["proposer"] is hooks.proposer            # re-pointable proposer (C1)
     assert isinstance(seen["proposer"], AdapterProposer)

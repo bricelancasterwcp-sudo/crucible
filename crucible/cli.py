@@ -157,9 +157,9 @@ def _task_keys(manifest, tasks: str) -> list[str]:
 def _arm_run(a) -> int:
     """Run one named arm over the chosen task set and print where the records landed.
 
-    The FULL_FAMILY arms -- A_full and its two exploratory ablations -- get the memory
+    The FULL_FAMILY arms -- A_full and its exploratory ablations -- get the memory
     organ, value v1 and the sleep loop, wired as the driver's ``hooks`` with the family's
-    ``(retrieval_enabled, sleep_enabled)`` switches (each ablation is A_full minus exactly
+    ``(retrieval_mode, sleep_enabled)`` switches (each ablation is A_full minus exactly
     one mechanism; see ``crucible.run.full.FULL_FAMILY``). Every other arm passes
     ``hooks=None`` and keeps v0's ``ConstantValue`` (spec S6: A_noMem's pilot already ran on
     it; the gating arms differ by exactly the pre-registered column). The gate is the arm
@@ -184,12 +184,12 @@ def _arm_run(a) -> int:
     value, hooks = ConstantValue(), None
     if cfg.name in FULL_FAMILY:
         from crucible.value.online import OnlineValue
-        retrieval_enabled, sleep_enabled = FULL_FAMILY[cfg.name]
+        retrieval_mode, sleep_enabled = FULL_FAMILY[cfg.name]
         value = OnlineValue()
         hooks = build_full_hooks(cfg, a.stream_dir, a.out, base_url=a.base_url, value=value,
                                  chat=chat, proposer=proposer, memory_db=a.memory_db,
                                  sleep_threshold=a.sleep_threshold,
-                                 retrieval_enabled=retrieval_enabled,
+                                 retrieval=retrieval_mode,
                                  sleep_enabled=sleep_enabled)
         # The SAME client, wrapped so an accepted adapter is what the next request asks for.
         # Handing run_arm the unwrapped one would leave the arm on the base weights forever

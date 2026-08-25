@@ -167,7 +167,7 @@ class _Rig:
     """A ``FullHooks`` plus every seam behind it, so a test can assert on any of them."""
 
     def __init__(self, tmp_path, *, threshold=999, units=None, counts=(1, 1, 1, 1), seed=0,
-                 proposer=None, retrieval_enabled=True, sleep_enabled=True,
+                 proposer=None, retrieval="full", sleep_enabled=True,
                  log=lambda *a: None):
         self.store = MemoryStore(tmp_path / "memory.sqlite3")
         self.value = _SpyValue()
@@ -187,7 +187,7 @@ class _Rig:
         self.logged: list[str] = []
         self.hooks = FullHooks(self.store, self.value, self.calibrator, self.controller,
                                self.registry, sleep_records_path=self.sleep_records_path,
-                               proposer=proposer, retrieval_enabled=retrieval_enabled,
+                               proposer=proposer, retrieval=retrieval,
                                sleep_enabled=sleep_enabled, log=self.logged.append)
 
 
@@ -982,9 +982,26 @@ def test_full_family_maps_each_ablation_to_a_full_minus_exactly_one_mechanism():
     """The CLI wires (retrieval_enabled, sleep_enabled) straight from this map, so a flipped
     tuple here IS a mislabeled run: A_mem_nosleep quietly sleeping, or A_sleep_nomem quietly
     reading the store, with every record stamping the wrong arm name."""
-    assert FULL_FAMILY == {"A_full": (True, True),
-                           "A_mem_nosleep": (True, False),
-                           "A_sleep_nomem": (False, True)}
+    assert FULL_FAMILY == {"A_full": ("full", True),
+                           "A_mem_nosleep": ("full", False),
+                           "A_sleep_nomem": ("off", True),
+                           "A_mem_exactonly": ("exact", False)}
+
+
+def test_exact_mode_serves_repeats_but_silences_strangers(tmp_path):
+    """retrieval="exact": after a verified attempt mints a lesson for SPEC's class, a
+    second exposure of the SAME class still gets a block, but a task of the same family
+    on a DIFFERENT unit gets None with item_ids=() (Phase-B §3 reading guide)."""
+    rig = _Rig(tmp_path, retrieval="exact")
+    _open_task(rig.hooks)
+    rig.hooks.after_task(U, SPEC, _record(), _result(), NOW)          # mints exact-class lesson
+    same = rig.hooks.before_task(U, replace(SPEC, task_key="k2", phase=2, kind="second"))
+    assert same is not None                                            # exact class: served
+    rig.hooks.task_confidence().calibrate(0.6)
+    rig.hooks.after_task(U, replace(SPEC, task_key="k2", phase=2, kind="second"), _record(), _result(), NOW)
+    stranger = replace(SPEC, task_key="k3", unit_id="Y/9", class_id="Y/9|ARITH", kind="novel", phase=2)
+    assert rig.hooks.before_task(U, stranger) is None                  # stranger: silence
+    assert rig.value.begun[-1] == (SPEC.family, False)
 
 
 def test_retrieval_disabled_offers_nothing_even_when_the_organ_holds_a_lesson(tmp_path):
@@ -993,7 +1010,7 @@ def test_retrieval_disabled_offers_nothing_even_when_the_organ_holds_a_lesson(tm
     the S2 prompt, ``retrieval_hit`` is False, and the record stamps ``item_ids=()``. The
     lesson is minted first (through the same hooks: the WRITE side is deliberately alive)
     and its presence is asserted, so this test fails if the organ was empty all along."""
-    rig = _Rig(tmp_path, retrieval_enabled=False)
+    rig = _Rig(tmp_path, retrieval="off")
     _open_task(rig.hooks)
     rig.hooks.after_task(U, SPEC, _record(), _result(), NOW)          # mints the lesson
     assert rig.store.semantic_for(SPEC.unit_id, SPEC.family)          # organ HAS content
@@ -1030,5 +1047,5 @@ def test_ablation_switches_are_readable_and_default_on(tmp_path):
         (tmp_path / sub).mkdir()
     assert (_Rig(tmp_path / "a").hooks.retrieval_enabled,
             _Rig(tmp_path / "b").hooks.sleep_enabled) == (True, True)
-    off = _Rig(tmp_path / "c", retrieval_enabled=False, sleep_enabled=False).hooks
+    off = _Rig(tmp_path / "c", retrieval="off", sleep_enabled=False).hooks
     assert (off.retrieval_enabled, off.sleep_enabled) == (False, False)

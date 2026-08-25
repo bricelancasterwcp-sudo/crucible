@@ -175,34 +175,46 @@ class LoraTrainer:
         # parity note) -- sft_records is the pure helper this module's own tests pin.
         dataset = Dataset.from_list(sft_records(pairs))
 
-        model = AutoModelForCausalLM.from_pretrained(
-            self._model_name, torch_dtype=torch.bfloat16, device_map="cuda"
-        )
-        targets = sorted({
-            name.split(".")[-1]
-            for name, mod in model.named_modules()
-            if isinstance(mod, torch.nn.Linear) and any(key in name for key in LORA_TARGET_PROJ_KEYS)
-        })
-        peft_model = get_peft_model(
-            model, LoraConfig(r=LORA_RANK, lora_alpha=LORA_ALPHA, target_modules=targets, task_type="CAUSAL_LM")
-        )
+        # Everything from here to the finally is wrapped so the base model NEVER
+        # outlives one train() call: sleep runs repeatedly in the arm-run process, and
+        # the third smoke attempt proved a leaked model (2.9 GiB bf16) makes sleep N+1
+        # load a SECOND copy and OOM the 16 GiB card it shares with the vLLM server.
+        model = peft_model = trainer = None
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                self._model_name, torch_dtype=torch.bfloat16, device_map="cuda"
+            )
+            targets = sorted({
+                name.split(".")[-1]
+                for name, mod in model.named_modules()
+                if isinstance(mod, torch.nn.Linear) and any(key in name for key in LORA_TARGET_PROJ_KEYS)
+            })
+            peft_model = get_peft_model(
+                model, LoraConfig(r=LORA_RANK, lora_alpha=LORA_ALPHA, target_modules=targets, task_type="CAUSAL_LM")
+            )
 
-        # assistant_only_loss=True (current TRL API, v1.0.0+) masks the loss to the
-        # completion turn now that the data is conversational -- see module docstring.
-        # NOTE: the SFTConfig kwarg is max_length, not the older max_seq_length.
-        # Batch 1 + accumulation + checkpointing (2026-08-25, S3 smoke): TRL's default
-        # per-device batch of 8 puts eight max_length sequences of activations on the card
-        # AT ONCE, and sleep trains BESIDE the vLLM server on a 16 GiB GPU -- the smoke
-        # OOMed twice before this. Same effective batch (8), a fraction of the peak.
-        config = SFTConfig(
-            output_dir=str(out_dir), seed=seed, max_length=self._max_length,
-            assistant_only_loss=True, packing=False, report_to=[],
-            per_device_train_batch_size=1, gradient_accumulation_steps=8,
-            gradient_checkpointing=True,
-        )
-        trainer = SFTTrainer(model=peft_model, args=config, train_dataset=dataset, processing_class=tokenizer)
-        trainer.train()
+            # assistant_only_loss=True (current TRL API, v1.0.0+) masks the loss to the
+            # completion turn now that the data is conversational -- see module docstring.
+            # NOTE: the SFTConfig kwarg is max_length, not the older max_seq_length.
+            # Batch 1 + accumulation + checkpointing (2026-08-25, S3 smoke): TRL's default
+            # per-device batch of 8 puts eight max_length sequences of activations on the card
+            # AT ONCE, and sleep trains BESIDE the vLLM server on a 16 GiB GPU -- the smoke
+            # OOMed twice before this. Same effective batch (8), a fraction of the peak.
+            config = SFTConfig(
+                output_dir=str(out_dir), seed=seed, max_length=self._max_length,
+                assistant_only_loss=True, packing=False, report_to=[],
+                per_device_train_batch_size=1, gradient_accumulation_steps=8,
+                gradient_checkpointing=True,
+            )
+            trainer = SFTTrainer(model=peft_model, args=config, train_dataset=dataset, processing_class=tokenizer)
+            trainer.train()
 
-        peft_model.save_pretrained(str(out_dir))
-        tokenizer.save_pretrained(str(out_dir))
+            peft_model.save_pretrained(str(out_dir))
+            tokenizer.save_pretrained(str(out_dir))
+        finally:
+            del model, peft_model, trainer
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
         return out_dir
+

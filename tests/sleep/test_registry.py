@@ -276,3 +276,28 @@ def test_read_all_raises_on_unparseable_non_final_line(tmp_path):
 
     with pytest.raises(json.JSONDecodeError):
         registry.latest_accepted()
+
+
+def test_lora_trainer_train_frees_the_gpu_model_in_a_finally_block():
+    """Sleep runs repeatedly in one arm-run process. The third S3 smoke attempt proved
+    that a train() which leaks its base model makes the NEXT sleep load a second 2.9 GiB
+    copy and OOM the card it shares with the vLLM server -- so the release must sit in a
+    finally, surviving both success and a failed training step."""
+    source = Path(train_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    train_fn = next(
+        node
+        for cls in tree.body
+        if isinstance(cls, ast.ClassDef) and cls.name == "LoraTrainer"
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "train"
+    )
+    finallies = [n.finalbody for n in ast.walk(train_fn) if isinstance(n, ast.Try) and n.finalbody]
+    assert finallies, "LoraTrainer.train has no try/finally"
+    dumped = "\n".join(ast.dump(stmt) for body in finallies for stmt in body)
+    assert "empty_cache" in dumped, "finally block does not call torch.cuda.empty_cache"
+    assert any(
+        isinstance(stmt, ast.Delete)
+        for body in finallies
+        for stmt in body
+    ), "finally block does not del the model references"

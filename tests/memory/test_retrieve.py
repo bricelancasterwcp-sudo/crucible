@@ -546,3 +546,68 @@ def test_symptom_missing_cited_episode_scores_as_empty_symptom_not_a_crash(tmp_p
     assert result.block is not None
     assert orphan.item_id in result.item_ids
     store.close()
+
+
+def test_symptom_falsified_item_never_appears_in_cross_unit_pool(tmp_path: Path):
+    """REQUIRED (coordinator review round 1): MUTANT KILLED -- dropping the
+    ``falsified_by is None`` guard in ``_symptom_ranked_lessons``. Seeds a cross-unit
+    lesson that WOULD match strongly (same distinctive-token setup as
+    ``test_symptom_match_carries_a_lesson_across_units``), then falsifies it via
+    ``store.mark_falsified`` -- honest storage still returns the row (store.py's own
+    docstring), so a missing filter here would still score and surface it. Nothing else
+    lives in the store, so the correct result is exactly ``RetrievedBlock(None, ())``."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    episode = _episode("tk-falsified-cross", unit_id=UNIT, family=FAMILY,
+                        root_prompt="Fix the bug.\n## Symptom\nflux_capacitor_overflow\n")
+    store.write_episode(episode)
+    lesson = _semantic(episode.item_id, unit_id=UNIT, family=FAMILY,
+                        landed_diff="-    return 0\n+    return 1\n# flux_capacitor_overflow\n")
+    store.write_semantic(lesson)
+    store.mark_falsified(lesson.item_id, "re-run:tk-9 flipped back to failing")
+
+    result = retrieve_symptom(store, "def g(): pass", OTHER_UNIT, FAMILY,
+                               "flux_capacitor_overflow observed again", tau=0.05)
+    assert lesson.item_id not in result.item_ids
+    assert result == RetrievedBlock(None, ())
+    store.close()
+
+
+def test_symptom_pool_includes_same_unit_different_family(tmp_path: Path):
+    """Coordinator review round 1 (minor): the candidate pool excludes nothing but
+    falsified items -- a lesson filed under the SAME unit as the query but a DIFFERENT
+    family is still eligible, not excluded merely for sharing the query's own unit_id
+    under another family."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    episode = _episode("tk-same-unit-other-family", unit_id=UNIT, family=OTHER_FAMILY,
+                        root_prompt="Fix the bug.\n## Symptom\nflux_capacitor_overflow\n")
+    store.write_episode(episode)
+    lesson = _semantic(episode.item_id, unit_id=UNIT, family=OTHER_FAMILY,
+                        landed_diff="-    return 0\n+    return 1\n# flux_capacitor_overflow\n")
+    store.write_semantic(lesson)
+
+    result = retrieve_symptom(store, "def g(): pass", UNIT, FAMILY,
+                               "flux_capacitor_overflow observed again", tau=0.05)
+    assert result.block is not None
+    assert lesson.item_id in result.item_ids
+    store.close()
+
+
+def test_symptom_determinism_two_calls_are_equal(tmp_path: Path):
+    """Coordinator review round 1 (minor): two identical `retrieve_symptom` calls against
+    the same store state return equal `RetrievedBlock`s, exercised through the cross-unit
+    scorer branch (the class-exact fast path already has its own determinism coverage via
+    `retrieve`'s `test_determinism_two_calls_are_equal`)."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    episode = _episode("tk-det-cross", unit_id=UNIT, family=FAMILY,
+                        root_prompt="Fix the bug.\n## Symptom\nflux_capacitor_overflow\n")
+    store.write_episode(episode)
+    lesson = _semantic(episode.item_id, unit_id=UNIT, family=FAMILY,
+                        landed_diff="-    return 0\n+    return 1\n# flux_capacitor_overflow\n")
+    store.write_semantic(lesson)
+
+    first = retrieve_symptom(store, "def g(): pass", OTHER_UNIT, FAMILY,
+                              "flux_capacitor_overflow observed again", tau=0.05)
+    second = retrieve_symptom(store, "def g(): pass", OTHER_UNIT, FAMILY,
+                               "flux_capacitor_overflow observed again", tau=0.05)
+    assert first == second
+    store.close()

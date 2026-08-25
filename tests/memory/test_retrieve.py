@@ -61,8 +61,16 @@ generous) but is killed by this one, since it would wrongly keep the 4801-char b
 
 from pathlib import Path
 
+import pytest
+
 from crucible.memory.distill import render_lesson
-from crucible.memory.retrieve import _BLOCK_HEADER, CONTEXT_BUDGET_CHARS, RetrievedBlock, retrieve
+from crucible.memory.retrieve import (
+    _BLOCK_HEADER,
+    CONTEXT_BUDGET_CHARS,
+    RetrievedBlock,
+    retrieve,
+    retrieve_symptom,
+)
 from crucible.memory.schema import EpisodicRecord, SemanticItem, content_id
 from crucible.memory.store import MemoryStore
 
@@ -74,12 +82,13 @@ OTHER_FAMILY = "OFFBY1"
 
 def _episode(task_key: str, arm: str = "A_full", *, unit_id: str = UNIT, family: str = FAMILY,
              verified: bool = True, landed_module: str | None = "def f():\n    return 1\n",
-             created_at: str = "2026-08-24T10:00:00Z", falsified_by: str | None = None) -> EpisodicRecord:
+             created_at: str = "2026-08-24T10:00:00Z", falsified_by: str | None = None,
+             root_prompt: str = "Fix the bug.") -> EpisodicRecord:
     item_id = content_id("episode", {"task_key": task_key, "arm": arm})
     return EpisodicRecord(
         item_id=item_id, task_key=task_key, arm=arm, unit_id=unit_id, family=family,
         class_id=f"{unit_id}|{family}", phase=1, kind="first",
-        root_prompt="Fix the bug.", landed_module=landed_module, visible_reward=1.0,
+        root_prompt=root_prompt, landed_module=landed_module, visible_reward=1.0,
         executions_charged=2, hidden_pass=True if verified else False, verified=verified,
         memory_item_ids=(), created_at=created_at, confidence=0.8,
         status="active", version=1, source_locator=f"run:t/task:{task_key}",
@@ -431,4 +440,109 @@ def test_determinism_two_calls_are_equal(tmp_path: Path):
     first = retrieve(store, UNIT, FAMILY)
     second = retrieve(store, UNIT, FAMILY)
     assert first == second
+    store.close()
+
+
+# --- retrieve_symptom (Phase-C v2 policy, task-3 brief) ------------------------------
+#
+# The exact-class fast path must stay byte-identical to `retrieve`'s class-exact branch
+# -- the experiment's repeat guard depends on it -- so it is tested first, directly
+# against `retrieve` itself, with query text deliberately unrelated to the seeded lesson
+# so a scorer-routed fast path would very likely (and here, deterministically) diverge.
+
+
+def test_symptom_fast_path_equals_full_policy_when_exact_lesson_exists(tmp_path: Path):
+    """MUTANT KILLED: fast path routed through the scorer. Query text shares nothing with
+    the seeded lesson and tau=0.99 is set high -- if the fast path were wired through
+    `rank`/tau instead of calling `_rank_lessons` directly on `live_exact`, this lesson
+    would score far below tau and the result would silently become no-lessons instead of
+    matching `retrieve`'s unconditional class-exact output."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    exact = _semantic("ep-exact", unit_id=UNIT, family=FAMILY, last_verified_at="2026-08-24T09:00:00Z")
+    store.write_semantic(exact)
+    store.write_episode(_episode("tk-1"))
+    full = retrieve(store, UNIT, FAMILY)
+    got = retrieve_symptom(store, "completely unrelated module source", UNIT, FAMILY,
+                            "completely unrelated symptom text", tau=0.99)
+    assert got == full
+    store.close()
+
+
+def test_symptom_match_carries_a_lesson_across_units(tmp_path: Path):
+    """MUTANT KILLED: candidates filtered to same unit/family. The lesson lives under UNIT
+    (cited episode's symptom section carries a distinctive token shared with the query);
+    the call is for stranger unit OTHER_UNIT, which has no exact-class content of its own.
+    It can only surface if the cross-unit candidate pool (`semantic_all()`, not
+    `semantic_for`) is actually consulted."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    episode = _episode("tk-cross", unit_id=UNIT, family=FAMILY,
+                        root_prompt="Fix the bug.\n## Symptom\nflux_capacitor_overflow\n")
+    store.write_episode(episode)
+    lesson = _semantic(episode.item_id, unit_id=UNIT, family=FAMILY,
+                        landed_diff="-    return 0\n+    return 1\n# flux_capacitor_overflow\n")
+    store.write_semantic(lesson)
+
+    result = retrieve_symptom(store, "def g(): pass", OTHER_UNIT, FAMILY,
+                               "flux_capacitor_overflow observed again", tau=0.05)
+    assert result.block is not None
+    assert lesson.item_id in result.item_ids
+    store.close()
+
+
+def test_below_tau_is_silence_none_never_empty(tmp_path: Path):
+    """Same seeding as the cross-unit-carry test, but tau raised above the actual score:
+    below tau (and with no exemplar for the stranger unit) is exactly
+    `RetrievedBlock(None, ())` -- never an empty string standing in for it."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    episode = _episode("tk-cross", unit_id=UNIT, family=FAMILY,
+                        root_prompt="Fix the bug.\n## Symptom\nflux_capacitor_overflow\n")
+    store.write_episode(episode)
+    lesson = _semantic(episode.item_id, unit_id=UNIT, family=FAMILY,
+                        landed_diff="-    return 0\n+    return 1\n# flux_capacitor_overflow\n")
+    store.write_semantic(lesson)
+
+    result = retrieve_symptom(store, "def g(): pass", OTHER_UNIT, FAMILY,
+                               "flux_capacitor_overflow observed again", tau=0.99)
+    assert result == RetrievedBlock(None, ())
+    store.close()
+
+
+def test_tau_none_raises(tmp_path: Path):
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    with pytest.raises(ValueError, match="not locked"):
+        retrieve_symptom(store, "src", "X/0", "ARITH", "boom", tau=None)
+    store.close()
+
+
+def test_exemplar_rule_unchanged_under_symptom_mode(tmp_path: Path):
+    """Class-exact verified episode, no lessons anywhere in the store: the exemplar rule is
+    untouched by symptom mode -- present regardless of tau for the exact class, absent for
+    a stranger unit, exactly like `retrieve`'s decoupled exemplar rule."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    episode = _episode("tk-1")  # unit_id=UNIT, family=FAMILY by default
+    store.write_episode(episode)
+
+    result = retrieve_symptom(store, "some src", UNIT, FAMILY, "some symptom", tau=0.99)
+    assert result.item_ids == (episode.item_id,)
+    assert "### A prior working version of this module" in result.block
+
+    stranger = retrieve_symptom(store, "some src", OTHER_UNIT, FAMILY, "some symptom", tau=0.01)
+    assert stranger == RetrievedBlock(None, ())
+    store.close()
+
+
+def test_symptom_missing_cited_episode_scores_as_empty_symptom_not_a_crash(tmp_path: Path):
+    """Invariant 3's 'missing episode -> symptom \"\"' clause: a semantic item can cite an
+    episode id that does not resolve (store.episode_by_id returns None). Scoring it must
+    fall back to an empty symptom string, never raise."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    orphan = _semantic("ep-does-not-exist", unit_id=OTHER_UNIT, family=FAMILY,
+                        landed_diff="-    return 0\n+    return 1\n# flux_capacitor_overflow\n")
+    store.write_semantic(orphan)
+    # No store.write_episode call at all -- "ep-does-not-exist" never resolves.
+
+    result = retrieve_symptom(store, "def g(): pass", UNIT, FAMILY,
+                               "flux_capacitor_overflow observed again", tau=0.05)
+    assert result.block is not None
+    assert orphan.item_id in result.item_ids
     store.close()

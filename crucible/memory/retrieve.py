@@ -70,6 +70,7 @@ from dataclasses import dataclass
 from .distill import render_lesson
 from .schema import EpisodicRecord, SemanticItem
 from .store import MemoryStore
+from .symmatch import lesson_text, query_text, rank, symptom_section, tokenize
 
 CONTEXT_BUDGET_CHARS = 4800
 
@@ -115,6 +116,84 @@ def retrieve(store: MemoryStore, unit_id: str, family: str, *, exact_only: bool 
     # Decoupled from the lesson path above -- see module docstring.
     exemplar = _pick_exemplar(store, unit_id, family)
 
+    return _assemble_block(lessons, exemplar)
+
+
+def retrieve_symptom(store: MemoryStore, unit_src: str, unit_id: str, family: str,
+                     symptom_text: str, *, tau: float | None) -> RetrievedBlock:
+    """The v2 (Phase-C prereg §4.2) retrieval policy: cross-unit, symptom-similarity
+    lessons with tau-gated silence, layered on the same class-exact fast path, class-exact
+    exemplar rule, and assembly machinery as ``retrieve``. Five invariants, in order:
+
+    1. ``tau is None`` -> ``ValueError`` ("not locked") -- a Phase-C run before LOCK-C is
+       a caller bug, never silently defaulted.
+    2. Exact fast path: if the exact ``(unit_id, family)`` class has any LIVE lesson, the
+       result is EXACTLY ``_rank_lessons(live_exact)[:2]`` -- the same items, same order,
+       as ``retrieve``'s class-exact branch. The scorer is never consulted here; a class
+       with a live exact lesson must retrieve byte-identically to today's ``retrieve``,
+       since the experiment's repeat guard depends on that equality.
+    3. Else: candidates are every LIVE item across the whole store (``semantic_all()``,
+       falsified filtered) -- cross-unit is the point, so nothing is filtered by unit or
+       family beyond that. Each candidate is scored against the query using its own cited
+       episode's symptom text (a missing episode scores against an empty symptom, never a
+       crash); the top 2 with ``score >= tau`` become the lessons. Below tau, or no
+       candidates at all: no lessons (``RetrievedBlock``'s None-vs-empty discipline, not
+       an empty string standing in for "nothing").
+    4. The episodic exemplar is ``_pick_exemplar`` -- unchanged, still class-exact,
+       independent of which lesson path fired above.
+    5. Assembly (budget, drop order, header) is identical to ``retrieve``'s -- both
+       funnel through the shared ``_assemble_block`` helper.
+    """
+    if tau is None:
+        raise ValueError("tau is not locked — Phase-C runs before prereg-lock-c are forbidden")
+
+    exact = store.semantic_for(unit_id, family)
+    live_exact = [item for item in exact if item.falsified_by is None]
+    if live_exact:
+        lessons = _rank_lessons(live_exact)[:2]
+    else:
+        lessons = _symptom_ranked_lessons(store, unit_src, family, symptom_text, tau)
+
+    # Decoupled from the lesson path above -- see docstring point 4, and module docstring.
+    exemplar = _pick_exemplar(store, unit_id, family)
+
+    return _assemble_block(lessons, exemplar)
+
+
+def _symptom_ranked_lessons(store: MemoryStore, unit_src: str, family: str,
+                            symptom_text: str, tau: float) -> list[SemanticItem]:
+    """Cross-unit candidate pool for ``retrieve_symptom``'s non-fast-path branch: every
+    live semantic item in the store, scored against the query via the lexical symptom
+    scorer (``symmatch``), top 2 kept only where ``score >= tau``. A candidate whose
+    cited episode does not resolve (``episode_by_id`` returns ``None``) is scored against
+    an empty symptom string rather than raising -- the item was minted honestly, the
+    store just no longer has the episode it cites.
+
+    One ``episode_by_id`` call per live candidate (bounded by the store's total semantic
+    row count) -- not cached across calls, since caching would let a store mutation
+    between two ``retrieve_symptom`` calls go unseen, breaking the module's determinism
+    guarantee (module docstring: "two calls against the same store state return equal
+    RetrievedBlocks" -- the converse, two calls against DIFFERENT store state silently
+    returning the same block, is exactly what a stale cache would produce).
+    """
+    candidates: list[tuple[SemanticItem, frozenset[str]]] = []
+    for item in store.semantic_all():
+        if item.falsified_by is not None:
+            continue
+        episode = store.episode_by_id(item.cited_episode_id)
+        episode_symptom = symptom_section(episode.root_prompt) if episode is not None else ""
+        candidates.append((item, tokenize(lesson_text(item, episode_symptom))))
+
+    query_tokens = tokenize(query_text(unit_src, symptom_text, family))
+    ranked = rank(query_tokens, candidates)
+    return [item for score, item in ranked[:2] if score >= tau]
+
+
+def _assemble_block(lessons: list[SemanticItem], exemplar: EpisodicRecord | None) -> RetrievedBlock:
+    """Shared assembly tail for ``retrieve`` and ``retrieve_symptom``: render the lesson
+    and exemplar parts, apply the hard char budget's strict drop order (exemplar first,
+    then the second lesson, never mid-item -- see module docstring), and return the first
+    candidate that fits, or ``RetrievedBlock(None, ())`` if none does."""
     lesson_parts: list[_Part] = [(render_lesson(item), item.item_id) for item in lessons]
     exemplar_part: _Part | None = None
     if exemplar is not None:

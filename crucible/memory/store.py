@@ -189,7 +189,9 @@ class MemoryStore:
         return [SemanticItem.from_dict(json.loads(row[0])) for row in rows]
 
     def semantic_all(self) -> list[SemanticItem]:
-        """All semantic items, every unit and family, ordered by item_id for determinism."""
+        """All semantic items, every unit and family, ordered by item_id for determinism. Falsified
+        items are INCLUDED, like the other semantic queries -- every caller filters
+        ``falsified_by`` itself (and each filter is mutation-pinned by test)."""
         rows = self._conn.execute(
             "SELECT payload FROM semantic ORDER BY item_id",
         ).fetchall()

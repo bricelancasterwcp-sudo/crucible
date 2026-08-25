@@ -310,7 +310,11 @@ def _persist_probe_count(probe_log_path: Path | None, count: int) -> None:
     if probe_log_path is None:
         return
     probe_log_path.parent.mkdir(parents=True, exist_ok=True)
-    probe_log_path.write_text(str(count), encoding="utf-8")
+    # temp+rename so a mid-write kill can never leave a truncated count that reads as a
+    # smaller-but-plausible measurement (final-review fold-in; C5 compares equality to 450)
+    tmp = probe_log_path.with_suffix(".tmp")
+    tmp.write_text(str(count), encoding="utf-8")
+    tmp.replace(probe_log_path)
 
 
 class FullHooks:

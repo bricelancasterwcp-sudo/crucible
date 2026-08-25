@@ -53,7 +53,7 @@ from .schema import SemanticItem
 # Retrieval-abstention threshold, spec §4.4 / LOCK-C. Set ONCE, at the lock commit that
 # freezes it against the pre-registered calibration run -- never before, never edited
 # after. See the module docstring's "where tau lives" paragraph.
-TAU: float | None = None
+TAU: float | None = 0.8051
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _TEST_NAME_RE = re.compile(r"test\w*")

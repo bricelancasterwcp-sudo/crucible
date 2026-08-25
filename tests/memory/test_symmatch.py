@@ -126,3 +126,12 @@ def test_symptom_section_runs_to_end_of_string_when_no_trailing_header():
     assert symptom_section(rp) == "boom"
     # MUTANT KILLED: symptom_section's end-of-string branch, `next_header is None ->
     # content_end = len(root_prompt)` (round 1, finding 3)
+
+
+def test_tau_matches_the_lock_record():
+    """LOCK-C (prereg-lock-c): tau = P95 of the unrelated-pair score distribution over the
+    four Phase-A/B databases = 0.8051 (calibrate_tau 2026-08-25: n_unrelated=292660,
+    n_related=921, median_related=0.875, sanity PASS). A drifted constant here is a
+    different experiment than the one locked."""
+    from crucible.memory.symmatch import TAU
+    assert TAU == 0.8051

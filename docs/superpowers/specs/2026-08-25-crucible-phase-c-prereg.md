@@ -161,4 +161,8 @@ memory line (~S3-sized).
 Pre-lock amendments edit this section with date + old value and mark the amended line.
 Post-lock, §5–§7 are immutable.
 
-*(none yet)*
+- **2026-08-25 (pre-lock):** §4.4's related-pair rule refined: pairs where the lesson
+  was minted FROM the episode itself (`lesson.cited_episode_id == episode.item_id`) are
+  EXCLUDED from the related distribution — a self-citation pair scores its own text and
+  would inflate the related median, weakening the §7 sanity gate. Old wording: "related =
+  same class" with no exclusion. The exclusion makes the gate strictly harder to pass.

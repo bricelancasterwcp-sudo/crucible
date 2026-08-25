@@ -166,6 +166,36 @@ VERIFICATION_METHOD = "hidden-suite"
 on every episode, pass or fail: it names the METHOD, not the outcome."""
 
 
+def build_episode(taskspec: TaskSpec, record: TaskRecord, result: SearchResult,
+                  memory_item_ids: tuple[str, ...], now: str, confidence: float) -> EpisodicRecord:
+    """The episode for one attempt -- written whether or not it worked.
+
+    ``landed_module`` is the submitted module when the codec produced one, else ``None``
+    ("nothing landed", not an empty module). ``last_verified_at`` is set only for a
+    verified episode: the hidden suite just checked that claim, and for an unverified one
+    there is no claim to have checked. ``confidence`` is the record's own confidence --
+    for A_full the CALIBRATED P(hidden pass) the status decision was made on, carried
+    verbatim rather than re-calibrated (composing the isotonic map with itself would make
+    the episode's number mean nothing at all).
+    """
+    verified = episode_verified(record.hidden_pass, record.tampered)
+    return EpisodicRecord(
+        item_id=content_id("episode", {"task_key": taskspec.task_key, "arm": record.arm}),
+        task_key=taskspec.task_key, arm=record.arm, unit_id=taskspec.unit_id,
+        family=taskspec.family, class_id=taskspec.class_id, phase=taskspec.phase,
+        kind=taskspec.kind, root_prompt=result.root_prompt,
+        landed_module=result.best_patch if record.landed else None,
+        visible_reward=record.visible_reward,
+        executions_charged=record.executions_charged, hidden_pass=record.hidden_pass,
+        verified=verified, memory_item_ids=memory_item_ids, created_at=now,
+        confidence=confidence, status="active", version=1,
+        source_locator=f"arm:{record.arm}/task:{taskspec.task_key}",
+        valid_at=now, invalid_at=None, expired_at=None,
+        last_verified_at=now if verified else None, falsified_by=None,
+        verification_method=VERIFICATION_METHOD,
+    )
+
+
 @runtime_checkable
 class ArmHooks(Protocol):
     """What :func:`crucible.run.driver.run_arm` may call between attempts. A_full implements
@@ -471,32 +501,8 @@ class FullHooks:
 
     def _episode(self, taskspec: TaskSpec, record: TaskRecord, result: SearchResult,
                  pending: _Pending, now: str, confidence: float) -> EpisodicRecord:
-        """The episode for one attempt -- written whether or not it worked.
-
-        ``landed_module`` is the submitted module when the codec produced one, else ``None``
-        ("nothing landed", not an empty module). ``last_verified_at`` is set only for a
-        verified episode: the hidden suite just checked that claim, and for an unverified one
-        there is no claim to have checked. ``confidence`` is the record's own confidence --
-        for A_full the CALIBRATED P(hidden pass) the status decision was made on, carried
-        verbatim rather than re-calibrated (composing the isotonic map with itself would make
-        the episode's number mean nothing at all).
-        """
-        verified = episode_verified(record.hidden_pass, record.tampered)
-        return EpisodicRecord(
-            item_id=content_id("episode", {"task_key": taskspec.task_key, "arm": record.arm}),
-            task_key=taskspec.task_key, arm=record.arm, unit_id=taskspec.unit_id,
-            family=taskspec.family, class_id=taskspec.class_id, phase=taskspec.phase,
-            kind=taskspec.kind, root_prompt=result.root_prompt,
-            landed_module=result.best_patch if record.landed else None,
-            visible_reward=record.visible_reward,
-            executions_charged=record.executions_charged, hidden_pass=record.hidden_pass,
-            verified=verified, memory_item_ids=pending.item_ids, created_at=now,
-            confidence=confidence, status="active", version=1,
-            source_locator=f"arm:{record.arm}/task:{taskspec.task_key}",
-            valid_at=now, invalid_at=None, expired_at=None,
-            last_verified_at=now if verified else None, falsified_by=None,
-            verification_method=VERIFICATION_METHOD,
-        )
+        """Delegates to build_episode -- see that function for details."""
+        return build_episode(taskspec, record, result, pending.item_ids, now, confidence)
 
     def _append_sleep_record(self, record: SleepRecord) -> None:
         """One JSON object per line, keys sorted, UTF-8 -- the S1 store convention.

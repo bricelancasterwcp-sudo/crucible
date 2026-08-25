@@ -83,9 +83,11 @@ SERVE: dict[str, ServeSpec] = {
     # AWQ kernels ship in the vLLM wheel). Instruct model => the client chat-serves it
     # (the A2 lesson). enforce-eager for the same reason as the 9B: CUDA-graph capture
     # beside big weights on the 16 GiB card.
+    # max-model-len 8192 → 16384 (2026-08-25, Phase-B prereg §4.4): B_mem's memory-augmented
+    # refinement prompts exceeded the 8192−2048 budget at A_full's gate task 184.
     "Qwen/Qwen2.5-Coder-14B-Instruct": ServeSpec(
         "Qwen/Qwen2.5-Coder-14B-Instruct", "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ",
-        ["--max-model-len", "8192", "--gpu-memory-utilization", "0.90", "--enforce-eager"],
+        ["--max-model-len", "16384", "--gpu-memory-utilization", "0.90", "--enforce-eager"],
     ),
     "Qwen/Qwen2.5-Coder-1.5B-Instruct": ServeSpec(
         "Qwen/Qwen2.5-Coder-1.5B-Instruct", "Qwen/Qwen2.5-Coder-1.5B-Instruct",

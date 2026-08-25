@@ -169,12 +169,15 @@ def test_serve_script_is_executable():
 
 def test_serve_14b_fallback_carries_awq_repo_and_eager():
     """The §2 big-arm fallback (activated 2026-08-24): served name is the §2 model id, the
-    repo is the official AWQ quant, and eager mode + 8192 context mirror the 9B's 16-GiB
-    constraints. Membership here is what lets serve_model.sh serve what §2 names."""
+    repo is the official AWQ quant, and eager mode mirror the 9B's 16-GiB constraints.
+    8192 → 16384 (2026-08-25, Phase-B prereg §4.4): B_mem's memory-augmented refinement
+    prompts exceed 8192−2048 — the same overflow that infra-killed A_full's first gate
+    attempt at task 184. Pure KV capacity; sampling-neutral. Membership here is what lets
+    serve_model.sh serve what §2 names."""
     spec = SERVE["Qwen/Qwen2.5-Coder-14B-Instruct"]
     assert spec.hf_id == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
     assert "--enforce-eager" in spec.extra_args
-    assert spec.extra_args[spec.extra_args.index("--max-model-len") + 1] == "8192"
+    assert spec.extra_args[spec.extra_args.index("--max-model-len") + 1] == "16384"
 
 
 def test_serve_command_for_14b_fallback():

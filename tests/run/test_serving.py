@@ -124,7 +124,7 @@ def test_serve_1_5b_proposer_carries_a2_flags():
     assert s.hf_id == "Qwen/Qwen2.5-Coder-1.5B-Instruct"
     assert s.extra_args == [
         "--max-model-len", "8192",
-        "--gpu-memory-utilization", "0.6",
+        "--gpu-memory-utilization", "0.45",
         "--enable-lora", "--max-lora-rank", "32",
     ]
     assert s.port == 8010

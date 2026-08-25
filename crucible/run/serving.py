@@ -93,7 +93,13 @@ SERVE: dict[str, ServeSpec] = {
         # server runs; at 0.6 the server holds ~9.8 GiB and the trainer's ~4.9 GiB peak
         # OOMs the 16 GiB card. 0.45 (~7 GiB: 3.1 weights + KV) leaves the trainer room.
         # Sampling-neutral -- same weights, same sampler; the lens records serve flags.
-        ["--max-model-len", "8192", "--gpu-memory-utilization", "0.45",
+        # max-model-len 8192 -> 16384 (2026-08-25, gate): A_full's memory-augmented
+        # refinement prompts exceeded 6144 input tokens (8192 - 2048 output) at task 184
+        # of the first gating attempt -- an HTTP 400 infra kill (R-S4-1: clean rerun).
+        # The model's native context is 32k, so this is pure KV capacity, no rope change;
+        # KV usage peaked at 1.4% of the pool during the failed run. A_noMem completed
+        # 450/450 with zero infra at 8192, so its measurement stands.
+        ["--max-model-len", "16384", "--gpu-memory-utilization", "0.45",
          "--enable-lora", "--max-lora-rank", "32"],
     ),
 }

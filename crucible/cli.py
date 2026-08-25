@@ -197,7 +197,8 @@ def _arm_run(a) -> int:
         proposer = hooks.proposer
     elif cfg.name in MEM_ARMS:
         from crucible.run.full import build_mem_hooks
-        hooks = build_mem_hooks(cfg, a.stream_dir, a.out, memory_db=a.memory_db)
+        hooks = build_mem_hooks(cfg, a.stream_dir, a.out, memory_db=a.memory_db,
+                                retrieval=MEM_ARMS[cfg.name])
     out_path = run_arm(cfg, a.stream_dir, keys, proposer, value, a.out, hooks=hooks)
     print(f"records written to {out_path}"); return 0
 

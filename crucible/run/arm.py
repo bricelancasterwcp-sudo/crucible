@@ -107,6 +107,14 @@ ARMS: dict[str, ArmConfig] = {
     # never in ArmConfig, so attempt_task cannot read the difference and confound the measurement.
     "B_mem": ArmConfig("B_mem", "Qwen/Qwen2.5-Coder-14B-Instruct", True, chat=True),
     "A_mem_exactonly": ArmConfig("A_mem_exactonly", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
+    # Phase-C arms (prereg §3): B_symmem and A_symmem are control comparisons for the
+    # cross-unit symptom-similarity retrieval mechanism added in Phase-C (§4.2/§4.3). Like
+    # B_mem/A_mem_exactonly above, the difference from their control (B_search, A_full) lives
+    # in the driver hooks only (crucible.run.full's MEM_ARMS for B_symmem, FULL_FAMILY for
+    # A_symmem), never in ArmConfig, so attempt_task cannot read the difference and confound
+    # the measurement.
+    "B_symmem": ArmConfig("B_symmem", "Qwen/Qwen2.5-Coder-14B-Instruct", True, chat=True),
+    "A_symmem": ArmConfig("A_symmem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
 }
 
 

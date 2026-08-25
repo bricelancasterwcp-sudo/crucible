@@ -158,7 +158,8 @@ def test_cli_arm_run_a_full_defaults_the_memory_db_under_the_arm_dir(_stream, tm
 @pytest.mark.parametrize("arm,retrieval,sleep", [("A_full", True, True),
                                                  ("A_mem_nosleep", True, False),
                                                  ("A_sleep_nomem", False, True),
-                                                 ("A_mem_exactonly", True, False)])
+                                                 ("A_mem_exactonly", True, False),
+                                                 ("A_symmem", True, False)])
 def test_cli_arm_run_full_family_wires_the_declared_switches(_stream, tmp_path, monkeypatch,
                                                              arm, retrieval, sleep):
     """The exploratory ablations run through the SAME wiring as A_full -- OnlineValue,
@@ -177,7 +178,8 @@ def test_cli_arm_run_full_family_wires_the_declared_switches(_stream, tmp_path, 
     hooks = seen["hooks"]
     assert (hooks.retrieval_enabled, hooks.sleep_enabled) == (retrieval, sleep)
     assert hooks.retrieval_mode == {"A_full": "full", "A_mem_nosleep": "full",
-                                    "A_sleep_nomem": "off", "A_mem_exactonly": "exact"}[arm]
+                                    "A_sleep_nomem": "off", "A_mem_exactonly": "exact",
+                                    "A_symmem": "symptom"}[arm]
     assert isinstance(seen["value"], OnlineValue)
     assert seen["proposer"] is hooks.proposer            # re-pointable proposer (C1)
     assert isinstance(seen["proposer"], AdapterProposer)
@@ -229,3 +231,26 @@ def test_cli_arm_run_b_mem_wires_store_only_hooks(_stream, tmp_path, monkeypatch
     assert isinstance(seen["value"], ConstantValue)
     assert not isinstance(seen["proposer"], AdapterProposer)
     assert (tmp_path / "runs" / "B_mem" / "memory.sqlite3").exists()
+
+
+def test_cli_arm_run_b_symmem_wires_symptom_memhooks(_stream, tmp_path, monkeypatch):
+    """B_symmem differs from the frozen B_search by the store ALONE, in ``"symptom"``
+    retrieval mode (Phase-C prereg §3): MemHooks with ``retrieval == "symptom"``,
+    ConstantValue (never OnlineValue), the plain proposer (never AdapterProposer).
+
+    MUTATION: dropping ``retrieval=MEM_ARMS[cfg.name]`` from the CLI's ``build_mem_hooks``
+    call would silently wire B_symmem to ``build_mem_hooks``'s "full" default -- this is
+    the test that catches it."""
+    from crucible.cli import main
+    from crucible.run.full import AdapterProposer, MemHooks
+    from crucible.value.model import ConstantValue
+    seen = {}
+    _stub_run(monkeypatch, seen)
+    rc = main(["arm", "run", str(_stream), "--arm", "B_symmem", "--base-url", "http://x",
+               "--out", str(tmp_path / "runs")])
+    assert rc == 0
+    assert isinstance(seen["hooks"], MemHooks)
+    assert seen["hooks"].retrieval == "symptom"
+    assert isinstance(seen["value"], ConstantValue)
+    assert not isinstance(seen["proposer"], AdapterProposer)
+    assert (tmp_path / "runs" / "B_symmem" / "memory.sqlite3").exists()

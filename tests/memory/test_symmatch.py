@@ -60,6 +60,18 @@ def test_score_is_binary_cosine_and_zero_on_empty():
     # MUTANT KILLED: swapping intersection for union, or dropping the sqrt
 
 
+def test_score_denominator_is_sqrt_of_product_not_max_of_sizes():
+    # Deliberately UNEQUAL set sizes: every other fixture in this file uses equal-length
+    # token sets, where sqrt(a*a) == max(a,a) and a max()-substituted denominator can't
+    # be told apart from the real sqrt(|Q|*|L|) one. |Q|=2, |L|=8, sharing 2 tokens:
+    # sqrt(2*8) = 4 -> 2/4 = 0.5, but max(2,8) = 8 would give 2/8 = 0.25 -- the two
+    # formulas diverge only when the sizes differ.
+    q = frozenset({"alpha", "beta"})
+    l = frozenset({"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"})
+    assert abs(score(q, l) - 0.5) < 1e-9
+    # MUTANT KILLED: denominator sqrt(|Q|*|L|) -> max(|Q|,|L|) (round 2, finding 1)
+
+
 def test_family_token_boosts_same_family_pairs():
     q = tokenize(query_text("return x", "boom", "ARITH"))
     same = tokenize(lesson_text_stub(diff="return y", symptom="boom", family="ARITH"))

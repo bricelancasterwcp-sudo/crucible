@@ -51,6 +51,28 @@ DESIGN (smokes and debugging need it); the guard is mechanical at the launcher l
 procedural below it, and the gating protocol is "launch through the launcher, nothing
 else".
 
-## 4. Dress rehearsal (100 tasks, threshold 16)
+## 4. Dress rehearsal (100 tasks, threshold 16): PASS
 
-(appended after the run)
+First 100 phase-1 keys in stream order (derived from `streams/1158e92f40ad/manifest.json`,
+phase==1), A_full, `--sleep-threshold 16` (the REAL pre-registered cadence — the S3 smoke
+used 4), launched through `scripts/run_arm_detached.sh`. `EXIT=0`, wall 1045 s.
+
+| Check | Observed |
+|---|---|
+| Tasks | 100/100, landing 1.0, infra 0, max charged K=8 |
+| Sleeps at threshold 16 | 2, both accepted (slice 8→8, 7→7); episodes 16 then 32 (cumulative) |
+| `gpu_s` (S4 fix, live) | **16.218 s and 24.625 s measured** — the field the gate reports GPU-minutes from |
+| Refalsify | 48/48 passed, 0 falsified, 0 broken-citation |
+| Adapter lineage | 29 tasks pre-adapter → 40 under `ad-8779b09…` → 31 under `ad-f643fdc…`; lens carries both |
+| Abstention | rate 0.04 — the calibrated 0.2 gate visibly active (smoke's tiny windows never tripped it) |
+| Memory | 100 episodic / 45 semantic (= hidden-pass count) / 0 procedural |
+
+Uncharged orientation numbers (rehearsal ≠ measurement): `succ_phase1 0.45`.
+
+Cost extrapolation for the gate (§8 preflight arithmetic): phase-1 tasks averaged
+~10.5 s at K=8 including sleeps. Full protocol = 450 tasks/arm; sleep training grows
+cumulatively (~8 s per additional sleep at this LoRA size). Estimates: **A_full ≈ 80–95
+min; A_noMem ≈ 70 min** on the 1.5B server. **B (14B-AWQ) is extrapolated from its own
+small-N preflight before launch** (per §8) — chat serving on this card is materially
+slower per token and the landing probe's 30 tasks are the anchor.
+

@@ -47,6 +47,12 @@ def test_tokenize_drops_unit_local_test_names_but_keeps_code_tokens():
     # MUTANT KILLED: removing the test\w* filter
 
 
+def test_tokenize_drops_single_char_tokens_but_keeps_two_char_tokens():
+    toks = tokenize("a + b == ab")
+    assert "a" not in toks and "b" not in toks and "ab" in toks
+    # MUTANT KILLED: deleting the `len(token) >= _MIN_TOKEN_LEN` filter (round 1, finding 1)
+
+
 def test_score_is_binary_cosine_and_zero_on_empty():
     q, l = tokenize("alpha beta gamma"), tokenize("beta gamma delta")
     assert abs(score(q, l) - 2 / 3) < 1e-9  # 2 shared / sqrt(3*3)
@@ -59,6 +65,20 @@ def test_family_token_boosts_same_family_pairs():
     same = tokenize(lesson_text_stub(diff="return y", symptom="boom", family="ARITH"))
     other = tokenize(lesson_text_stub(diff="return y", symptom="boom", family="SDL"))
     assert score(q, same) > score(q, other)
+
+
+def test_rank_orders_higher_score_first():
+    item_hi = _semantic_item(cited_episode_id="ep-hi", family="ARITH")
+    item_lo = _semantic_item(cited_episode_id="ep-lo", family="ARITH")
+    q = frozenset({"alpha", "beta"})
+    hi_tokens = frozenset({"alpha", "beta"})  # 2 shared / sqrt(2*2) = 1.0
+    lo_tokens = frozenset({"alpha", "gamma"})  # 1 shared / sqrt(2*2) = 0.5
+    # Candidates fed in the WRONG (low-then-high) order, so a correct primary sort has
+    # to actually reorder them -- an accidental pass-through of input order can't fake it.
+    ranked = rank(q, [(item_lo, lo_tokens), (item_hi, hi_tokens)])
+    assert ranked[0][1].item_id == item_hi.item_id
+    assert ranked[0][0] > ranked[1][0]
+    # MUTANT KILLED: flipping -score to +score in rank's sort key (round 1, finding 2)
 
 
 def test_rank_breaks_ties_by_item_id():
@@ -81,3 +101,16 @@ def test_symptom_section_extracts_between_headers():
     rp = "## Module under repair\nX\n\n## Symptom\nfailed: t\nboom\n\n## Instruction\nY"
     assert symptom_section(rp) == "failed: t\nboom"
     assert symptom_section("no symptom here") == ""
+
+
+def test_symptom_section_runs_to_end_of_string_when_no_trailing_header():
+    # No section follows "## Symptom" here, so the extraction must fall through to the
+    # "no next header" branch and take the rest of the string. A preceding section is
+    # included (rather than starting the prompt at "## Symptom") because this
+    # implementation matches the header as "\n## Symptom\n" -- it needs a real newline
+    # in front of "##", the same shape a real root_prompt has (see
+    # test_symptom_section_extracts_between_headers above), not a bare start-of-string.
+    rp = "## Module under repair\nX\n\n## Symptom\nboom"
+    assert symptom_section(rp) == "boom"
+    # MUTANT KILLED: symptom_section's end-of-string branch, `next_header is None ->
+    # content_end = len(root_prompt)` (round 1, finding 3)

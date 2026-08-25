@@ -101,3 +101,9 @@ def test_memory_block_edges_are_normalised_so_the_section_stands_alone():
     # Leading/trailing newlines on the retrieved block must not add blank lines around the
     # section; the block's own internal formatting is left untouched.
     assert build_prompt(U, SYM, memory="\n" + MEM + "\n\n") == build_prompt(U, SYM, memory=MEM)
+
+
+def test_render_symptom_is_public_alias():
+    from crucible.proposer.prompt import render_symptom, _render_symptom
+    # Test that render_symptom is callable and produces the same output as _render_symptom
+    assert render_symptom(SYM) == _render_symptom(SYM)

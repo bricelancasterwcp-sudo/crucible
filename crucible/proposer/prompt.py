@@ -57,6 +57,11 @@ def _render_symptom(symptom: TestReport) -> str:
     return "\n".join(lines)
 
 
+def render_symptom(symptom: TestReport) -> str:
+    """Public seam for symptom-mode retrieval, Phase-C prereg §4.2 — same renderer the prompt itself uses, so query text and prompt text can never drift."""
+    return _render_symptom(symptom)
+
+
 def build_prompt(unit: Unit, symptom: TestReport, *, feedback: str | None = None,
                  memory: str | None = None) -> str:
     """Assemble the deterministic repair prompt for ``unit`` given its ``symptom``.

@@ -162,6 +162,13 @@ class MemoryStore:
         rows = self._conn.execute(sql).fetchall()
         return [EpisodicRecord.from_dict(json.loads(row[0])) for row in rows]
 
+    def episode_by_id(self, item_id: str) -> EpisodicRecord | None:
+        """Point query: the episode with this item_id, or None if not found."""
+        row = self._conn.execute("SELECT payload FROM episodic WHERE item_id = ?", (item_id,)).fetchone()
+        if row is None:
+            return None
+        return EpisodicRecord.from_dict(json.loads(row[0]))
+
     def semantic_for(self, unit_id: str, family: str) -> list[SemanticItem]:
         """Exact class match: lessons filed under this exact (unit_id, family) pair.
 
@@ -178,6 +185,13 @@ class MemoryStore:
         rows = self._conn.execute(
             "SELECT payload FROM semantic WHERE family = ? ORDER BY rowid",
             (family,),
+        ).fetchall()
+        return [SemanticItem.from_dict(json.loads(row[0])) for row in rows]
+
+    def semantic_all(self) -> list[SemanticItem]:
+        """All semantic items, every unit and family, ordered by item_id for determinism."""
+        rows = self._conn.execute(
+            "SELECT payload FROM semantic ORDER BY item_id",
         ).fetchall()
         return [SemanticItem.from_dict(json.loads(row[0])) for row in rows]
 

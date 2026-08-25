@@ -263,3 +263,28 @@ def test_an_unbound_db_has_no_identity_and_still_works(tmp_path):
     store = MemoryStore(tmp_path / "m.sqlite3")
     assert store.identity() == {}
     assert store.episodes() == []
+
+
+def test_semantic_all_returns_every_item_ordered_by_item_id(tmp_path: Path):
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    # seed two items in different units/families
+    item1 = _semantic("ep-1", unit_id="X/0", family="ARITH")
+    item2 = _semantic("ep-2", unit_id="X/1", family="OFFBY1")
+    store.write_semantic(item1)
+    store.write_semantic(item2)
+    items = store.semantic_all()
+    assert [i.item_id for i in items] == sorted(i.item_id for i in items)
+    assert len(items) == 2
+    store.close()
+
+
+def test_episode_by_id_point_query(tmp_path: Path):
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    # seed one episode
+    ep = _episode("tk-1", "A_full")
+    store.write_episode(ep)
+    # assert episode_by_id returns the episode
+    assert store.episode_by_id(ep.item_id) == ep
+    # assert episode_by_id returns None for absent item
+    assert store.episode_by_id("absent") is None
+    store.close()

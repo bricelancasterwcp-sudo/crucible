@@ -47,6 +47,7 @@ import dataclasses
 import gzip
 import json
 import pathlib
+import urllib.error
 from dataclasses import replace
 
 import pytest
@@ -69,7 +70,10 @@ from crucible.run.lens import build_lens
 from crucible.run.records import ExecRecord, TaskRecord, read_task_records, write_records
 from crucible.run.types import Candidate
 from crucible.search.loop import SearchResult
-from crucible.sleep.loop import FakeServerAdapter, FakeSliceRunner, SleepController, SleepRecord
+from crucible.proposer.identity import IdentityMismatch, ServedIdentity
+from crucible.sleep import loop as sleep_loop
+from crucible.sleep.loop import (FakeServerAdapter, FakeSliceRunner, SleepController,
+                                 SleepRecord, VllmAdapterLoader)
 from crucible.sleep.registry import AdapterRegistry
 from crucible.sleep.train import FakeTrainer
 from crucible.stream import store as stream_store
@@ -905,3 +909,52 @@ def test_adapter_proposer_accepts_a_base_client_that_matches_its_declaration():
     base = FakeProposer("fake/model", [CORRECT])
     arm_proposer = AdapterProposer(base, lambda model: None, "fake/model")
     assert arm_proposer.model == "fake/model" and arm_proposer.adapter_id is None
+
+
+# --- the adapter loader's already-loaded branch (Task 12 smoke, verified live 2026-08-25) --
+#
+# vLLM answers a second load_lora_adapter for a name it already serves with HTTP 400. ONE
+# sleep cycle POSTs the same name twice by design -- DriverSliceRunner must load the candidate
+# to measure it (nothing has accepted it yet), then the controller loads it again on accept --
+# so a loader that treated every 400 as a failure would fail every sleep this instrument can
+# win, after paying for the training run. The 400 is verified, not swallowed: absent from
+# /v1/models, it still raises.
+
+def _http_400():
+    return urllib.error.HTTPError("http://x/v1/load_lora_adapter", 400, "Bad Request", {}, None)
+
+
+def _serving(*ids):
+    return lambda url, *a, **kw: ServedIdentity("vllm", ids[0], {"n_models": len(ids)}, ids)
+
+
+def test_reloading_an_adapter_the_server_already_serves_is_not_a_failure(monkeypatch):
+    monkeypatch.setattr(sleep_loop.urllib.request, "urlopen",
+                        lambda *a, **kw: (_ for _ in ()).throw(_http_400()))
+    monkeypatch.setattr(sleep_loop, "probe", _serving("base/m", "ad-cafe"))
+
+    VllmAdapterLoader("http://x").load(pathlib.Path("/adapters/ad-cafe"), "ad-cafe")
+
+
+def test_a_400_for_an_adapter_the_server_is_not_serving_still_raises(monkeypatch):
+    """MUTATION: swallow every 400 without checking -> "the adapter never loaded" becomes a
+    silent accept, and the run stamps adapter_id on records the BASE model generated."""
+    monkeypatch.setattr(sleep_loop.urllib.request, "urlopen",
+                        lambda *a, **kw: (_ for _ in ()).throw(_http_400()))
+    monkeypatch.setattr(sleep_loop, "probe", _serving("base/m"))     # the adapter is NOT there
+
+    with pytest.raises(urllib.error.HTTPError):
+        VllmAdapterLoader("http://x").load(pathlib.Path("/adapters/ad-cafe"), "ad-cafe")
+
+
+def test_an_unreachable_server_does_not_turn_a_400_into_a_success(monkeypatch):
+    # No evidence the adapter is there => the original error is the honest thing to raise.
+    def unreachable(url, *a, **kw):
+        raise IdentityMismatch("no recognisable server")
+
+    monkeypatch.setattr(sleep_loop.urllib.request, "urlopen",
+                        lambda *a, **kw: (_ for _ in ()).throw(_http_400()))
+    monkeypatch.setattr(sleep_loop, "probe", unreachable)
+
+    with pytest.raises(urllib.error.HTTPError):
+        VllmAdapterLoader("http://x").load(pathlib.Path("/adapters/ad-cafe"), "ad-cafe")

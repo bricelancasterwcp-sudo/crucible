@@ -118,6 +118,7 @@ from __future__ import annotations
 
 import json
 import random
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
@@ -125,6 +126,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from ..memory.falsify import FalsifyTally, falsify_batch
+from ..proposer.identity import IdentityMismatch, probe
 from ..memory.schema import SemanticItem
 from ..memory.store import MemoryStore
 from ..stream.units import Unit, sha256_text
@@ -145,6 +147,9 @@ BASE_DIGEST = sha256_text(BASE_MODEL)
 
 # A server that is wedged mid-load should fail the sleep, not hang the run forever.
 _LOAD_TIMEOUT_S = 60.0
+# What vLLM answers when the lora_name is already loaded (verified live 2026-08-25). Named,
+# not inlined, because it is a claim about another program's behaviour and it is dated.
+_ALREADY_LOADED_STATUS = 400
 
 
 @runtime_checkable
@@ -165,8 +170,24 @@ class VllmAdapterLoader:
 
     ``lora_path`` is sent exactly as given -- the server resolves it against ITS OWN working
     directory, so the path must be absolute. ``SleepController`` resolves its adapter root at
-    construction for precisely this reason. No unit test beyond the payload shape and the
-    protocol conformance check: its real verification is the live hot-swap smoke.
+    construction for precisely this reason. Its unit tests cover the payload shape, the
+    protocol conformance check and the already-loaded branch below; the real verification of
+    the hot swap itself is the live smoke.
+
+    *A re-load of a name the server already has is a SUCCESS, not a failure -- verified live
+    2026-08-25 (Task 12 smoke).* vLLM answers a second ``load_lora_adapter`` for an
+    already-loaded ``lora_name`` with HTTP 400. One sleep cycle POSTs the same name twice by
+    design: ``crucible.run.full.DriverSliceRunner`` must load the CANDIDATE to measure it at
+    all (the controller has accepted nothing yet), and the controller then loads it again on
+    the accept path. Treating that second 400 as a failure would fail every sleep this
+    instrument can win, after paying for the training run.
+
+    So a 400 is not swallowed, it is CHECKED: the loader asks ``/v1/models`` whether the name
+    is actually being served. Advertised => already loaded, the post-condition this method
+    promises holds, return quietly. Absent => the 400 meant something else (a bad path, a
+    rank the server refuses) and the original error propagates untouched. Swallowing all 400s
+    instead would turn "the adapter never loaded" into a silent accept and let the run stamp
+    ``adapter_id`` on records the base model generated.
     """
 
     def __init__(self, base_url: str, *, timeout_s: float = _LOAD_TIMEOUT_S) -> None:
@@ -179,13 +200,33 @@ class VllmAdapterLoader:
             f"{self._base_url}/v1/load_lora_adapter", data=body,
             headers={"Content-Type": "application/json"}, method="POST",
         )
-        # urlopen raises HTTPError on any non-2xx, so this guard only catches an odd 2xx
-        # (a 202/204 that means "accepted, maybe later") -- which must not read as loaded.
-        with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
-            if resp.status != 200:
-                detail = resp.read().decode("utf-8", "replace")[:200]
-                raise RuntimeError(f"load_lora_adapter returned HTTP {resp.status} for "
-                                   f"{adapter_id}: {detail}")
+        try:
+            # urlopen raises HTTPError on any non-2xx, so this guard only catches an odd 2xx
+            # (a 202/204 that means "accepted, maybe later") -- which must not read as loaded.
+            with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
+                if resp.status != 200:
+                    detail = resp.read().decode("utf-8", "replace")[:200]
+                    raise RuntimeError(f"load_lora_adapter returned HTTP {resp.status} for "
+                                       f"{adapter_id}: {detail}")
+        except urllib.error.HTTPError as e:
+            # Already loaded is the post-condition, whatever the status code -- but only if
+            # the server really is serving it. See the class docstring.
+            if e.code != _ALREADY_LOADED_STATUS or not self._is_serving(adapter_id):
+                raise
+
+    def _is_serving(self, adapter_id: str) -> bool:
+        """Does ``/v1/models`` advertise ``adapter_id`` right now?
+
+        ``probe`` lists EVERY advertised id (base first, adapters after), which is the same
+        listing ``assert_identity`` matches against -- so "the loader thinks it is loaded" and
+        "a proposer can serve it" can never disagree. An unreachable or unrecognisable server
+        answers ``False``: with no evidence the adapter is there, the original error is the
+        honest thing to raise.
+        """
+        try:
+            return adapter_id in (probe(self._base_url).models or ())
+        except (IdentityMismatch, OSError):
+            return False
 
 
 class FakeServerAdapter:

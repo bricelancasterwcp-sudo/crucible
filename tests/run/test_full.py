@@ -980,7 +980,7 @@ def test_an_unreachable_server_does_not_turn_a_400_into_a_success(monkeypatch):
 # --- exploratory ablation switches (docs/findings/ABLATIONS-A.md) -----------------------
 
 def test_full_family_maps_each_ablation_to_a_full_minus_exactly_one_mechanism():
-    """The CLI wires (retrieval_enabled, sleep_enabled) straight from this map, so a flipped
+    """The CLI wires (retrieval_mode, sleep_enabled) straight from this map, so a flipped
     tuple here IS a mislabeled run: A_mem_nosleep quietly sleeping, or A_sleep_nomem quietly
     reading the store, with every record stamping the wrong arm name."""
     assert FULL_FAMILY == {"A_full": ("full", True),

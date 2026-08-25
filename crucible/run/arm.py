@@ -103,8 +103,8 @@ ARMS: dict[str, ArmConfig] = {
     # Phase-B arms (prereg §3): B_mem and A_mem_exactonly are control comparisons for the
     # memory and retrieval mechanisms added in S3. Like the ablations above, the difference
     # from their control (B_search, A_full/A_mem_nosleep) lives in the driver hooks only
-    # (docs/findings/PHASE-B-ARM-HOOKS.md), never in ArmConfig, so attempt_task cannot
-    # read the difference and confound the measurement.
+    # (crucible.run.full's MEM_ARMS/MemHooks for B_mem, FULL_FAMILY for A_mem_exactonly),
+    # never in ArmConfig, so attempt_task cannot read the difference and confound the measurement.
     "B_mem": ArmConfig("B_mem", "Qwen/Qwen2.5-Coder-14B-Instruct", True, chat=True),
     "A_mem_exactonly": ArmConfig("A_mem_exactonly", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
 }

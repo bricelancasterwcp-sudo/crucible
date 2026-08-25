@@ -60,6 +60,7 @@ from crucible.run.arm import ARMS, ArmConfig
 from crucible.run.driver import run_arm, utc_now
 from crucible.run.full import (
     build_full_hooks,
+    FULL_FAMILY,
     RECALIBRATE_WINDOW,
     AdapterProposer,
     ArmHooks,
@@ -166,7 +167,8 @@ class _Rig:
     """A ``FullHooks`` plus every seam behind it, so a test can assert on any of them."""
 
     def __init__(self, tmp_path, *, threshold=999, units=None, counts=(1, 1, 1, 1), seed=0,
-                 proposer=None, log=lambda *a: None):
+                 proposer=None, retrieval_enabled=True, sleep_enabled=True,
+                 log=lambda *a: None):
         self.store = MemoryStore(tmp_path / "memory.sqlite3")
         self.value = _SpyValue()
         self.calibrator = _SpyCalibrator()
@@ -185,7 +187,8 @@ class _Rig:
         self.logged: list[str] = []
         self.hooks = FullHooks(self.store, self.value, self.calibrator, self.controller,
                                self.registry, sleep_records_path=self.sleep_records_path,
-                               proposer=proposer, log=self.logged.append)
+                               proposer=proposer, retrieval_enabled=retrieval_enabled,
+                               sleep_enabled=sleep_enabled, log=self.logged.append)
 
 
 class _FakeClients:
@@ -971,3 +974,61 @@ def test_an_unreachable_server_does_not_turn_a_400_into_a_success(monkeypatch):
 
     with pytest.raises(urllib.error.HTTPError):
         VllmAdapterLoader("http://x").load(pathlib.Path("/adapters/ad-cafe"), "ad-cafe")
+
+
+# --- exploratory ablation switches (docs/findings/ABLATIONS-A.md) -----------------------
+
+def test_full_family_maps_each_ablation_to_a_full_minus_exactly_one_mechanism():
+    """The CLI wires (retrieval_enabled, sleep_enabled) straight from this map, so a flipped
+    tuple here IS a mislabeled run: A_mem_nosleep quietly sleeping, or A_sleep_nomem quietly
+    reading the store, with every record stamping the wrong arm name."""
+    assert FULL_FAMILY == {"A_full": (True, True),
+                           "A_mem_nosleep": (True, False),
+                           "A_sleep_nomem": (False, True)}
+
+
+def test_retrieval_disabled_offers_nothing_even_when_the_organ_holds_a_lesson(tmp_path):
+    """A_sleep_nomem's read side: the store can hold a perfectly retrievable lesson and
+    ``before_task`` must still hand the search NOTHING -- the prompt stays byte-for-byte
+    the S2 prompt, ``retrieval_hit`` is False, and the record stamps ``item_ids=()``. The
+    lesson is minted first (through the same hooks: the WRITE side is deliberately alive)
+    and its presence is asserted, so this test fails if the organ was empty all along."""
+    rig = _Rig(tmp_path, retrieval_enabled=False)
+    _open_task(rig.hooks)
+    rig.hooks.after_task(U, SPEC, _record(), _result(), NOW)          # mints the lesson
+    assert rig.store.semantic_for(SPEC.unit_id, SPEC.family)          # organ HAS content
+
+    spec2 = replace(SPEC, task_key="k2", phase=2, kind="second")
+    block = _open_task(rig.hooks, spec2)
+    ids, _adapter = rig.hooks.after_task(U, spec2, _record(), _result(), NOW)
+
+    assert block is None                     # nothing offered, not an empty string
+    assert rig.value.begun[-1] == (SPEC.family, False)   # the hit feature is honestly False
+    assert ids == ()                         # the record will stamp "no memory offered"
+
+
+def test_sleep_disabled_returns_before_the_controller_is_asked(tmp_path):
+    """A_mem_nosleep's sleep side, at threshold=1 -- the exact configuration
+    ``test_between_tasks_sleeps_at_the_threshold_and_recalibrates_on_accept`` proves DOES
+    fire when the switch is on. With the switch off the controller must not even be asked:
+    no trainer call, no sleep record in memory or on disk, no recalibration."""
+    rig = _Rig(tmp_path, threshold=1, counts=(3, 3), sleep_enabled=False)
+    _open_task(rig.hooks)
+    rig.hooks.after_task(U, SPEC, _record(), _result(), NOW)          # verified episode
+
+    rig.hooks.between_tasks(["k1"], NOW)
+
+    assert rig.trainer.calls == [] and rig.hooks.sleep_records == []
+    assert not rig.sleep_records_path.exists()
+    assert rig.calibrator.windows == []
+
+
+def test_ablation_switches_are_readable_and_default_on(tmp_path):
+    """The CLI test asserts the wiring through these properties; they must reflect the
+    constructed switches, and a bare FullHooks is A_full (both on)."""
+    for sub in ("a", "b", "c"):
+        (tmp_path / sub).mkdir()
+    assert (_Rig(tmp_path / "a").hooks.retrieval_enabled,
+            _Rig(tmp_path / "b").hooks.sleep_enabled) == (True, True)
+    off = _Rig(tmp_path / "c", retrieval_enabled=False, sleep_enabled=False).hooks
+    assert (off.retrieval_enabled, off.sleep_enabled) == (False, False)

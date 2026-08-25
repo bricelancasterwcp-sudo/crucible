@@ -155,6 +155,32 @@ def test_cli_arm_run_a_full_defaults_the_memory_db_under_the_arm_dir(_stream, tm
     assert seen["hooks"].sleep_threshold == 16         # spec S5 / R-S3-3 default
 
 
+@pytest.mark.parametrize("arm,retrieval,sleep", [("A_full", True, True),
+                                                 ("A_mem_nosleep", True, False),
+                                                 ("A_sleep_nomem", False, True)])
+def test_cli_arm_run_full_family_wires_the_declared_switches(_stream, tmp_path, monkeypatch,
+                                                             arm, retrieval, sleep):
+    """The exploratory ablations run through the SAME wiring as A_full -- OnlineValue,
+    AdapterProposer, an organ of their own -- differing only by the FULL_FAMILY switches.
+    MUTATION: swap a tuple in FULL_FAMILY and the wrong arm sleeps (or retrieves)."""
+    from crucible.cli import main
+    from crucible.run.full import AdapterProposer
+    from crucible.value.online import OnlineValue
+    seen = {}
+    _stub_run(monkeypatch, seen)
+
+    rc = main(["arm", "run", str(_stream), "--arm", arm, "--base-url", "http://x",
+               "--out", str(tmp_path / "runs")])
+
+    assert rc == 0
+    hooks = seen["hooks"]
+    assert (hooks.retrieval_enabled, hooks.sleep_enabled) == (retrieval, sleep)
+    assert isinstance(seen["value"], OnlineValue)
+    assert seen["proposer"] is hooks.proposer            # re-pointable proposer (C1)
+    assert isinstance(seen["proposer"], AdapterProposer)
+    assert (tmp_path / "runs" / arm / "memory.sqlite3").exists()   # its OWN organ
+
+
 def test_cli_arm_run_a_nomem_never_constructs_a_memory_store(_stream, tmp_path, monkeypatch):
     """MUTATION (c): hooks (and therefore an organ) built for a non-A_full arm."""
     import crucible.memory.store as store_module

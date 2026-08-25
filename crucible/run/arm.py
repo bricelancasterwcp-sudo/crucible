@@ -92,6 +92,14 @@ ARMS: dict[str, ArmConfig] = {
     # table). Instruct model => chat-served, like the A arms (the A2 lesson).
     "B_search": ArmConfig("B_search", "Qwen/Qwen2.5-Coder-14B-Instruct", True, chat=True),
     "B_naive": ArmConfig("B_naive", "Qwen/Qwen2.5-Coder-14B-Instruct", False, chat=True),
+    # EXPLORATORY ablations (prereg "Exploratory" block; protocol docs/findings/ABLATIONS-A.md):
+    # A_mem_nosleep is the prereg's A_mem−sleep (explicit memory, no LoRA) and A_sleep_nomem
+    # its A_sleep−mem (LoRA, no explicit store in the prompt). Non-gating, run post-gate only.
+    # Each is A_full's SERVING IDENTITY exactly -- like A_full itself, the ablation lives in
+    # the driver hooks (crucible.run.full.FULL_FAMILY), never here, for the same reason
+    # ArmConfig grows no memory column: attempt_task must not be able to read the difference.
+    "A_mem_nosleep": ArmConfig("A_mem_nosleep", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
+    "A_sleep_nomem": ArmConfig("A_sleep_nomem", "Qwen/Qwen2.5-Coder-1.5B-Instruct", True, chat=True),
 }
 
 

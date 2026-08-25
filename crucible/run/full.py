@@ -102,7 +102,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from crucible.memory.distill import distill
-from crucible.memory.retrieve import retrieve
+from crucible.memory.retrieve import RetrievedBlock, retrieve
 from crucible.memory.schema import EpisodicRecord, content_id, episode_verified
 from crucible.memory.store import MemoryStore
 from crucible.run.arm import ArmConfig, attempt_task
@@ -121,7 +121,20 @@ from crucible.value.model import ConstantValue
 from crucible.value.online import OnlineValue
 
 FULL_ARM = "A_full"
-"""The one arm these hooks are built for -- the CLI gates on this name (see ``cli.py``)."""
+"""The gating memory arm -- both hook switches on (see ``FULL_FAMILY``)."""
+
+FULL_FAMILY: dict[str, tuple[bool, bool]] = {
+    "A_full": (True, True),
+    "A_mem_nosleep": (True, False),    # prereg A_mem−sleep: explicit memory, no LoRA
+    "A_sleep_nomem": (False, True),    # prereg A_sleep−mem: LoRA, no store in the prompt
+}
+"""The arms these hooks serve, mapped to ``(retrieval_enabled, sleep_enabled)`` -- the CLI
+gates on membership here (see ``cli.py``). The two ablations are EXPLORATORY (non-gating,
+protocol ``docs/findings/ABLATIONS-A.md``): each is A_full minus exactly ONE mechanism,
+with the value model and calibrator kept, so a difference from A_full's measured rates
+reads as that mechanism's marginal contribution and nothing else. They are separate ARM
+NAMES rather than run-time flags on A_full so every record stamps which configuration
+produced it -- a gate record and an ablation record can never be confused by file mixing."""
 
 MEMORY_DB_FILE = "memory.sqlite3"
 ADAPTERS_DIR = "adapters"
@@ -247,7 +260,11 @@ class FullHooks:
     def __init__(self, store: MemoryStore, value: OnlineValue, calibrator: Calibrator,
                  sleep_controller: SleepController, registry: AdapterRegistry, *,
                  sleep_records_path: Path, proposer: "AdapterProposer | None" = None,
-                 recalibrate_window: int = RECALIBRATE_WINDOW, log=print) -> None:
+                 recalibrate_window: int = RECALIBRATE_WINDOW,
+                 retrieval_enabled: bool = True, sleep_enabled: bool = True,
+                 log=print) -> None:
+        self._retrieval_enabled = retrieval_enabled
+        self._sleep_enabled = sleep_enabled
         self._store = store
         self._value = value
         self._calibrator = calibrator
@@ -278,6 +295,16 @@ class FullHooks:
         """The configured sleep trigger, read off the controller that owns it."""
         return self._sleep.threshold
 
+    @property
+    def retrieval_enabled(self) -> bool:
+        """Whether ``before_task`` consults the store (False only for A_sleep_nomem)."""
+        return self._retrieval_enabled
+
+    @property
+    def sleep_enabled(self) -> bool:
+        """Whether ``between_tasks`` may fire sleep (False only for A_mem_nosleep)."""
+        return self._sleep_enabled
+
     def before_task(self, unit: Unit, taskspec: TaskSpec) -> str | None:
         """Retrieve this task's memory block and set the value model's task context.
 
@@ -292,7 +319,12 @@ class FullHooks:
         the symptom-conditioned form is not built. Taking the argument keeps the seam open
         for it; ignoring it keeps this implementation honest about what it actually uses.
         """
-        block = retrieve(self._store, taskspec.unit_id, taskspec.family)
+        # The A_sleep_nomem ablation NEVER consults the store: the block is structurally
+        # absent, not "retrieved and empty", so the prompt is byte-for-byte the S2 prompt
+        # and item_ids stamp () -- the honest "no memory was offered" record. The organ is
+        # still WRITTEN (after_task is unchanged); only the read side is severed.
+        block = (retrieve(self._store, taskspec.unit_id, taskspec.family)
+                 if self._retrieval_enabled else RetrievedBlock(None, ()))
         hit = block.block is not None
         cls = provenance_class(hit, taskspec.phase)
         self._pending = _Pending(taskspec.task_key, block.item_ids,
@@ -401,7 +433,13 @@ class FullHooks:
         that changes what the server is running: a rejected candidate leaves the serving
         model untouched, so the calibrator's observations are still exchangeable with the
         ones before it and re-fitting from a short window would just throw data away.
+
+        The A_mem_nosleep ablation returns before the controller is even ASKED: its sleep
+        count must be structurally zero, not "the threshold happened never to fire", so no
+        run configuration (a low ``--sleep-threshold``, a long run) can sleep it by accident.
         """
+        if not self._sleep_enabled:
+            return
         record = self._sleep.maybe_sleep(list(solved_task_keys), now)
         if record is None:
             return
@@ -638,7 +676,9 @@ def _assert_resume_coherent(store: MemoryStore, arm_dir: Path) -> None:
 def build_full_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *, base_url: str,
                      value: OnlineValue, chat: bool, proposer=None,
                      memory_db: Path | None = None,
-                     sleep_threshold: int = SLEEP_THRESHOLD_DEFAULT, log=print) -> FullHooks:
+                     sleep_threshold: int = SLEEP_THRESHOLD_DEFAULT,
+                     retrieval_enabled: bool = True, sleep_enabled: bool = True,
+                     log=print) -> FullHooks:
     """Wire A_full's LIVE organs: memory db, calibrator, LoRA trainer, vLLM loader, slice.
 
     Everything lands under ``out_dir/<cfg.name>/`` (``memory_db`` overrides only the organ's
@@ -685,4 +725,5 @@ def build_full_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *, base_ur
                     else AdapterProposer(proposer, proposer_for, cfg.model))
     return FullHooks(store, value, Calibrator(), controller, registry,
                      sleep_records_path=arm_dir / SLEEP_RECORDS_FILE,
-                     proposer=arm_proposer, log=log)
+                     proposer=arm_proposer, retrieval_enabled=retrieval_enabled,
+                     sleep_enabled=sleep_enabled, log=log)

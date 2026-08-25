@@ -157,16 +157,19 @@ def _task_keys(manifest, tasks: str) -> list[str]:
 def _arm_run(a) -> int:
     """Run one named arm over the chosen task set and print where the records landed.
 
-    A_full -- and ONLY A_full -- gets the memory organ, value v1 and the sleep loop, wired as
-    the driver's ``hooks``. Every other arm passes ``hooks=None`` and keeps v0's
-    ``ConstantValue`` (spec S6: A_noMem's pilot already ran on it; arms differ by exactly the
-    pre-registered column). The gate is the arm NAME because ``ArmConfig`` is deliberately
-    memory-free -- see ``crucible.run.arm``'s ARMS comment -- and it is a hard gate: nothing
-    on the non-A_full path so much as opens a store.
+    The FULL_FAMILY arms -- A_full and its two exploratory ablations -- get the memory
+    organ, value v1 and the sleep loop, wired as the driver's ``hooks`` with the family's
+    ``(retrieval_enabled, sleep_enabled)`` switches (each ablation is A_full minus exactly
+    one mechanism; see ``crucible.run.full.FULL_FAMILY``). Every other arm passes
+    ``hooks=None`` and keeps v0's ``ConstantValue`` (spec S6: A_noMem's pilot already ran on
+    it; the gating arms differ by exactly the pre-registered column). The gate is the arm
+    NAME because ``ArmConfig`` is deliberately memory-free -- see ``crucible.run.arm``'s
+    ARMS comment -- and it is a hard gate: nothing on the non-family path so much as opens
+    a store.
     """
     from crucible.run.arm import ARMS
     from crucible.run.driver import run_arm
-    from crucible.run.full import FULL_ARM, build_full_hooks
+    from crucible.run.full import FULL_FAMILY, build_full_hooks
     from crucible.stream import store
     from crucible.value.model import ConstantValue
     if a.arm not in ARMS:
@@ -179,12 +182,15 @@ def _arm_run(a) -> int:
         return PROPOSER_ERROR_EXIT
     keys = _task_keys(store.read_manifest(a.stream_dir), a.tasks)
     value, hooks = ConstantValue(), None
-    if cfg.name == FULL_ARM:
+    if cfg.name in FULL_FAMILY:
         from crucible.value.online import OnlineValue
+        retrieval_enabled, sleep_enabled = FULL_FAMILY[cfg.name]
         value = OnlineValue()
         hooks = build_full_hooks(cfg, a.stream_dir, a.out, base_url=a.base_url, value=value,
                                  chat=chat, proposer=proposer, memory_db=a.memory_db,
-                                 sleep_threshold=a.sleep_threshold)
+                                 sleep_threshold=a.sleep_threshold,
+                                 retrieval_enabled=retrieval_enabled,
+                                 sleep_enabled=sleep_enabled)
         # The SAME client, wrapped so an accepted adapter is what the next request asks for.
         # Handing run_arm the unwrapped one would leave the arm on the base weights forever
         # while its records still claimed an adapter (review C1).

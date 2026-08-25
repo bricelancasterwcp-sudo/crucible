@@ -92,6 +92,17 @@ def test_arm_registry_matches_frozen_spec():
     assert ARMS["B_naive"].use_search is False
 
 
+def test_ablation_arms_are_a_full_s_serving_identity():
+    """The EXPLORATORY ablations (docs/findings/ABLATIONS-A.md) must reach the server as
+    A_full does in every field -- same checkpoint, chat surface, budget, seed -- or a rate
+    difference from A_full would be confounded by serving instead of isolating the ablated
+    mechanism. Like A_full itself, the ablation lives in the hooks, never in ArmConfig."""
+    for name in ("A_mem_nosleep", "A_sleep_nomem"):
+        assert ARMS[name] == ArmConfig(name, ARMS["A_full"].model, True, chat=True)
+        assert (ARMS[name].k, ARMS[name].width, ARMS[name].seed) == (
+            ARMS["A_full"].k, ARMS["A_full"].width, ARMS["A_full"].seed)
+
+
 def test_chat_serving_is_an_arm_property_not_a_cli_default():
     """Every gating proposer is an instruct model and MUST be chat-served (the §2 fallback
     replaced the raw-served base 9B). Binding chat to the arm stops `arm run` without

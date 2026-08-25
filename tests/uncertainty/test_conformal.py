@@ -270,6 +270,71 @@ def test_recalibrate_raises_on_non_positive_window():
         Calibrator().recalibrate(window=0)
 
 
+def test_recalibrate_truncation_persists_into_the_next_observe():
+    # Review fix (controller ruling): recalibration is PERMANENT truncation, not a one-shot
+    # refit. An accepted sleep breaks exchangeability for good, so pre-sleep pairs must stay
+    # dropped for every LATER observe() in that class too, not just the fit recalibrate()
+    # itself produces.
+    #
+    # 30 stale points say "score 0.9 -> fail"; recalibrate(window=20) keeps only the 20
+    # recent "score 0.9 -> pass" points. One more observe() afterward must refit from that
+    # truncated-then-grown history alone. If the bug were present (recalibrate fits a
+    # windowed model but leaves `self._history` untouched), this observe() would re-append
+    # to the FULL 50-pair history, and the next fit at the single tied score 0.9 would pool
+    # to the mixed mean 21/51 (~0.412) instead of a clean 1.0.
+    cal = Calibrator()
+    cls = "hit-p1"
+    for _ in range(30):
+        cal.observe(score=0.9, cls=cls, outcome=False)
+    for _ in range(20):
+        cal.observe(score=0.9, cls=cls, outcome=True)
+
+    cal.recalibrate(window=20)
+    cal.observe(score=0.9, cls=cls, outcome=True)  # the "subsequent observe()" under test
+
+    assert cal.confidence(0.9, cls) == 1.0
+
+
+def test_snapshot_after_recalibrate_shows_truncated_history_length():
+    cal = Calibrator()
+    cls = "hit-p1"
+    for _ in range(30):
+        cal.observe(score=0.9, cls=cls, outcome=True)
+
+    cal.recalibrate(window=12)
+
+    snap = cal.snapshot()
+    assert len(snap["history"][cls]) == 12  # min(window, n) with n=30 > window
+
+
+def test_snapshot_after_recalibrate_below_window_is_a_no_op_truncation():
+    cal = Calibrator()
+    cls = "hit-p1"
+    for _ in range(5):
+        cal.observe(score=0.9, cls=cls, outcome=True)
+
+    cal.recalibrate(window=50)  # fewer total observations than the window
+
+    snap = cal.snapshot()
+    assert len(snap["history"][cls]) == 5  # min(window, n) with n=5 < window: unchanged
+
+
+def test_recalibrate_below_min_obs_reverts_confidence_to_passthrough():
+    # Truncation composes with the honest-cold-start rule: if the post-recalibrate history
+    # for a class drops below MIN_OBS, `confidence` must fall back to raw-score passthrough
+    # again, exactly like a class that was never trained past MIN_OBS in the first place.
+    cal = Calibrator()
+    cls = "hit-p1"
+    for _ in range(15):  # >= MIN_OBS, so calibration is active before recalibrate
+        cal.observe(score=0.9, cls=cls, outcome=True)
+        cal.observe(score=0.1, cls=cls, outcome=False)
+    assert cal.confidence(0.5, cls) != 0.5  # sanity: calibrated, not passthrough, pre-cut
+
+    cal.recalibrate(window=5)  # 5 < MIN_OBS=10 after truncation
+
+    assert cal.confidence(0.5, cls) == 0.5  # passthrough again -- too little post-cut data
+
+
 # --- snapshot/restore --------------------------------------------------------------
 
 

@@ -168,10 +168,12 @@ class Calibrator:
 
     ``recalibrate(window)`` is the post-accepted-sleep hook: sleep training breaks the
     exchangeability the running fit assumed, so each class's model is re-fit from only its
-    OWN last ``window`` observations rather than its full history. This is a one-shot
-    correction -- the next plain ``observe()`` call re-fits that class from its full
-    history again (observe's growing-window behaviour), so ``recalibrate`` narrows the fit
-    for exactly the post-sleep moment it is called at, not as a persistent windowing mode.
+    OWN last ``window`` observations. This is a PERMANENT truncation, not a one-shot
+    correction: ``recalibrate`` drops every pre-truncation pair from ``cls``'s history, not
+    just from the model it fits right now, so every LATER plain ``observe()`` call in that
+    class also builds on the truncated history (growing from ``window`` observations
+    onward), never on the pre-sleep pairs again. An accepted sleep breaks exchangeability
+    for good, not for one fit.
     """
 
     def __init__(self) -> None:
@@ -223,18 +225,26 @@ class Calibrator:
         return p < ABSTAIN_P
 
     def recalibrate(self, window: int) -> None:
-        """Re-fit every observed class's isotonic model from only its last ``window``
-        observations -- the post-accepted-sleep hook (accepted sleep training breaks the
-        exchangeability the running fit assumed).
+        """PERMANENTLY truncate every observed class's history to its last ``window``
+        observations and re-fit from what remains -- the post-accepted-sleep hook (accepted
+        sleep training breaks the exchangeability the running fit assumed, so pre-sleep
+        observations must stop influencing every later fit, not just the very next one).
 
-        Classes with fewer than ``window`` total observations use everything they have.
-        Classes never observed are untouched (nothing to recalibrate). Raises
-        ``ValueError`` if ``window`` is not positive.
+        The truncation replaces ``self._history[cls]``, not just the model: a later plain
+        ``observe()`` call re-fits from this truncated-then-grown history, never from the
+        dropped pre-truncation pairs. If truncation leaves a class below :data:`MIN_OBS`,
+        :meth:`confidence` correctly falls back to raw-score passthrough again until enough
+        post-truncation observations land.
+
+        Classes with fewer than ``window`` total observations keep everything they have (a
+        no-op truncation). Classes never observed are untouched (nothing to recalibrate).
+        Raises ``ValueError`` if ``window`` is not positive.
         """
         if window <= 0:
             raise ValueError(f"window must be positive, got {window}")
         for cls, pairs in self._history.items():
-            self._models[cls] = _fit_isotonic(pairs[-window:])
+            pairs = self._history[cls] = pairs[-window:]
+            self._models[cls] = _fit_isotonic(pairs)
 
     def snapshot(self) -> dict:
         """Record-keeping snapshot of every class's history and fitted model, JSON-native."""

@@ -370,7 +370,11 @@ class FullHooks:
         episode = self._episode(taskspec, record, result, pending, now, record.confidence)
         self._store.write_episode(episode)
 
-        if episode.verified and episode.landed_module is not None:
+        # The third clause mirrors distill()'s own guard (review fix): a verified fix whose
+        # free symptom run produced no verdict (symptom_failed == ()) must not mint a lesson
+        # that cites no tests -- distill() would refuse it anyway, but gating here keeps the
+        # skip visible at the call site instead of relying on the callee's raise.
+        if episode.verified and episode.landed_module is not None and result.symptom_failed:
             spans = (taskspec.span,) if taskspec.span2 is None else (taskspec.span, taskspec.span2)
             self._store.write_semantic(distill(
                 episode, mutated_src=unit.module_src, spans=spans,

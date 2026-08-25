@@ -108,6 +108,19 @@ def test_distill_refuses_an_episode_with_no_landed_module():
         pass
 
 
+def test_distill_refuses_empty_flipped_tests():
+    # Review fix: a verified fix whose free symptom run produced no verdict
+    # (symptom_failed == () at the call site) must not mint a lesson that cites no tests --
+    # mirrors falsify.py's own citation gate (`_broken_citation`'s `not item.flipped_tests`).
+    episode = _episode(landed_module=LANDED_MODULE)
+    try:
+        distill(episode, mutated_src=MUTATED_SRC, spans=SPANS,
+                flipped_tests=(), killing_tests=KILLING_TESTS, now=NOW)
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
 def test_render_lesson_contains_family_diff_fence_and_flipped_tests():
     item = _distilled()
     rendered = render_lesson(item)

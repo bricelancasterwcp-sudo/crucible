@@ -317,6 +317,19 @@ def test_a_tampered_pass_is_not_a_verified_episode(rig):
     assert rig.store.semantic_family("ARITH") == []
 
 
+def test_after_task_writes_no_lesson_when_symptom_failed_is_empty(rig):
+    """Review fix (M-2): a verified fix whose free symptom run produced no verdict
+    (``symptom_failed == ()``) must not mint a lesson -- it would cite no tests and
+    permanently sit in ``infra_broken_citation`` on every future sleep. The episode is
+    still written (an attempt happened), only the lesson is skipped."""
+    _open_task(rig.hooks)
+    rig.hooks.after_task(U, SPEC, _record(), _result(symptom_failed=()), NOW)
+
+    assert len(rig.store.episodes()) == 1
+    assert rig.store.episodes()[0].verified is True     # the episode itself is verified
+    assert rig.store.semantic_family("ARITH") == []      # but no lesson was minted
+
+
 def test_the_lesson_cites_the_symptom_tests_as_flipped_and_killing(rig):
     _open_task(rig.hooks)
     rig.hooks.after_task(U, SPEC, _record(), _result(symptom_failed=("test_v0", "test_v1")), NOW)
@@ -911,7 +924,7 @@ def test_adapter_proposer_accepts_a_base_client_that_matches_its_declaration():
     assert arm_proposer.model == "fake/model" and arm_proposer.adapter_id is None
 
 
-# --- the adapter loader's already-loaded branch (Task 12 smoke, verified live 2026-08-25) --
+# --- the adapter loader's already-loaded branch (Task 12 smoke, verified live 2026-08-24) --
 #
 # vLLM answers a second load_lora_adapter for a name it already serves with HTTP 400. ONE
 # sleep cycle POSTs the same name twice by design -- DriverSliceRunner must load the candidate

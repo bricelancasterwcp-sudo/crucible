@@ -10,11 +10,20 @@ self-distillation behind a flag, but this instrument's semantic writer never inv
 model.
 
 *The guard is the contract.* ``distill`` REFUSES (raises ``ValueError``) an episode that
-is not verified, or one with ``landed_module is None`` -- either would mint a lesson
-from an attempt that never actually produced a working fix. ``verified`` is read as the
-dataclass field, not recomputed from ``hidden_pass``/tamper evidence (``schema.py``'s
-``episode_verified`` is the one place that derivation happens; by the time an episode
-reaches this module its ``verified`` field is already the caller's considered answer).
+is not verified, one with ``landed_module is None``, or a call with an empty
+``flipped_tests`` -- the first two would mint a lesson from an attempt that never
+actually produced a working fix; the third would mint a lesson that cites no tests at
+all, which cannot ground a claim (mirrors ``falsify.py``'s own citation gate --
+``_broken_citation`` there classifies an empty ``item.flipped_tests`` as
+``infra_broken_citation`` for the identical reason). Review finding: a verified fix whose
+free symptom run produced no verdict (``SearchResult.symptom_failed == ()``) used to mint
+a lesson anyway, which then sat in ``infra_broken_citation`` on every future sleep
+forever and kept surfacing at retrieval (the ``falsified_by is None`` filter never
+excludes it, since it was never actually falsified -- just permanently unmeasurable).
+``verified`` is read as the dataclass field, not recomputed from ``hidden_pass``/tamper
+evidence (``schema.py``'s ``episode_verified`` is the one place that derivation happens;
+by the time an episode reaches this module its ``verified`` field is already the
+caller's considered answer).
 
 *The landed diff is against the MUTATED source, not the original.* ``mutated_src`` (the
 bug the agent actually saw) plays the ``a`` side; ``episode.landed_module`` (the patch
@@ -32,11 +41,14 @@ since ``EpisodicRecord`` does not itself carry a ``module_name`` field.
 it twice on the same ``SemanticItem`` produces identical bytes, which is what lets the
 lesson text participate in a deterministic prompt (pre-reg §8, instrument honesty).
 
-*Inferred, not pinned by the brief:* ``confidence=1.0`` at mint time (a freshly
-distilled lesson comes from a hidden-suite-verified, untampered episode -- full
+*Inferred, not pinned by the brief:* :data:`MINT_CONFIDENCE` (1.0) at mint time (a
+freshly distilled lesson comes from a hidden-suite-verified, untampered episode -- full
 confidence until falsification or a later calibration pass revises it; Task 8's
-``Calibrator`` is a separate, later-consulted signal, not something this module reads)
-and ``source_locator=f"episode:{episode.item_id}"`` (self-sufficient: ``distill`` is not
+``Calibrator`` is a separate, later-consulted signal, not something this module reads --
+hoisted to a named module constant, not an inline literal, because it is an UNCALIBRATED
+PRIOR asserted at mint time, not a measured quantity, and reads misleadingly like one
+when spelled out as a bare ``1.0`` at the call site) and
+``source_locator=f"episode:{episode.item_id}"`` (self-sufficient: ``distill`` is not
 given a run id, so the locator names the one thing it does have -- the cited episode --
 rather than inventing run context it was never handed).
 """
@@ -47,6 +59,12 @@ import json
 
 from ..stream.units import module_name_for
 from .schema import EpisodicRecord, SemanticItem, Span, content_id
+
+MINT_CONFIDENCE = 1.0
+"""The confidence every freshly distilled lesson is minted with -- an UNCALIBRATED PRIOR
+("this came from a verified, untampered episode"), not a measured quantity. Named rather
+than inlined so it reads as a stated assumption at the mint site, not a number that looks
+like it was computed."""
 
 LESSON_TEMPLATE = """### Prior verified fix in this code (family {family})
 The altered region was at spans {spans}. The repair that passed re-execution:
@@ -74,14 +92,20 @@ def distill(episode: EpisodicRecord, *, mutated_src: str, spans: tuple[Span, ...
             flipped_tests: tuple[str, ...], killing_tests: tuple[str, ...], now: str) -> SemanticItem:
     """Mechanically template one verified episode into a ``SemanticItem``. See module docstring.
 
-    Raises ``ValueError`` if ``episode.verified`` is not ``True`` or
-    ``episode.landed_module`` is ``None`` -- both checked, independently, before anything
-    else runs.
+    Raises ``ValueError`` if ``episode.verified`` is not ``True``, ``episode.landed_module``
+    is ``None``, or ``flipped_tests`` is empty -- all three checked, independently, before
+    anything else runs. An empty ``flipped_tests`` mints a lesson that cites no tests at
+    all, which cannot ground a claim -- mirrors ``falsify.py``'s own citation gate.
     """
     if not episode.verified:
         raise ValueError(f"distill refuses a non-verified episode: {episode.item_id}")
     if episode.landed_module is None:
         raise ValueError(f"distill refuses an episode with no landed_module: {episode.item_id}")
+    if not flipped_tests:
+        raise ValueError(
+            f"distill refuses an empty flipped_tests: {episode.item_id} -- a lesson that "
+            f"cites no tests cannot ground a claim"
+        )
 
     module_name = module_name_for(episode.unit_id)
     landed_diff = _unified(module_name, mutated_src, episode.landed_module)
@@ -99,7 +123,7 @@ def distill(episode: EpisodicRecord, *, mutated_src: str, spans: tuple[Span, ...
         flipped_tests=tuple(flipped_tests),
         killing_tests=tuple(killing_tests),
         created_at=now,
-        confidence=1.0,
+        confidence=MINT_CONFIDENCE,
         status="active",
         version=1,
         source_locator=f"episode:{cited_episode_id}",

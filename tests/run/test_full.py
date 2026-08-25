@@ -53,6 +53,9 @@ from dataclasses import replace
 import pytest
 
 import crucible.run.driver as driver
+import crucible.run.full as full
+from crucible.memory import symmatch
+from crucible.memory.retrieve import RetrievedBlock
 from crucible.memory.schema import content_id
 from crucible.memory.schema import EpisodicRecord
 from crucible.memory.store import MemoryIdentityMismatch, MemoryStore
@@ -61,6 +64,7 @@ from crucible.run.driver import run_arm, utc_now
 from crucible.run.full import (
     build_full_hooks,
     FULL_FAMILY,
+    MEM_ARMS,
     RECALIBRATE_WINDOW,
     AdapterProposer,
     ArmHooks,
@@ -71,6 +75,7 @@ from crucible.run.full import (
 from crucible.run.lens import build_lens
 from crucible.run.records import ExecRecord, TaskRecord, read_task_records, write_records
 from crucible.run.types import Candidate
+from crucible.sandbox.report import TestReport
 from crucible.search.loop import SearchResult
 from crucible.proposer.identity import IdentityMismatch, ServedIdentity
 from crucible.sleep import loop as sleep_loop
@@ -169,7 +174,7 @@ class _Rig:
 
     def __init__(self, tmp_path, *, threshold=999, units=None, counts=(1, 1, 1, 1), seed=0,
                  proposer=None, retrieval="full", sleep_enabled=True,
-                 log=lambda *a: None):
+                 probe_log_path=None, log=lambda *a: None):
         self.store = MemoryStore(tmp_path / "memory.sqlite3")
         self.value = _SpyValue()
         self.calibrator = _SpyCalibrator()
@@ -189,7 +194,8 @@ class _Rig:
         self.hooks = FullHooks(self.store, self.value, self.calibrator, self.controller,
                                self.registry, sleep_records_path=self.sleep_records_path,
                                proposer=proposer, retrieval=retrieval,
-                               sleep_enabled=sleep_enabled, log=self.logged.append)
+                               sleep_enabled=sleep_enabled, probe_log_path=probe_log_path,
+                               log=self.logged.append)
 
 
 class _FakeClients:
@@ -986,7 +992,23 @@ def test_full_family_maps_each_ablation_to_a_full_minus_exactly_one_mechanism():
     assert FULL_FAMILY == {"A_full": ("full", True),
                            "A_mem_nosleep": ("full", False),
                            "A_sleep_nomem": ("off", True),
-                           "A_mem_exactonly": ("exact", False)}
+                           "A_mem_exactonly": ("exact", False),
+                           "A_symmem": ("symptom", False)}
+
+
+def test_full_family_and_mem_arms_map_the_phase_c_arms():
+    """Phase-C prereg §4.3: A_symmem (FullHooks, symptom mode, no LoRA) and B_symmem
+    (MemHooks, symptom mode) are the two arms this task wires in. Every pre-existing
+    FULL_FAMILY entry must be unchanged -- a mutant that added A_symmem by editing an
+    existing tuple instead of adding a new key would sail through a bare membership
+    check but not through this full-literal compare."""
+    assert FULL_FAMILY["A_symmem"] == ("symptom", False)
+    assert MEM_ARMS == {"B_mem": "full", "B_symmem": "symptom"}
+    assert FULL_FAMILY == {"A_full": ("full", True),
+                           "A_mem_nosleep": ("full", False),
+                           "A_sleep_nomem": ("off", True),
+                           "A_mem_exactonly": ("exact", False),
+                           "A_symmem": ("symptom", False)}
 
 
 def test_exact_mode_serves_repeats_but_silences_strangers(tmp_path):
@@ -1023,6 +1045,140 @@ def test_retrieval_disabled_offers_nothing_even_when_the_organ_holds_a_lesson(tm
     assert block is None                     # nothing offered, not an empty string
     assert rig.value.begun[-1] == (SPEC.family, False)   # the hit feature is honestly False
     assert ids == ()                         # the record will stamp "no memory offered"
+
+
+# --- symptom retrieval mode + the uncharged probe (Phase-C prereg §4.3) -----------------
+
+def _fake_symptom_report() -> TestReport:
+    return TestReport((), ("test_v0",), (), (), 0.1, None)
+
+
+def test_symptom_mode_probes_uncharged_and_hands_the_block_to_the_search(tmp_path, monkeypatch):
+    """The probe must not touch executions_charged (it happens outside attempt_task), the
+    counter must count it, and the block handed back must be retrieve_symptom's.
+
+    MUTANT KILLED: probe charged / counter dropped / mode falls through to "full" -- any of
+    these leaves ``uncharged_symptom_runs`` at 0, hands back a different block, or calls the
+    spies with the wrong arguments.
+    """
+    report = _fake_symptom_report()
+    run_calls = []
+    retrieve_calls = []
+
+    def spy_run(unit, patch, subset, **kw):
+        run_calls.append((unit, patch, subset))
+        return report
+
+    def spy_retrieve_symptom(store, unit_src, unit_id, family, symptom_text, *, tau):
+        retrieve_calls.append((store, unit_src, unit_id, family, symptom_text, tau))
+        return RetrievedBlock("BLOCK", ("id1",))
+
+    monkeypatch.setattr(full, "run", spy_run)
+    monkeypatch.setattr(full, "retrieve_symptom", spy_retrieve_symptom)
+
+    rig = _Rig(tmp_path, retrieval="symptom")
+    block = rig.hooks.before_task(U, SPEC)
+
+    assert block == "BLOCK"
+    assert rig.hooks.uncharged_symptom_runs == 1
+
+    assert run_calls == [(U, U.module_src, None)]           # byte-identical to the search's own
+    (store, unit_src, unit_id, family, symptom_text, tau) = retrieve_calls[0]
+    assert store is rig.store
+    assert unit_src == U.module_src
+    assert (unit_id, family) == (SPEC.unit_id, SPEC.family)
+    assert symptom_text == "failed: test_v0"                # crucible.proposer.prompt.render_symptom
+    assert tau is symmatch.TAU                               # is None today -- spy bypasses the raise
+
+
+def test_symptom_mode_probes_again_and_recounts_on_a_second_task(tmp_path, monkeypatch):
+    """The counter is a running total across tasks, not a per-call flag."""
+    monkeypatch.setattr(full, "run", lambda *a, **kw: _fake_symptom_report())
+    monkeypatch.setattr(full, "retrieve_symptom", lambda *a, **kw: RetrievedBlock(None, ()))
+
+    rig = _Rig(tmp_path, retrieval="symptom")
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.before_task(U, replace(SPEC, task_key="k2"))
+
+    assert rig.hooks.uncharged_symptom_runs == 2
+
+
+def test_symptom_mode_persists_the_probe_count_and_full_mode_never_creates_the_file(tmp_path, monkeypatch):
+    """C5 needs a post-hoc artifact -- the in-process counter dies with a detached run (spec
+    §4.3). Overwritten each call, so two calls read "2"; mode "full" must never create the
+    file at all.
+
+    MUTANT KILLED: dropping either the counter increment or the persistence call leaves the
+    file absent or stuck at "1"; a mode dispatch that always writes leaves it present under
+    "full" too.
+    """
+    monkeypatch.setattr(full, "run", lambda *a, **kw: _fake_symptom_report())
+    monkeypatch.setattr(full, "retrieve_symptom", lambda *a, **kw: RetrievedBlock(None, ()))
+
+    probe_path = tmp_path / "symptom_probes.txt"
+    rig = _Rig(tmp_path, retrieval="symptom", probe_log_path=probe_path)
+    rig.hooks.before_task(U, SPEC)
+    rig.hooks.before_task(U, replace(SPEC, task_key="k2"))
+
+    assert probe_path.read_text(encoding="utf-8") == "2"
+
+    (tmp_path / "full").mkdir()
+    full_probe_path = tmp_path / "full_probes.txt"
+    full_rig = _Rig(tmp_path / "full", retrieval="full", probe_log_path=full_probe_path)
+    full_rig.hooks.before_task(U, SPEC)
+
+    assert not full_probe_path.exists()
+    assert full_rig.hooks.uncharged_symptom_runs == 0
+
+
+def test_mem_hooks_symptom_mode_probes_uncharged_and_persists_the_count(tmp_path, monkeypatch):
+    """MemHooks mirrors FullHooks' symptom-mode dispatch (same shape, see the module
+    docstring): an uncharged probe, a running counter, the ``retrieval`` property, and --
+    when configured -- a persisted file that mode "full" never creates."""
+    calls = {}
+
+    def spy_run(unit, patch, subset, **kw):
+        calls["run"] = (unit, patch, subset)
+        return _fake_symptom_report()
+
+    def spy_retrieve_symptom(store, unit_src, unit_id, family, symptom_text, *, tau):
+        calls["tau"] = tau
+        return RetrievedBlock("SYMPTOM BLOCK", ("id2",))
+
+    monkeypatch.setattr(full, "run", spy_run)
+    monkeypatch.setattr(full, "retrieve_symptom", spy_retrieve_symptom)
+
+    probe_path = tmp_path / "symptom_probes.txt"
+    store = MemoryStore(tmp_path / "memory.sqlite3")
+    hooks = MemHooks(store, retrieval="symptom", probe_log_path=probe_path)
+
+    block = hooks.before_task(U, SPEC)
+
+    assert block == "SYMPTOM BLOCK"
+    assert hooks.uncharged_symptom_runs == 1
+    assert hooks.retrieval == "symptom"
+    assert calls["run"] == (U, U.module_src, None)
+    assert calls["tau"] is symmatch.TAU
+    assert probe_path.read_text(encoding="utf-8") == "1"
+
+    hooks.before_task(U, replace(SPEC, task_key="k2"))
+    assert probe_path.read_text(encoding="utf-8") == "2"
+
+
+def test_mem_hooks_full_mode_never_probes_or_creates_the_probe_file(tmp_path, monkeypatch):
+    probe_path = tmp_path / "symptom_probes.txt"
+    store = MemoryStore(tmp_path / "memory.sqlite3")
+    hooks = MemHooks(store, probe_log_path=probe_path)     # default retrieval="full"
+
+    def fail_run(*a, **kw):
+        raise AssertionError("mode 'full' must never probe the sandbox")
+    monkeypatch.setattr(full, "run", fail_run)
+
+    hooks.before_task(U, SPEC)
+
+    assert hooks.uncharged_symptom_runs == 0
+    assert hooks.retrieval == "full"
+    assert not probe_path.exists()
 
 
 def test_sleep_disabled_returns_before_the_controller_is_asked(tmp_path):

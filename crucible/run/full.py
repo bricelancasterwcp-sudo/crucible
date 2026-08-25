@@ -16,7 +16,10 @@ path. Everything ``after_task`` writes down is read off the attempt that already
 is already over, and it would be charged to nobody's budget. The only executions this
 module can cause are sleep-internal: falsification (inside ``SleepController``) and the
 regression slice (:class:`DriverSliceRunner`), both uncharged by design, both counted in
-the ``SleepRecord``.
+the ``SleepRecord``. — with ONE disclosed exception (Phase-C, spec §4.3): symptom-mode
+`before_task` runs a single uncharged symptom probe per task, identical in inputs and
+outcome to the free symptom run the search itself performs; it is counted in
+`uncharged_symptom_runs` and never appears in `executions_charged`.
 
 *No extra generate calls.* ``FullHooks`` holds no proposer and cannot talk to a model. The
 one place in this file that generates is :class:`DriverSliceRunner`, and that is the sleep
@@ -101,13 +104,16 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from crucible.memory import symmatch
 from crucible.memory.distill import distill
-from crucible.memory.retrieve import RetrievedBlock, retrieve
+from crucible.memory.retrieve import RetrievedBlock, retrieve, retrieve_symptom
 from crucible.memory.schema import EpisodicRecord, content_id, episode_verified
 from crucible.memory.store import MemoryStore
+from crucible.proposer.prompt import render_symptom
 from crucible.run.arm import ArmConfig, attempt_task
 from crucible.run.driver import mutated_unit
 from crucible.run.records import TASK_RECORDS_FILE, TaskRecord, read_task_records
+from crucible.sandbox.task_run import run
 from crucible.search.loop import SearchResult, TaskConfidence
 from crucible.sleep.loop import (SLEEP_THRESHOLD_DEFAULT, ServerAdapter, SleepController,
                                  SleepRecord, VllmAdapterLoader)
@@ -128,12 +134,17 @@ FULL_FAMILY: dict[str, tuple[str, bool]] = {
     "A_mem_nosleep": ("full", False),    # prereg A_mem−sleep: explicit memory, no LoRA
     "A_sleep_nomem": ("off", True),      # prereg A_sleep−mem: LoRA, no store in the prompt
     "A_mem_exactonly": ("exact", False), # prereg §4.3: exact-class recall only, no LoRA
+    "A_symmem": ("symptom", False),      # Phase-C §4.2/§4.3: cross-unit symptom recall, no LoRA
 }
 """The arms these hooks serve, mapped to ``(retrieval_mode, sleep_enabled)`` -- the CLI
 gates on membership here (see ``cli.py``). ``retrieval_mode`` is ``"full"`` (class-exact
 falling back to family-wide, ``retrieve``'s default policy), ``"exact"`` (class-exact only
 -- a stranger unit gets silence rather than a family-wide lesson, see ``exact_only`` on
-:func:`crucible.memory.retrieve.retrieve`), or ``"off"`` (the store is never consulted).
+:func:`crucible.memory.retrieve.retrieve`), ``"symptom"`` (Phase-C prereg §4.2: class-exact
+fast path, else a cross-unit symptom-similarity ranking gated by ``tau`` -- see
+:func:`crucible.memory.retrieve.retrieve_symptom` and its ``before_task`` caller, both of
+which run the disclosed uncharged probe described in this module's docstring), or ``"off"``
+(the store is never consulted).
 The two `_nosleep`/`_nomem` ablations and ``A_mem_exactonly`` are all EXPLORATORY
 (non-gating, protocol ``docs/findings/ABLATIONS-A.md``): each is A_full minus exactly ONE
 mechanism, with the value model and calibrator kept, so a difference from A_full's measured
@@ -141,20 +152,29 @@ rates reads as that mechanism's marginal contribution and nothing else. They are
 ARM NAMES rather than run-time flags on A_full so every record stamps which configuration
 produced it -- a gate record and an ablation record can never be confused by file mixing."""
 
-MEM_ARMS = frozenset({"B_mem"})
-"""The Phase-B arm ``MemHooks`` serves (prereg §3): the store and nothing else -- no value
-model, no calibrator, no sleep. Kept as its own set rather than folded into ``FULL_FAMILY``
-so the CLI gate for "wire the full organ" and "wire the store alone" stay two membership
-checks, never one dict lookup that has to be interpreted two different ways."""
+MEM_ARMS: dict[str, str] = {"B_mem": "full", "B_symmem": "symptom"}
+"""The Phase-B/Phase-C arms ``MemHooks`` serves: the store and nothing else -- no value
+model, no calibrator, no sleep (prereg §3 for ``B_mem``; Phase-C prereg §4.2/§4.3 for
+``B_symmem``). Maps each arm name to the ``retrieval`` mode ``build_mem_hooks`` /
+``MemHooks.__init__`` is given -- ``"full"`` (class-exact falling back to family-wide) or
+``"symptom"`` (class-exact fast path, else cross-unit symptom-similarity ranking gated by
+``tau``, plus the disclosed uncharged probe -- see the module docstring). A dict, not a
+frozenset, because membership alone can no longer say which policy an arm runs; kept as
+its own mapping rather than folded into ``FULL_FAMILY`` so the CLI gate for "wire the full
+organ" and "wire the store alone" stay two membership checks (``in MEM_ARMS`` still works
+on a dict), never one dict lookup that has to be interpreted two different ways."""
 
 MEMORY_DB_FILE = "memory.sqlite3"
 ADAPTERS_DIR = "adapters"
 ADAPTER_REGISTRY_FILE = "adapters.jsonl"
 SLEEP_RECORDS_FILE = "sleep_records.jsonl"
-"""Everything an A_full run writes beside its records, all under ``out_dir/<arm>/``: the
-organ, the trained adapters, the append-only adapter ledger, and one line per sleep cycle.
-One directory per arm run means a re-run against a fresh ``--out`` is a fresh organ, which
-is what "arms never share memory" (spec §2) means operationally."""
+SYMPTOM_PROBE_LOG_FILE = "symptom_probes.txt"
+"""Everything an A_full/A_symmem/B_mem/B_symmem run writes beside its records, all under
+``out_dir/<arm>/``: the organ, the trained adapters, the append-only adapter ledger, one
+line per sleep cycle, and (symptom mode only -- see ``_persist_probe_count``) the current
+``uncharged_symptom_runs`` count. One directory per arm run means a re-run against a fresh
+``--out`` is a fresh organ, which is what "arms never share memory" (spec §2) means
+operationally."""
 
 RECALIBRATE_WINDOW = 50
 """Observations per provenance class the calibrator re-fits from after an ACCEPTED sleep.
@@ -280,6 +300,19 @@ class _Pending:
     honest answer to "what generated this attempt" and the re-read silently is not."""
 
 
+def _persist_probe_count(probe_log_path: Path | None, count: int) -> None:
+    """Overwrite ``probe_log_path`` with ``count`` -- the post-hoc artifact C5 needs because
+    the in-process ``uncharged_symptom_runs`` counter dies with a detached run (spec §4.3).
+    A no-op when ``probe_log_path`` is ``None``, which is how non-symptom modes never create
+    the file at all: they simply never call this. Shared by both hook classes so the write
+    (and its overwrite-not-append semantics -- the file always reads the CURRENT total) is
+    defined exactly once."""
+    if probe_log_path is None:
+        return
+    probe_log_path.parent.mkdir(parents=True, exist_ok=True)
+    probe_log_path.write_text(str(count), encoding="utf-8")
+
+
 class FullHooks:
     """A_full's :class:`ArmHooks`: retrieve -> attempt -> record + distill -> maybe sleep.
 
@@ -303,6 +336,7 @@ class FullHooks:
                  sleep_records_path: Path, proposer: "AdapterProposer | None" = None,
                  recalibrate_window: int = RECALIBRATE_WINDOW,
                  retrieval: str = "full", sleep_enabled: bool = True,
+                 probe_log_path: Path | None = None,
                  log=print) -> None:
         self._retrieval = retrieval
         self._sleep_enabled = sleep_enabled
@@ -315,6 +349,7 @@ class FullHooks:
         self._registry = registry
         self._sleep_records_path = Path(sleep_records_path)
         self._recalibrate_window = recalibrate_window
+        self._probe_log_path = probe_log_path
         self._pending: _Pending | None = None
         self.sleep_records: list[SleepRecord] = []
         self.value_update_misses: int = 0
@@ -325,6 +360,13 @@ class FullHooks:
         run. Discarding that return would make the degradation invisible: the value model
         would simply learn less than the record count says it did. Every miss is counted here
         and logged; the S3 smoke asserts this is 0."""
+        self.uncharged_symptom_runs: int = 0
+        """How many uncharged symptom-mode probes ``before_task`` has run (Phase-C spec §4.3)
+        -- see the module docstring's disclosed exception. Incrementing this is what makes
+        the probe COUNTED rather than a silent extra execution; every increment is mirrored
+        to ``probe_log_path`` (:func:`_persist_probe_count`) so a post-hoc read survives a
+        detached run, since this in-process attribute does not. Stays 0 for every non-symptom
+        retrieval mode -- the probe never runs, so there is nothing to count."""
 
     @property
     def proposer(self) -> "AdapterProposer | None":
@@ -338,8 +380,8 @@ class FullHooks:
 
     @property
     def retrieval_mode(self) -> str:
-        """Which retrieval policy ``before_task`` applies: ``"full"``, ``"exact"``, or
-        ``"off"`` -- see ``FULL_FAMILY``."""
+        """Which retrieval policy ``before_task`` applies: ``"full"``, ``"exact"``,
+        ``"symptom"``, or ``"off"`` -- see ``FULL_FAMILY``."""
         return self._retrieval
 
     @property
@@ -366,18 +408,36 @@ class FullHooks:
         ``begin_task`` is called here, before any node is scored, exactly once per task.
 
         ``unit`` is part of the hook contract (pre-reg §9 writes retrieval as
-        ``retrieve(unit, family, symptom)``) but this implementation reads none of it:
-        retrieval keys on the CLASS -- ``(unit_id, family)`` -- not on the source text, and
-        the symptom-conditioned form is not built. Taking the argument keeps the seam open
-        for it; ignoring it keeps this implementation honest about what it actually uses.
+        ``retrieve(unit, family, symptom)``); the "full"/"exact"/"off" branches read none
+        of it -- retrieval keys on the CLASS -- ``(unit_id, family)`` -- not on the source
+        text. Symptom mode is the branch that finally uses it: see below.
+
+        *Symptom mode (Phase-C spec §4.3) is the ONE disclosed exception to this module's
+        "no extra sandbox executions" invariant* -- see the module docstring. It runs a
+        single UNCHARGED probe of the visible suite against ``unit``'s own (mutated, still
+        broken) source, deterministic and identical in inputs and outcome to the free
+        symptom run the search itself performs, so retrieval can be conditioned on the same
+        symptom text the prompt's own ``## Symptom`` section will show. The probe is counted
+        in ``uncharged_symptom_runs`` (persisted to ``probe_log_path``, if configured) and
+        never touches ``executions_charged`` -- it happens here, entirely outside
+        ``attempt_task``, before any budget meter for this task exists.
         """
         # The A_sleep_nomem ablation ("off") NEVER consults the store: the block is
         # structurally absent, not "retrieved and empty", so the prompt is byte-for-byte the
         # S2 prompt and item_ids stamp () -- the honest "no memory was offered" record. The
         # organ is still WRITTEN (after_task is unchanged); only the read side is severed.
         # A_mem_exactonly ("exact") consults the store but restricts it to the exact class --
-        # see ``exact_only`` on ``crucible.memory.retrieve.retrieve``.
-        if self._retrieval != "off":
+        # see ``exact_only`` on ``crucible.memory.retrieve.retrieve``. A_symmem ("symptom")
+        # runs the uncharged probe above and reads cross-unit via symptom similarity.
+        if self._retrieval == "symptom":
+            symptom = run(unit, unit.module_src, None)     # UNCHARGED driver-side probe:
+            self.uncharged_symptom_runs += 1                # deterministic, byte-identical to
+            _persist_probe_count(self._probe_log_path,       # the search's own free symptom
+                                 self.uncharged_symptom_runs) # run; never executions_charged
+            block = retrieve_symptom(
+                self._store, unit.module_src, taskspec.unit_id, taskspec.family,
+                render_symptom(symptom), tau=symmatch.TAU)
+        elif self._retrieval != "off":
             block = retrieve(self._store, taskspec.unit_id, taskspec.family,
                              exact_only=(self._retrieval == "exact"))
         else:
@@ -523,26 +583,57 @@ class FullHooks:
 
 
 class MemHooks:
-    """B_mem's hooks: the store and NOTHING else (Phase-B prereg §3).
+    """B_mem/B_symmem's hooks: the store and NOTHING else (Phase-B prereg §3; Phase-C
+    prereg §4.2/§4.3 for the symptom mode).
 
-    The one Phase-B treatment is the memory block in the prompt. Everything else that
-    FullHooks carries is deliberately ABSENT: ``task_confidence()`` returns ``None`` so
-    the search runs the S2 structural status rule the frozen B_search control ran (the
-    driver threads the return unconditionally -- None IS the S2 configuration, see
-    ``attempt_task``); there is no value model to train (the caller passes
-    ``ConstantValue``, as B_search's run did) and no calibrator to observe. Episodes are
-    written for every attempt and lessons distilled from verified ones -- the same two
-    gates as FullHooks.after_task -- because the store must FILL during the run for
-    retrieval to have anything to say by phase 2.
+    The one treatment is the memory block in the prompt. Everything else that FullHooks
+    carries is deliberately ABSENT: ``task_confidence()`` returns ``None`` so the search
+    runs the S2 structural status rule the frozen B_search control ran (the driver threads
+    the return unconditionally -- None IS the S2 configuration, see ``attempt_task``);
+    there is no value model to train (the caller passes ``ConstantValue``, as B_search's
+    run did) and no calibrator to observe. Episodes are written for every attempt and
+    lessons distilled from verified ones -- the same two gates as FullHooks.after_task --
+    because the store must FILL during the run for retrieval to have anything to say by
+    phase 2.
+
+    ``retrieval`` selects the read policy ``before_task`` applies -- ``"full"`` (B_mem's
+    class-exact-falling-back-to-family-wide read, :func:`~crucible.memory.retrieve.retrieve`)
+    or ``"symptom"`` (B_symmem's class-exact-then-cross-unit-symptom-similarity read,
+    :func:`~crucible.memory.retrieve.retrieve_symptom`, plus the disclosed uncharged probe
+    -- see the module docstring). Mirrors ``FullHooks``' dispatch (same shape, same
+    ``uncharged_symptom_runs``/``probe_log_path`` discipline) so the two hook classes read
+    as one policy, wired twice.
     """
 
-    def __init__(self, store: MemoryStore, *, log=print) -> None:
+    def __init__(self, store: MemoryStore, *, retrieval: str = "full",
+                 probe_log_path: Path | None = None, log=print) -> None:
         self._store = store
+        self._retrieval = retrieval
+        self._probe_log_path = probe_log_path
         self._log = log
         self._pending: tuple[str, tuple[str, ...]] | None = None   # (task_key, item_ids)
+        self.uncharged_symptom_runs: int = 0
+        """See ``FullHooks.uncharged_symptom_runs`` -- same counter, same persistence via
+        :func:`_persist_probe_count`, this class's own copy because the two hook classes
+        never share instance state."""
+
+    @property
+    def retrieval(self) -> str:
+        """Which retrieval policy ``before_task`` applies: ``"full"`` or ``"symptom"``."""
+        return self._retrieval
 
     def before_task(self, unit: Unit, taskspec: TaskSpec) -> str | None:
-        block = retrieve(self._store, taskspec.unit_id, taskspec.family)
+        # Mirrors FullHooks.before_task's symptom branch -- see that method's docstring and
+        # the module docstring's disclosed exception for the uncharged-probe discipline.
+        if self._retrieval == "symptom":
+            symptom = run(unit, unit.module_src, None)     # UNCHARGED driver-side probe
+            self.uncharged_symptom_runs += 1
+            _persist_probe_count(self._probe_log_path, self.uncharged_symptom_runs)
+            block = retrieve_symptom(
+                self._store, unit.module_src, taskspec.unit_id, taskspec.family,
+                render_symptom(symptom), tau=symmatch.TAU)
+        else:
+            block = retrieve(self._store, taskspec.unit_id, taskspec.family)
         self._pending = (taskspec.task_key, block.item_ids)
         return block.block
 
@@ -810,12 +901,14 @@ def build_full_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *, base_ur
     return FullHooks(store, value, Calibrator(), controller, registry,
                      sleep_records_path=arm_dir / SLEEP_RECORDS_FILE,
                      proposer=arm_proposer, retrieval=retrieval,
-                     sleep_enabled=sleep_enabled, log=log)
+                     sleep_enabled=sleep_enabled,
+                     probe_log_path=arm_dir / SYMPTOM_PROBE_LOG_FILE, log=log)
 
 
 def build_mem_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *,
-                    memory_db: Path | None = None, log=print) -> MemHooks:
-    """Wire B_mem's organ ALONE: no registry, no controller, no proposer wrap.
+                    memory_db: Path | None = None, retrieval: str = "full",
+                    log=print) -> MemHooks:
+    """Wire B_mem/B_symmem's organ ALONE: no registry, no controller, no proposer wrap.
 
     Mirrors ``build_full_hooks``'s store setup ONLY -- the arm_dir, the db path
     (``memory_db`` override else ``arm_dir / MEMORY_DB_FILE``), the store's identity stamp,
@@ -823,6 +916,11 @@ def build_mem_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *,
     LoRA trainer, the vLLM adapter loader, the sleep controller) exists for B_mem: there is
     no sleep loop and no adapter to select, so building any of it would be dead weight that
     invites a future edit to wire it in and quietly turn B_mem into a second A_full.
+
+    ``retrieval`` passes straight through to ``MemHooks`` (``"full"`` for B_mem, ``"symptom"``
+    for B_symmem -- see ``MEM_ARMS``); the probe log always lands at
+    ``arm_dir / SYMPTOM_PROBE_LOG_FILE``, same filename as ``build_full_hooks``, so a
+    post-hoc reader does not need to know which builder produced a given arm's directory.
     """
     arm_dir = Path(out_dir) / cfg.name
     arm_dir.mkdir(parents=True, exist_ok=True)
@@ -833,4 +931,5 @@ def build_mem_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *,
     store.bind_identity(cfg.name, stream_store.read_manifest(Path(stream_dir)).stream_hash)
     _assert_resume_coherent(store, arm_dir)
 
-    return MemHooks(store, log=log)
+    return MemHooks(store, retrieval=retrieval,
+                    probe_log_path=arm_dir / SYMPTOM_PROBE_LOG_FILE, log=log)

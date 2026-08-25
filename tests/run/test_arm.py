@@ -7,6 +7,8 @@ Computing the outcome from the visible report fabricates the experiment's primar
 
 Run WRAPPED (R-T2-6): the attempt touches the sandbox through ``search`` + ``run_hidden``.
 """
+import pytest
+
 from crucible.run import arm
 from crucible.run.arm import ARMS, ArmConfig, attempt_task
 from crucible.run.types import Candidate
@@ -161,3 +163,36 @@ def test_attempt_task_hands_the_memory_block_to_the_naive_control(monkeypatch):
     result = captured["result"]
     assert result.root_prompt == fake.prompts[0]   # the prompt as SENT, not a reconstruction
     assert result.symptom_failed == ("test_v0",)   # the buggy module fails the one visible test
+
+
+# --- the served-identity guard, both sides -----------------------------------------------
+#
+# S3 relaxed the guard: a proposer may serve the arm's model OR declare ``base_model ==
+# cfg.model`` (an adapter ON the arm's own base -- vLLM routes a runtime LoRA by model name,
+# so an arm running its own accepted adapter legitimately asks for ``adapter_id``). The
+# relaxation must not become a hole: a proposer serving some OTHER checkpoint is still
+# refused, and the ``base_model`` declaration itself is checked where it is minted
+# (``AdapterProposer.__init__``, pinned in tests/run/test_full.py).
+
+def test_attempt_task_refuses_a_proposer_serving_a_foreign_checkpoint():
+    # No ``base_model`` attribute at all: the plain S2 case, and the guard's own raise.
+    fake = FakeProposer("Qwen/Qwen3.5-9B", [CORRECT])
+    with pytest.raises(ValueError) as e:
+        attempt_task(ARMS["A_full"], U, SPEC, fake, ConstantValue())
+    assert "expects model" in str(e.value) and "Qwen/Qwen3.5-9B" in str(e.value)
+
+
+def test_attempt_task_refuses_an_adapter_declared_on_a_DIFFERENT_base():
+    # Declaring the wrong base is not a licence: the guard compares the declaration to THIS
+    # arm's model, so an adapter on the 9B cannot serve the 1.5B arm.
+    fake = FakeProposer("ad-0123456789abcdef", [CORRECT])
+    fake.base_model = "Qwen/Qwen3.5-9B"
+    with pytest.raises(ValueError):
+        attempt_task(ARMS["A_full"], U, SPEC, fake, ConstantValue())
+
+
+def test_attempt_task_accepts_an_adapter_on_the_arms_own_base():
+    fake = FakeProposer("ad-0123456789abcdef", [CORRECT])
+    fake.base_model = ARMS["A_full"].model
+    rec, _execs, _result = attempt_task(ARMS["A_full"], U, SPEC, fake, ConstantValue())
+    assert rec.hidden_pass is True

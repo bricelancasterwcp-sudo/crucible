@@ -112,6 +112,12 @@ class MemoryStore:
         rewrites the stamp, because the rows already in the file were written under the
         stamped identity and no later claim changes that. Idempotent for the matching case,
         so a resumed run re-binds harmlessly.
+
+        An UNSTAMPED db (one written before this method existed, or by a caller that never
+        binds) is ADOPTED by its first binder rather than refused -- there is nothing to
+        disagree with, and refusing would make an S1/S2-era organ unopenable. S3 always
+        creates its own db under ``out_dir/<arm>/``, so adoption is a compatibility path, not
+        a route anyone takes on purpose.
         """
         want = {"arm": arm, "stream_hash": stream_hash}
         rows = dict(self._conn.execute("SELECT key, value FROM meta").fetchall())

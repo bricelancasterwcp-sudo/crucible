@@ -885,3 +885,23 @@ def test_build_full_hooks_resumes_a_coherent_run(stream, tmp_path):
     hooks = build_full_hooks(ARMS["A_full"], stream, tmp_path / "runs", base_url="http://x",
                              value=OnlineValue(), chat=True)
     assert hooks.sleep_threshold == 16
+
+
+def test_adapter_proposer_refuses_a_base_client_that_serves_something_else():
+    """The relaxed guard in ``attempt_task`` trusts ``base_model``; this is where that
+    declaration is EARNED. Minting is the only place a ``base_model`` attribute appears in
+    this codebase, so a wrapper around the wrong checkpoint can never reach the guard.
+
+    MUTATION: drop the constructor check -> this test is the only failure.
+    """
+    wrong_base = FakeProposer("Qwen/Qwen3.5-9B", [CORRECT])
+
+    with pytest.raises(ValueError) as e:
+        AdapterProposer(wrong_base, lambda model: None, "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+    assert "base_model" in str(e.value)
+
+
+def test_adapter_proposer_accepts_a_base_client_that_matches_its_declaration():
+    base = FakeProposer("fake/model", [CORRECT])
+    arm_proposer = AdapterProposer(base, lambda model: None, "fake/model")
+    assert arm_proposer.model == "fake/model" and arm_proposer.adapter_id is None

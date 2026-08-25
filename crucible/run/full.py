@@ -216,7 +216,14 @@ class _Pending:
     """The adapter the proposer was pointed at for THIS attempt (``None`` = base model).
     Snapshotted at selection time and stamped verbatim by ``after_task``: the record's
     adapter lineage and the serving decision are the same value, not two readings of a
-    registry that a sleep could have moved in between."""
+    registry that a sleep could have moved in between.
+
+    Today the snapshot is DEFENCE IN DEPTH rather than a live difference -- the driver only
+    sleeps between tasks, so a fresh ``latest_accepted()`` read in ``after_task`` would agree
+    with it on every run this code can currently produce. It is the snapshot anyway because
+    the agreement is a property of the driver's loop shape, not of this record: the day sleep
+    moves seams (mid-task consolidation, a background trainer), the snapshot is still the
+    honest answer to "what generated this attempt" and the re-read silently is not."""
 
 
 class FullHooks:
@@ -456,12 +463,32 @@ class AdapterProposer:
     still refuses a proposer serving some other checkpoint, while an adapter ON the arm's own
     base is recognised as the arm running its own adapter rather than as a mismatch.
 
+    *That relaxation is only as honest as the declaration, so the declaration is CHECKED where
+    it is minted.* The constructor refuses a base client whose own ``model`` is not
+    ``base_model``: this class is the only thing in the codebase that grows a ``base_model``
+    attribute, so a wrapper around the wrong checkpoint can never reach the guard and claim to
+    be an adapter on the right one. The guard's own raise still stands for everything else
+    (a proposer with no ``base_model`` at all serving a foreign model).
+
     ``select`` is called once per task from ``before_task``; nothing else may point this
     object anywhere, so "what served this task" has exactly one writer.
+
+    *Resuming against a RESTARTED vLLM:* a fresh server has no adapters loaded, so ``select``
+    on a previously-accepted id fails in ``VLLMProposer.__init__``'s ``assert_identity`` with
+    :class:`~crucible.proposer.identity.IdentityMismatch`. That is loud by design -- silently
+    serving the base under an adapter's name is exactly the label lie this class exists to
+    prevent. The operator re-loads the adapter on the server (or starts a fresh ``--out``).
     """
 
     def __init__(self, base_proposer, proposer_for: Callable[[str], object],
                  base_model: str) -> None:
+        served = getattr(base_proposer, "model", None)
+        if served != base_model:
+            raise ValueError(
+                f"AdapterProposer base client serves {served!r} but declares "
+                f"base_model={base_model!r} -- the declaration is what relaxes attempt_task's "
+                f"served-identity guard, so it is checked here, where it is minted"
+            )
         self._base = base_proposer
         self._proposer_for = proposer_for
         self.base_model = base_model

@@ -142,3 +142,66 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
   be chased, not passed.
 - Build ops: `--jobs 8` OOMs `build_units` at any tried cap; the proven recipe is jobs 5-6
   under `MemoryMax=12G` with disk `TMPDIR` (findings §4).
+
+## S3 — memory organ + value + uncertainty + sleep → A_full (2026-08-24, branch `s3-memory`)
+
+### Settled by this slice
+- **The full organ loop exists and runs on the box:** episodic+semantic SQLite store
+  (content-addressed, identity-bound to arm+stream), mechanical-template distillation
+  (verified-only), budgeted retrieval with citation refalsification, online logistic value
+  (12-dim, family one-hot, fail-loud on unknown family), PAVA isotonic calibration per
+  provenance class {hit,nohit}×{p1,p2} with the 0.2 calibrated abstain gate, and the sleep
+  cycle (cumulative verified-episode SFT from BASE, rank-16 LoRA, holdout slice gate
+  ACCEPT_MAX_DROP=1, runtime hot-load into the live server).
+- **Ops smoke PASSED** (docs/findings/S3-smoke.md): 30/30 tasks, 4 sleeps
+  train→gate→accept→hot-load in ONE process beside the server; refalsify 40/40; lens
+  carries the adapter lineage; value misses 0; memory store 30 epi / 17 sem (= hidden-pass
+  count) / 0 proc.
+- **16 GiB co-residency sizing** (bought with three distinct OOMs): serve util 0.45
+  (≈8.1 GiB actual hold) + trainer batch 1 + grad-accum 8 + checkpointing +
+  expandable-segments (≈5.2 GiB peak) fits; TRL's default batch of 8 alone breaks it, and
+  a trainer that leaks its base model breaks sleep N+1 (try/finally release, ast-pinned).
+- A_noMem byte-identity preserved: memory/confidence kwargs absent (not None) on the
+  hooks=None path; golden literal prompts + 500-case git-extracted S2 comparison.
+
+### Deferred, with rulings
+- **Pre-reg §3/§5 sleep+uncertainty text needs dated amendment footnotes BEFORE
+  `prereg-lock-a`** (§12 protocol: date + old value). The approved S3 spec supersedes:
+  (1) "sleep every M=50 tasks" → episode threshold N=16 (R-S3-3); (2) "stop-serve →
+  train → reload; cannot co-reside" → live co-residency + runtime hot-swap (proven,
+  findings §2); (3) "fixed 20-unit excluded-units regression slice, Δ_min" →
+  min(12, solved) solved-task holdout, ACCEPT_MAX_DROP=1; (4) "crepes Mondrian conformal,
+  abstain on empty set at α=0.1, categories by verification state" → stdlib PAVA isotonic
+  per provenance class, abstain at calibrated p ≤ 0.2. Controller did NOT edit the
+  pre-reg (Task 13 instruction: surface, don't edit); Brice applies or delegates the
+  footnotes before lock.
+- **Procedural store exists, unpopulated** (R-S3-1): schema + table shipped, no writer;
+  populate only if a future slice earns it.
+- **LLM-written distillation variant** unbuilt (R-S3-2 chose mechanical templates);
+  revisit only with evidence templates are the bottleneck.
+- **Exploratory sub-arms** (A_mem−sleep, A_sleep−mem) unrun — prereg marks them
+  non-gating, GPU-time permitting.
+- **N=16 sleep threshold is pinned at lock, not tuned:** the smoke used threshold 4
+  purely to exercise the loop; nothing was tuned against any seen number.
+- **Value/calibrator state does not persist across resume** (S4): a resumed run re-warms
+  from scratch; resume coherence for records/DB/registry IS enforced.
+- **Adapter unload-on-supersede** (S4): superseded adapters stay loaded in the server
+  (~60 MiB each); a long run should unload N−1 when N is accepted.
+- **Refalsification cost grows linearly with the store** (checked 4→8→12→16 in the
+  smoke); acceptable at stream scale, revisit if sleep wall-time becomes material.
+- **Sleep holdout slice is graded on hidden suites** of already-solved tasks — the gate
+  sees information the arm's own submissions could not; acceptable for an accept/reject
+  guard (it gates weights, not scores), noted for the record.
+- `gpu_s` on SleepRecords is always `None` (unmeasured-is-None; training sits behind the
+  Trainer seam). Measure it in S4 if GPU-minutes-per-arm reporting (§3 declared
+  asymmetry) needs the split.
+
+### Process lessons
+- **A synthetic resource smoke understates the real footprint:** the trainer smoke's tiny
+  pairs peaked 4.6 GiB; real episodes (2–6k-char prompts) peaked 6.3 GiB under the same
+  code. Size co-residency against real-shaped data.
+- **The third OOM was invisible to single-cycle testing:** the model leak only bites on
+  sleep N+1 in one process. Ops smokes must run the loop at least twice.
+- Content-addressed adapter ids made cross-attempt determinism visible for free (same
+  episodes → same `ad-…` id across smoke attempts) and turned the server's re-POST 400
+  into a testable idempotent path.

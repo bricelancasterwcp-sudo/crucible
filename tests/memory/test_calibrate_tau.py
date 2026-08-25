@@ -11,7 +11,8 @@ expected percentile independently, using the same ``symmatch`` functions the scr
 itself calls, and asserts byte-for-byte equality against ``result["tau_p95_unrelated"]``).
 
 Fixtures follow ``tests/memory/test_retrieve.py``'s local ``_episode``/``_semantic``
-helper pattern. Two units x two families, one DB, four (episode, lesson) pairs total:
+helper pattern. Two units x two families, one DB, three lessons x two episodes = six
+(episode, lesson) pairs total:
 
 - (E1, lesson_self) -- SELF-CITATION (``lesson_self.cited_episode_id == E1.item_id``):
   EXCLUDED. If this exclusion were dropped, the pair would classify as RELATED (same
@@ -23,6 +24,15 @@ helper pattern. Two units x two families, one DB, four (episode, lesson) pairs t
   ("the LESSON side uses its OWN cited episode's symptom... None-safe -> \"\"") for real.
 - (E2, lesson_self) -- UNRELATED (unit AND family both differ).
 - (E2, lesson_orphan) -- UNRELATED (unit AND family both differ).
+- (E1, lesson_partial) and (E2, lesson_partial) -- the IN-BETWEEN zone (review round 1
+  finding): ``lesson_partial`` shares its unit with E2 but its family with E1, so against
+  EACH episode exactly one of {unit, family} differs, not both -- neither the "both
+  differ" unrelated rule nor the ``class_id`` related rule fires, so both pairs must be
+  IGNORED (contribute to neither count). Mutating the unrelated predicate's ``and`` to
+  ``or`` makes both of these pairs count as unrelated instead, moving ``n_unrelated`` from
+  2 to 4 while leaving every other pair's classification unchanged -- so this is the pair
+  that specifically kills that mutant; without it, the ignored zone is never exercised at
+  all and the ``and``/``or`` distinction is invisible to every assertion in this file.
 
 ``unit_src_for`` is a stub dict lookup (the brief's injected-loader seam), never a real
 stream read -- the CLI wiring to ``crucible.stream.store.read_unit`` is exercised only by
@@ -53,6 +63,10 @@ E2_ROOT_PROMPT = "## Module under repair\ndef other(): pass\n\n## Symptom\nzeta_
 # the p95-vs-p50 mutant killable at all (see module docstring).
 LESSON_SELF_DIFF = "-    return 0\n+    return fluxcap_overflow_marker\n# zeta_unrelated_glitch\n"
 LESSON_ORPHAN_DIFF = "-    return 0\n+    return fluxcap_overflow_marker\n"
+# Content is irrelevant to the ignored-zone assertion -- this pair must contribute to
+# NEITHER n_related NOR n_unrelated regardless of its score, so no scoring rationale is
+# needed for this constant the way there is for the two above.
+LESSON_PARTIAL_DIFF = "-    return 0\n+    return partial_zone_marker\n"
 
 UNIT_SRC_MAP = {UNIT_A: UNIT_SRC_A, UNIT_B: UNIT_SRC_B}
 
@@ -100,16 +114,22 @@ def _seed_store(tmp_path):
     lesson_self = _semantic(e1.item_id, unit_id=UNIT_A, family=FAMILY_A, landed_diff=LESSON_SELF_DIFF)
     lesson_orphan = _semantic("ep-external-orphan-001", unit_id=UNIT_A, family=FAMILY_A,
                               landed_diff=LESSON_ORPHAN_DIFF)
+    # In-between zone (review round 1 finding): unit_id matches E2's, family matches E1's
+    # -- against EACH episode exactly one of {unit, family} differs, so both resulting
+    # pairs must be ignored. See module docstring.
+    lesson_partial = _semantic("ep-external-orphan-002", unit_id=UNIT_B, family=FAMILY_A,
+                               landed_diff=LESSON_PARTIAL_DIFF)
     store.write_semantic(lesson_self)
     store.write_semantic(lesson_orphan)
+    store.write_semantic(lesson_partial)
     store.close()
-    return e1, e2, lesson_self, lesson_orphan
+    return e1, e2, lesson_self, lesson_orphan, lesson_partial
 
 
 def _expected_scores():
-    """The exact scores the four pairs must produce, computed with the SAME symmatch
-    functions the script calls -- independent of ``calibrate``'s own glue code, so this
-    is a real cross-check, not a restatement of the implementation."""
+    """The exact scores the three classifiable, non-ignored pairs must produce, computed
+    with the SAME symmatch functions the script calls -- independent of ``calibrate``'s
+    own glue code, so this is a real cross-check, not a restatement of the implementation."""
     q1 = tokenize(query_text(UNIT_SRC_A, symptom_section(E1_ROOT_PROMPT), FAMILY_A))
     q2 = tokenize(query_text(UNIT_SRC_B, symptom_section(E2_ROOT_PROMPT), FAMILY_B))
     # lesson_self's OWN cited episode is E1 -> its symptom is E1's, not "".
@@ -125,7 +145,7 @@ def _expected_scores():
 
 
 def test_calibrate_excludes_self_citation_and_passes_sanity_with_exact_percentile(tmp_path):
-    e1, e2, lesson_self, lesson_orphan = _seed_store(tmp_path)
+    e1, e2, lesson_self, lesson_orphan, lesson_partial = _seed_store(tmp_path)
     db_path = str(tmp_path / "mem.sqlite3")
 
     result = calibrate([db_path], _unit_src_for)
@@ -135,10 +155,14 @@ def test_calibrate_excludes_self_citation_and_passes_sanity_with_exact_percentil
     expected_tau_p50 = statistics.quantiles(sorted(unrelated), n=100)[49]
     expected_median = statistics.median(related)
 
-    # Exact counts: 4 total pairs minus 1 self-citation = 3 classifiable pairs, split
-    # 1 related / 2 unrelated. A missing self-citation exclusion would make
-    # (E1, lesson_self) count as RELATED too (same class as E1) -- n_related would be 2,
-    # not 1 -- so this assertion is the proof the exclusion actually fired.
+    # Exact counts: 6 total pairs (2 episodes x 3 lessons) minus 1 self-citation = 5
+    # classifiable pairs, split 1 related / 2 unrelated / 2 ignored. A missing
+    # self-citation exclusion would make (E1, lesson_self) count as RELATED too (same
+    # class as E1) -- n_related would be 2, not 1. A mutated unrelated predicate
+    # (`and` -> `or`) would pull BOTH (E1, lesson_partial) and (E2, lesson_partial) into
+    # n_unrelated (each has exactly one of {unit, family} differing, which satisfies an
+    # `or` but not the correct `and`), moving n_unrelated from 2 to 4. Both mutants are
+    # therefore visible directly in these two counts, not just in the sanity verdict.
     assert result["n_related"] == 1
     assert result["n_unrelated"] == 2
 
@@ -185,7 +209,7 @@ def test_calibrate_iterates_dbs_in_argv_order_and_lessons_falsified_out(tmp_path
     from crucible.memory.store import MemoryStore
 
     (tmp_path / "db_a").mkdir()
-    e1, e2, lesson_self, lesson_orphan = _seed_store(tmp_path / "db_a")
+    e1, e2, lesson_self, lesson_orphan, lesson_partial = _seed_store(tmp_path / "db_a")
     store_a = MemoryStore(tmp_path / "db_a" / "mem.sqlite3")
     falsified = _semantic("ep-falsified-orphan", unit_id=UNIT_A, family=FAMILY_A,
                           landed_diff=LESSON_ORPHAN_DIFF)

@@ -184,10 +184,17 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
   non-gating, GPU-time permitting.
 - **N=16 sleep threshold is pinned at lock, not tuned:** the smoke used threshold 4
   purely to exercise the loop; nothing was tuned against any seen number.
-- **Value/calibrator state does not persist across resume** (S4): a resumed run re-warms
-  from scratch; resume coherence for records/DB/registry IS enforced.
-- **Adapter unload-on-supersede** (S4): superseded adapters stay loaded in the server
-  (~60 MiB each); a long run should unload N−1 when N is accepted.
+- **Value/calibrator state does not persist across resume**: a resumed run re-warms
+  from scratch; resume coherence for records/DB/registry IS enforced. *S4 note
+  (2026-08-24): removed from the gate's critical path by ruling R-S4-1 (gating runs are
+  never resumed — infra kill = clean rerun); persistence stays deferred for any post-A
+  resumable-run need.*
+- ~~**Adapter unload-on-supersede** (S4): superseded adapters stay loaded in the server
+  (~60 MiB each); a long run should unload N−1 when N is accepted.~~
+  **RESOLVED 2026-08-24 by measurement, nothing built:** 30 adapters registered with ZERO
+  VRAM growth (flat 9360 MiB; vLLM pages them through pre-allocated slots), no slot
+  errors, completion via #30 fine; `/v1/unload_lora_adapter` verified to exist if ever
+  needed. docs/findings/S4-ops.md §1.
 - **Refalsification cost grows linearly with the store** (checked 4→8→12→16 in the
   smoke); acceptable at stream scale, revisit if sleep wall-time becomes material.
 - **Sleep holdout slice is graded on hidden suites** of already-solved tasks — the gate
@@ -198,10 +205,14 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
   episode; on resume the re-attempted task can be served its OWN prior landed module as
   the exemplar (a one-task self-solve). Sub-second window, bounded to one task, admitted
   by the resume-coherence check. S4 fix: exclude the current `task_key`'s own episode
-  from the exemplar pool in `retrieve()`.
-- `gpu_s` on SleepRecords is always `None` (unmeasured-is-None; training sits behind the
+  from the exemplar pool in `retrieve()`. *S4 note (2026-08-24): unreachable
+  in gating runs under ruling R-S4-1 (never resumed); the S4 fix stays deferred for
+  resumable non-gating runs only.*
+- ~~`gpu_s` on SleepRecords is always `None` (unmeasured-is-None; training sits behind the
   Trainer seam). Measure it in S4 if GPU-minutes-per-arm reporting (§3 declared
-  asymmetry) needs the split.
+  asymmetry) needs the split.~~
+  **RESOLVED 2026-08-24 (S4, commit c0f7ae0):** measured as train-call wall-clock via
+  `time.monotonic`, lens named, no-clock pin tightened to monotonic-only.
 - **Retrieval exemplar carries a file-familiarity confound (REAL, pre-registered):** the
   retrieval exemplar hands A_full a prior verified landed module for the same (unit,
   family), so on second-exposure tasks part of any E1 gain is file-familiarity rather than

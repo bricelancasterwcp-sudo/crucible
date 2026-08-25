@@ -91,13 +91,22 @@ class RetrievedBlock:
     item_ids: tuple[str, ...]
 
 
-def retrieve(store: MemoryStore, unit_id: str, family: str) -> RetrievedBlock:
+def retrieve(store: MemoryStore, unit_id: str, family: str, *, exact_only: bool = False) -> RetrievedBlock:
     """See the module docstring for the full policy. Pure function of the store's current
-    contents -- no writes, no clock, so two calls against the same state are equal."""
+    contents -- no writes, no clock, so two calls against the same state are equal.
+
+    ``exact_only`` (Phase-B prereg §3, arm A_mem_exactonly) changes exactly one decision:
+    when the exact-class pool has no live lesson, the eligible-lesson pool is EMPTY instead
+    of the family-wide pool -- a stranger unit gets silence, never a family-wide lesson. The
+    exemplar path (``_pick_exemplar``, already class-exact) is deliberately untouched, so a
+    class with a live exact lesson returns a byte-identical block under both flags.
+    """
     exact = store.semantic_for(unit_id, family)
     live_exact = [item for item in exact if item.falsified_by is None]
     if live_exact:
         eligible = live_exact
+    elif exact_only:
+        eligible = []   # A_mem_exactonly (Phase-B §3): strangers get silence, never family-wide lessons
     else:
         family_pool = store.semantic_family(family)
         eligible = [item for item in family_pool if item.falsified_by is None]

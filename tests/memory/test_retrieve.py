@@ -392,6 +392,35 @@ def test_budget_boundary_kept_at_exactly_4800_dropped_at_4801(tmp_path: Path):
     store_dropped.close()
 
 
+def test_exact_only_gives_a_stranger_silence_not_family_lessons(tmp_path: Path):
+    """Task 3 (Phase-B prereg §3): exact_only severs the family-wide fallback. Same seeding
+    as ``test_family_fallback_used_when_exact_class_is_empty`` -- a family-wide lesson for a
+    different unit -- but under exact_only the stranger unit (no exact-class lesson of its
+    own) must get silence: ``RetrievedBlock(None, ())``, never "" (prereg §3). The full
+    policy on the same store state still falls back to family-wide, confirming the fixture
+    actually exercises the fallback branch this flag disables."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    stranger_unit = UNIT
+    family_only = _semantic("ep-family", unit_id=OTHER_UNIT, family=FAMILY)
+    store.write_semantic(family_only)
+    assert retrieve(store, stranger_unit, FAMILY).block is not None
+    got = retrieve(store, stranger_unit, FAMILY, exact_only=True)
+    assert got.block is None and got.item_ids == ()
+    store.close()
+
+
+def test_exact_only_is_identical_when_an_exact_class_lesson_exists(tmp_path: Path):
+    """Task 3: exact_only changes exactly one decision -- the fallback trigger. When the
+    exact-class pool already has a live lesson, exact_only and the full policy must return
+    byte-identical blocks and item_ids against the same store state (the exemplar path,
+    already class-exact, is untouched)."""
+    store = MemoryStore(tmp_path / "mem.sqlite3")
+    exact = _semantic("ep-exact", unit_id=UNIT, family=FAMILY)
+    store.write_semantic(exact)
+    assert retrieve(store, UNIT, FAMILY, exact_only=True) == retrieve(store, UNIT, FAMILY)
+    store.close()
+
+
 def test_determinism_two_calls_are_equal(tmp_path: Path):
     store = MemoryStore(tmp_path / "mem.sqlite3")
     lesson1 = _semantic("ep-1", last_verified_at="2026-08-24T09:00:00Z", confidence=0.9)

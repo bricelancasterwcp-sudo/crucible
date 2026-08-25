@@ -212,3 +212,20 @@ def test_cli_arm_run_a_nomem_never_constructs_a_memory_store(_stream, tmp_path, 
 def test_cli_arm_run_rejects_an_unknown_arm(_stream, tmp_path):
     from crucible.cli import main
     assert main(["arm", "run", str(_stream), "--arm", "A_nope", "--base-url", "http://x"]) == 2
+
+
+def test_cli_arm_run_b_mem_wires_store_only_hooks(_stream, tmp_path, monkeypatch):
+    """B_mem differs from the frozen B_search by the store ALONE (prereg §3): MemHooks,
+    ConstantValue (never OnlineValue), the plain proposer (never AdapterProposer)."""
+    from crucible.cli import main
+    from crucible.run.full import AdapterProposer, MemHooks
+    from crucible.value.model import ConstantValue
+    seen = {}
+    _stub_run(monkeypatch, seen)
+    rc = main(["arm", "run", str(_stream), "--arm", "B_mem", "--base-url", "http://x",
+               "--out", str(tmp_path / "runs")])
+    assert rc == 0
+    assert isinstance(seen["hooks"], MemHooks)
+    assert isinstance(seen["value"], ConstantValue)
+    assert not isinstance(seen["proposer"], AdapterProposer)
+    assert (tmp_path / "runs" / "B_mem" / "memory.sqlite3").exists()

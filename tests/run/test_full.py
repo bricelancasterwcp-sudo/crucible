@@ -66,6 +66,7 @@ from crucible.run.full import (
     ArmHooks,
     DriverSliceRunner,
     FullHooks,
+    MemHooks,
 )
 from crucible.run.lens import build_lens
 from crucible.run.records import ExecRecord, TaskRecord, read_task_records, write_records
@@ -1049,3 +1050,27 @@ def test_ablation_switches_are_readable_and_default_on(tmp_path):
             _Rig(tmp_path / "b").hooks.sleep_enabled) == (True, True)
     off = _Rig(tmp_path / "c", retrieval="off", sleep_enabled=False).hooks
     assert (off.retrieval_enabled, off.sleep_enabled) == (False, False)
+
+
+def test_mem_hooks_write_episodes_and_verified_lessons_but_never_train(tmp_path):
+    """MemHooks (Phase-B §3): episode per attempt, lesson on verified only, confidence
+    hook is None (the S2 status rule), adapter stamp always None, between_tasks inert."""
+    store = MemoryStore(tmp_path / "memory.sqlite3")
+    hooks = MemHooks(store)
+    assert hooks.task_confidence() is None
+    hooks.before_task(U, SPEC)
+    ids, adapter = hooks.after_task(U, SPEC, _record(), _result(), NOW)
+    assert (ids, adapter) == ((), None)
+    assert len(store.episodes()) == 1 and store.semantic_for(SPEC.unit_id, SPEC.family)
+    spec2 = replace(SPEC, task_key="k2", phase=2, kind="second")
+    assert hooks.before_task(U, spec2) is not None        # the store FILLED and now serves
+    hooks.after_task(U, spec2, _record(hidden_pass=False, status="believed"), _result(), NOW)
+    assert len(store.episodes()) == 2
+    assert len(store.semantic_for(SPEC.unit_id, SPEC.family)) == 1   # no lesson from a failure
+    hooks.between_tasks(["k1"], NOW)                       # must be a no-op, nothing raises
+
+
+def test_mem_hooks_after_task_without_before_task_raises(tmp_path):
+    hooks = MemHooks(MemoryStore(tmp_path / "memory.sqlite3"))
+    with pytest.raises(ValueError, match="without a matching before_task"):
+        hooks.after_task(U, SPEC, _record(), _result(), NOW)

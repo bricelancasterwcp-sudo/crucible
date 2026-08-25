@@ -169,7 +169,7 @@ def _arm_run(a) -> int:
     """
     from crucible.run.arm import ARMS
     from crucible.run.driver import run_arm
-    from crucible.run.full import FULL_FAMILY, build_full_hooks
+    from crucible.run.full import FULL_FAMILY, MEM_ARMS, build_full_hooks
     from crucible.stream import store
     from crucible.value.model import ConstantValue
     if a.arm not in ARMS:
@@ -195,6 +195,9 @@ def _arm_run(a) -> int:
         # Handing run_arm the unwrapped one would leave the arm on the base weights forever
         # while its records still claimed an adapter (review C1).
         proposer = hooks.proposer
+    elif cfg.name in MEM_ARMS:
+        from crucible.run.full import build_mem_hooks
+        hooks = build_mem_hooks(cfg, a.stream_dir, a.out, memory_db=a.memory_db)
     out_path = run_arm(cfg, a.stream_dir, keys, proposer, value, a.out, hooks=hooks)
     print(f"records written to {out_path}"); return 0
 

@@ -141,6 +141,12 @@ rates reads as that mechanism's marginal contribution and nothing else. They are
 ARM NAMES rather than run-time flags on A_full so every record stamps which configuration
 produced it -- a gate record and an ablation record can never be confused by file mixing."""
 
+MEM_ARMS = frozenset({"B_mem"})
+"""The Phase-B arm ``MemHooks`` serves (prereg §3): the store and nothing else -- no value
+model, no calibrator, no sleep. Kept as its own set rather than folded into ``FULL_FAMILY``
+so the CLI gate for "wire the full organ" and "wire the store alone" stay two membership
+checks, never one dict lookup that has to be interpreted two different ways."""
+
 MEMORY_DB_FILE = "memory.sqlite3"
 ADAPTERS_DIR = "adapters"
 ADAPTER_REGISTRY_FILE = "adapters.jsonl"
@@ -516,6 +522,57 @@ class FullHooks:
             fh.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
 
 
+class MemHooks:
+    """B_mem's hooks: the store and NOTHING else (Phase-B prereg §3).
+
+    The one Phase-B treatment is the memory block in the prompt. Everything else that
+    FullHooks carries is deliberately ABSENT: ``task_confidence()`` returns ``None`` so
+    the search runs the S2 structural status rule the frozen B_search control ran (the
+    driver threads the return unconditionally -- None IS the S2 configuration, see
+    ``attempt_task``); there is no value model to train (the caller passes
+    ``ConstantValue``, as B_search's run did) and no calibrator to observe. Episodes are
+    written for every attempt and lessons distilled from verified ones -- the same two
+    gates as FullHooks.after_task -- because the store must FILL during the run for
+    retrieval to have anything to say by phase 2.
+    """
+
+    def __init__(self, store: MemoryStore, *, log=print) -> None:
+        self._store = store
+        self._log = log
+        self._pending: tuple[str, tuple[str, ...]] | None = None   # (task_key, item_ids)
+
+    def before_task(self, unit: Unit, taskspec: TaskSpec) -> str | None:
+        block = retrieve(self._store, taskspec.unit_id, taskspec.family)
+        self._pending = (taskspec.task_key, block.item_ids)
+        return block.block
+
+    def task_confidence(self) -> None:
+        return None                      # S2 status rule -- byte-identical to B_search
+
+    def after_task(self, unit: Unit, taskspec: TaskSpec, record: TaskRecord,
+                   result: SearchResult, now: str) -> tuple[tuple[str, ...], str | None]:
+        pending = self._pending
+        if pending is None or pending[0] != taskspec.task_key:
+            raise ValueError(
+                f"after_task for {taskspec.task_key!r} without a matching before_task "
+                f"(pending={pending[0] if pending else None!r}) -- guessing retrieved_ids "
+                f"would fabricate the record's memory column")
+        self._pending = None
+        episode = build_episode(taskspec, record, result, pending[1], now, record.confidence)
+        self._store.write_episode(episode)
+        if episode.verified and episode.landed_module is not None and result.symptom_failed:
+            spans = (taskspec.span,) if taskspec.span2 is None else (taskspec.span, taskspec.span2)
+            self._store.write_semantic(distill(
+                episode, mutated_src=unit.module_src, spans=spans,
+                flipped_tests=result.symptom_failed, killing_tests=result.symptom_failed,
+                now=now,
+            ))
+        return pending[1], None          # adapter_id is always None: nothing ever trains
+
+    def between_tasks(self, solved_task_keys: list[str], now: str) -> None:
+        return None                      # no sleep, structurally
+
+
 class AdapterProposer:
     """The arm's proposer, re-pointable at whichever adapter the run has ACCEPTED (review C1).
 
@@ -754,3 +811,26 @@ def build_full_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *, base_ur
                      sleep_records_path=arm_dir / SLEEP_RECORDS_FILE,
                      proposer=arm_proposer, retrieval=retrieval,
                      sleep_enabled=sleep_enabled, log=log)
+
+
+def build_mem_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *,
+                    memory_db: Path | None = None, log=print) -> MemHooks:
+    """Wire B_mem's organ ALONE: no registry, no controller, no proposer wrap.
+
+    Mirrors ``build_full_hooks``'s store setup ONLY -- the arm_dir, the db path
+    (``memory_db`` override else ``arm_dir / MEMORY_DB_FILE``), the store's identity stamp,
+    and the resume coherence guard. Nothing else A_full wires (the adapter registry, the
+    LoRA trainer, the vLLM adapter loader, the sleep controller) exists for B_mem: there is
+    no sleep loop and no adapter to select, so building any of it would be dead weight that
+    invites a future edit to wire it in and quietly turn B_mem into a second A_full.
+    """
+    arm_dir = Path(out_dir) / cfg.name
+    arm_dir.mkdir(parents=True, exist_ok=True)
+    db_path = Path(memory_db) if memory_db is not None else arm_dir / MEMORY_DB_FILE
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    store = MemoryStore(db_path)
+    store.bind_identity(cfg.name, stream_store.read_manifest(Path(stream_dir)).stream_hash)
+    _assert_resume_coherent(store, arm_dir)
+
+    return MemHooks(store, log=log)

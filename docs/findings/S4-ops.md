@@ -44,7 +44,12 @@ Rationale: a resumed run would re-warm the value model and calibrator from scrat
 a warm memory/adapter state — a mid-run instrument change nobody pre-registered. This
 ruling also makes the parked crash-window self-exemplar leak (S3 final review M-1)
 unreachable in any gating run, and removes value/calibrator resume persistence from the
-gate's critical path. Mechanical guard: the gate launcher refuses a non-empty out dir.
+gate's critical path. Mechanical guard: `scripts/run_arm_detached.sh` — the ONLY sanctioned way to launch a
+rehearsal or gating run — refuses a non-empty out dir (exit 3, tested live). Boundary
+named honestly: `crucible arm run` invoked directly still permits a coherent resume BY
+DESIGN (smokes and debugging need it); the guard is mechanical at the launcher layer and
+procedural below it, and the gating protocol is "launch through the launcher, nothing
+else".
 
 ## 4. Dress rehearsal (100 tasks, threshold 16)
 

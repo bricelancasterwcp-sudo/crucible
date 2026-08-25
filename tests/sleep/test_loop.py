@@ -711,22 +711,34 @@ def test_loop_module_reads_no_wall_clock():
     # `now` is caller-supplied everywhere in this codebase; a wall-clock read here would
     # be the first step toward a record that cannot be reproduced. The S4 gpu_s amendment
     # (2026-08-24) legitimately measures a DURATION, so `time` is admitted under a tighter
-    # pin: the ONLY attribute of `time` this module may touch is `monotonic` (a duration
-    # source, not a timestamp), and `datetime` stays banned outright.
+    # pin: the ONLY name this module may take from the time module is `monotonic`, through
+    # ANY import form at ANY nesting level (review finding: the first version of this pin
+    # missed `from time import time as x` and `import time as t` aliases, and the pin it
+    # replaced never saw function-level imports at all). `datetime` stays banned outright.
     source = Path(loop.__file__).read_text()
     tree = ast.parse(source)
-    names = set()
-    for node in tree.body:
+    module_aliases = set()   # names that refer to the time MODULE (time, or `import time as t`)
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            names.update(alias.name.split(".")[0] for alias in node.names)
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                assert root != "datetime", f"datetime import in {loop.__file__}"
+                if root == "time":
+                    module_aliases.add(alias.asname or root)
         elif isinstance(node, ast.ImportFrom) and node.module:
-            names.add(node.module.split(".")[0])
-    assert "datetime" not in names, f"datetime import in {loop.__file__}"
-    time_attrs = {
+            root = node.module.split(".")[0]
+            assert root != "datetime", f"datetime import in {loop.__file__}"
+            if root == "time":
+                taken = {a.name for a in node.names}
+                assert taken <= {"monotonic"}, \
+                    f"non-monotonic from-time import in {loop.__file__}: {taken}"
+    attrs = {
         node.attr
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name) and node.value.id == "time"
+        and isinstance(node.value, ast.Name) and node.value.id in module_aliases
     }
-    assert time_attrs <= {"monotonic"}, f"non-monotonic time use in {loop.__file__}: {time_attrs}"
-    assert "monotonic" in time_attrs, "gpu_s measurement (time.monotonic) missing from loop.py"
+    assert attrs <= {"monotonic"}, f"non-monotonic time use in {loop.__file__}: {attrs}"
+    assert module_aliases or attrs, "expected an import of time for the gpu_s measurement"
+    assert "monotonic" in attrs or not module_aliases, \
+        "time imported but monotonic never used -- gpu_s measurement missing?"

@@ -28,8 +28,10 @@ open's rows, not an empty table and not a schema error.
 
 from pathlib import Path
 
+import pytest
+
 from crucible.memory.schema import EpisodicRecord, SemanticItem, content_id
-from crucible.memory.store import MemoryStore
+from crucible.memory.store import MemoryIdentityMismatch, MemoryStore
 
 
 def _episode(task_key: str, arm: str, unit_id: str = "X/0", family: str = "ARITH", *,
@@ -222,3 +224,42 @@ def test_write_procedural_method_does_not_exist(tmp_path: Path):
     store = MemoryStore(tmp_path / "mem.sqlite3")
     assert not hasattr(store, "write_procedural")
     store.close()
+
+
+# --- S3 review I3b: the db knows whose it is ---------------------------------------------
+#
+# "Arms never share memory" (spec S2) is only true if the FILE remembers which arm and which
+# stream it belongs to. Pointing --memory-db at another run's organ would otherwise mix two
+# experiments' memories into one run's prompts and SFT set, leaving no trace in any record.
+
+def test_bind_identity_stamps_a_fresh_db_and_is_idempotent(tmp_path):
+    store = MemoryStore(tmp_path / "m.sqlite3")
+
+    store.bind_identity("A_full", "abc123")
+    store.bind_identity("A_full", "abc123")          # a resumed run re-binds harmlessly
+
+    assert store.identity() == {"arm": "A_full", "stream_hash": "abc123"}
+
+
+def test_bind_identity_refuses_another_arms_db(tmp_path):
+    path = tmp_path / "m.sqlite3"
+    MemoryStore(path).bind_identity("A_full", "abc123")
+
+    with pytest.raises(MemoryIdentityMismatch) as e:
+        MemoryStore(path).bind_identity("A_noMem", "abc123")
+    assert "A_full" in str(e.value) and "A_noMem" in str(e.value)
+
+
+def test_bind_identity_refuses_another_streams_db(tmp_path):
+    path = tmp_path / "m.sqlite3"
+    MemoryStore(path).bind_identity("A_full", "abc123")
+
+    with pytest.raises(MemoryIdentityMismatch):
+        MemoryStore(path).bind_identity("A_full", "def456")
+
+
+def test_an_unbound_db_has_no_identity_and_still_works(tmp_path):
+    # Binding is opt-in: every S1/S2-era caller opens a store without it.
+    store = MemoryStore(tmp_path / "m.sqlite3")
+    assert store.identity() == {}
+    assert store.episodes() == []

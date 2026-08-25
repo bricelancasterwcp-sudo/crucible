@@ -142,7 +142,9 @@ def attempt_task(cfg: ArmConfig, unit: Unit, taskspec: TaskSpec, proposer, value
     THE OUTCOME via :func:`run_hidden` -- the driver-side hidden oracle, never charged, never
     seen by the agent. ``hidden_pass`` is the hidden report's ``all_passed`` when it produced
     a verdict, else ``None`` (an infra failure is "not measured", never a fail). The proposer
-    must be serving the arm's declared model, or the attempt is not the one configured.
+    must be serving the arm's declared model -- or an adapter trained on it, which a proposer
+    declares by carrying ``base_model`` (see the guard's own comment) -- or the attempt is not
+    the one configured.
 
     ``memory`` is the S3 retrieved-memory block, passed straight down to the search (or to the
     single-shot control). ``None`` -- the default, and what A_noMem and the B arms pass -- makes
@@ -164,9 +166,16 @@ def attempt_task(cfg: ArmConfig, unit: Unit, taskspec: TaskSpec, proposer, value
     travels out with the record it summarises. S2 callers unpack the first two and are
     otherwise unaffected.
     """
-    if getattr(proposer, "model", None) != cfg.model:
-        raise ValueError(f"arm {cfg.name!r} expects model {cfg.model!r}, "
-                         f"proposer serves {getattr(proposer, 'model', None)!r}")
+    served = getattr(proposer, "model", None)
+    # The guard accepts the arm's own checkpoint, or a proposer that DECLARES itself an
+    # adapter on that checkpoint (``base_model``). vLLM routes a runtime-loaded LoRA by model
+    # NAME, so an arm running its own accepted adapter legitimately asks for ``adapter_id``
+    # rather than the base -- see ``crucible.run.full.AdapterProposer``. Anything serving some
+    # OTHER base is still refused: the point of the guard is that an arm cannot silently run a
+    # different checkpoint, not that its model string can never change.
+    if served != cfg.model and getattr(proposer, "base_model", None) != cfg.model:
+        raise ValueError(f"arm {cfg.name!r} expects model {cfg.model!r} (or an adapter on "
+                         f"it), proposer serves {served!r}")
     started = time.monotonic()
     if cfg.use_search:
         result = search(unit, proposer, value, seed=cfg.seed, k=cfg.k, width=cfg.width,

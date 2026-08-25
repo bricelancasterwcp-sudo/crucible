@@ -13,7 +13,7 @@ Three things are load-bearing.
 the unit with its correct ``module_src`` plus the visible/hidden test sources; the bug lives
 in the mutant's ``mutated_src`` (``read_mutant``). :func:`attempt_task`/``search`` open with a
 free run of ``unit.module_src`` to learn the symptom and put that same source in the repair
-prompt -- so the module the agent sees must be the mutant's. ``_mutated_unit`` therefore
+prompt -- so the module the agent sees must be the mutant's. ``mutated_unit`` therefore
 replaces just ``module_src`` with ``mutant.mutated_src`` and keeps everything else (the tests,
 the module name, the entry point) from the canonical unit. Feeding the canonical source would
 ask the agent to repair code that is already correct -- there would be no bug -- which
@@ -60,6 +60,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from crucible.memory.schema import episode_verified
 from crucible.run.arm import ArmConfig, attempt_task
 from crucible.run.records import (EXEC_RECORDS_FILE, TASK_RECORDS_FILE, ExecRecord,
                                   read_task_records, write_records)
@@ -86,7 +87,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime(ISO_UTC)
 
 
-def _mutated_unit(stream_dir: Path, task: TaskSpec) -> Unit:
+def mutated_unit(stream_dir: Path, task: TaskSpec) -> Unit:
     """The per-task unit the agent repairs: the canonical unit with the MUTANT's buggy module.
 
     ``read_unit`` gives the correct module plus the visible/hidden tests; ``read_mutant``
@@ -149,8 +150,10 @@ def run_arm(cfg: ArmConfig, stream_dir: Path, task_keys: list[str], proposer, va
     * the stamp is applied BEFORE the write, so what is on disk is the final record and a
       resumed run never has to re-stamp;
     * ``solved_task_keys`` is recomputed from the accumulated records each time, so it counts
-      the tasks this run has actually verified (``hidden_pass is True`` -- an unmeasured
-      attempt is NOT solved) INCLUDING the ones a previous, crashed process recorded.
+      the tasks this run has actually verified INCLUDING the ones a previous, crashed process
+      recorded. "Solved" is :func:`~crucible.memory.schema.episode_verified` -- the ONE
+      pre-reg success definition (hidden pass, untampered), the same function the episode's
+      ``verified`` flag and the sleep slice use, so the three can never drift apart.
     """
     stream_dir = Path(stream_dir)
     manifest = store.read_manifest(stream_dir)
@@ -166,7 +169,7 @@ def run_arm(cfg: ArmConfig, stream_dir: Path, task_keys: list[str], proposer, va
         task = by_key.get(task_key)
         if task is None:
             raise KeyError(f"task_key {task_key!r} is not in stream {manifest.stream_hash[:12]}")
-        unit = _mutated_unit(stream_dir, task)
+        unit = mutated_unit(stream_dir, task)
         # hooks=None => the S2 call, argument for argument: BOTH kwargs are ABSENT, not None.
         # With hooks, ``before_task`` runs first (it is what builds the confidence hook the
         # next line reads), so the two are sequenced explicitly rather than by dict-literal
@@ -186,7 +189,8 @@ def run_arm(cfg: ArmConfig, stream_dir: Path, task_keys: list[str], proposer, va
         write_records(out_path, task_recs, exec_recs)     # after every attempt: crash-consistent
         log(f"[{cfg.name}] {i}/{len(task_keys)} {task_key[:12]} hidden_pass={rec.hidden_pass}")
         if hooks is not None:
-            hooks.between_tasks([r.task_key for r in task_recs if r.hidden_pass is True], now)
+            hooks.between_tasks([r.task_key for r in task_recs
+                                 if episode_verified(r.hidden_pass, r.tampered)], now)
 
     _write_done(out_path, cfg, manifest.stream_hash)
     return out_path

@@ -110,7 +110,8 @@ def _stub_run(monkeypatch, seen):
     monkeypatch.setattr(cli, "_proposer_or_none", lambda url, model, chat=False: _NoProposer(model))
 
     def fake_run_arm(cfg, stream_dir, keys, proposer, value, out_dir, *, log=print, hooks=None):
-        seen.update(cfg=cfg, value=value, hooks=hooks, out_dir=out_dir, keys=keys)
+        seen.update(cfg=cfg, value=value, hooks=hooks, out_dir=out_dir, keys=keys,
+                    proposer=proposer)
         return out_dir / cfg.name
 
     monkeypatch.setattr(driver_module, "run_arm", fake_run_arm)
@@ -118,6 +119,8 @@ def _stub_run(monkeypatch, seen):
 
 def test_cli_arm_run_a_full_wires_the_memory_db_and_sleep_threshold(_stream, tmp_path, monkeypatch):
     from crucible.cli import main
+    from crucible.run.arm import ARMS
+    from crucible.run.full import AdapterProposer
     from crucible.value.online import OnlineValue
     seen = {}
     _stub_run(monkeypatch, seen)
@@ -132,6 +135,11 @@ def test_cli_arm_run_a_full_wires_the_memory_db_and_sleep_threshold(_stream, tmp
     assert isinstance(seen["value"], OnlineValue)      # A_full runs value v1, not the constant
     assert db.exists()                                 # the organ was opened where asked
     assert seen["hooks"].sleep_threshold == 4
+    # The driver must generate through the RE-POINTABLE proposer, or an accepted adapter
+    # would never serve a single task while the records still claimed it did (review C1).
+    assert seen["proposer"] is seen["hooks"].proposer
+    assert isinstance(seen["proposer"], AdapterProposer)
+    assert seen["proposer"].base_model == ARMS["A_full"].model
 
 
 def test_cli_arm_run_a_full_defaults_the_memory_db_under_the_arm_dir(_stream, tmp_path, monkeypatch):
@@ -168,6 +176,7 @@ def test_cli_arm_run_a_nomem_never_constructs_a_memory_store(_stream, tmp_path, 
 
     assert rc == 0
     assert seen["hooks"] is None
+    assert seen["proposer"] is not None and not hasattr(seen["proposer"], "base_model")
     assert isinstance(seen["value"], ConstantValue)    # A_noMem keeps v0 (spec S6)
 
 

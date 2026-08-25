@@ -38,6 +38,16 @@ record that shares an existing ``item_id`` overwrites that row in place -- the m
 behind "one episode per (task_key, arm)" and "one lesson per cited_episode_id" that Task
 1's docstring describes as the identity contract, not something this module re-derives.
 
+*The db knows whose it is (S3 review, I3).* A run's organ is scoped to one arm on one
+stream ("arms never share memory", spec §2), and the only way to hold a run to that is for
+the FILE to remember: :meth:`MemoryStore.bind_identity` stamps ``(arm, stream_hash)`` into a
+one-row-per-key ``meta`` table on first use and RAISES
+:class:`MemoryIdentityMismatch` if a later open disagrees. Without it, pointing
+``--memory-db`` at another arm's (or another stream's) organ silently mixes two experiments'
+memories into one run's prompts and SFT set -- a corruption that leaves no trace in any
+record. Binding is opt-in per caller (nothing else in S3 calls it), so a bare
+``MemoryStore(path)`` still behaves exactly as before.
+
 No clock is read anywhere in this module: ``mark_verified``'s timestamp is supplied by
 the caller, matching every other timestamp field in the schema.
 """
@@ -50,6 +60,14 @@ from pathlib import Path
 from .schema import EpisodicRecord, SemanticItem
 
 _TABLES = ("episodic", "semantic", "procedural")
+
+# Not one of _TABLES: a different shape (key/value, not payload rows) and a different job --
+# it says whose db this is, it does not hold memories.
+_CREATE_META_SQL = "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+
+
+class MemoryIdentityMismatch(RuntimeError):
+    """Raised when a db is opened as an arm/stream it was not stamped for."""
 
 # Every table shares this layout (see the module docstring's "payload IS the record").
 # ``verified`` is only ever set from a real field for the episodic table (EpisodicRecord
@@ -83,7 +101,33 @@ class MemoryStore:
         for table in _TABLES:
             self._conn.execute(_CREATE_TABLE_SQL.format(table=table))
             self._conn.execute(_CREATE_INDEX_SQL.format(table=table))
+        self._conn.execute(_CREATE_META_SQL)
         self._conn.commit()
+
+    def bind_identity(self, arm: str, stream_hash: str) -> None:
+        """Stamp ``(arm, stream_hash)`` on a fresh db; raise if this db belongs to another run.
+
+        First call on a db writes both keys. Every later call compares and raises
+        :class:`MemoryIdentityMismatch` naming both sides on any disagreement -- it never
+        rewrites the stamp, because the rows already in the file were written under the
+        stamped identity and no later claim changes that. Idempotent for the matching case,
+        so a resumed run re-binds harmlessly.
+        """
+        want = {"arm": arm, "stream_hash": stream_hash}
+        rows = dict(self._conn.execute("SELECT key, value FROM meta").fetchall())
+        for key, value in want.items():
+            if key in rows and rows[key] != value:
+                raise MemoryIdentityMismatch(
+                    f"memory db is stamped {key}={rows[key]!r} but this run is "
+                    f"{key}={value!r} -- arms never share memory (spec S2)"
+                )
+        self._conn.executemany("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                               sorted(want.items()))
+        self._conn.commit()
+
+    def identity(self) -> dict[str, str]:
+        """The stamped ``{"arm": ..., "stream_hash": ...}``, or ``{}`` on an unbound db."""
+        return dict(self._conn.execute("SELECT key, value FROM meta").fetchall())
 
     def write_episode(self, rec: EpisodicRecord) -> None:
         """INSERT OR REPLACE by ``item_id`` -- a re-write of the same identity overwrites."""

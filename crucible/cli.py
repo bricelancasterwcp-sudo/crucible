@@ -183,8 +183,12 @@ def _arm_run(a) -> int:
         from crucible.value.online import OnlineValue
         value = OnlineValue()
         hooks = build_full_hooks(cfg, a.stream_dir, a.out, base_url=a.base_url, value=value,
-                                 chat=chat, memory_db=a.memory_db,
+                                 chat=chat, proposer=proposer, memory_db=a.memory_db,
                                  sleep_threshold=a.sleep_threshold)
+        # The SAME client, wrapped so an accepted adapter is what the next request asks for.
+        # Handing run_arm the unwrapped one would leave the arm on the base weights forever
+        # while its records still claimed an adapter (review C1).
+        proposer = hooks.proposer
     out_path = run_arm(cfg, a.stream_dir, keys, proposer, value, a.out, hooks=hooks)
     print(f"records written to {out_path}"); return 0
 

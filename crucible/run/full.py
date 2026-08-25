@@ -35,9 +35,10 @@ the calibrator that an infra failure is a repair failure. Both are skipped on ``
 the same None-vs-zero discipline the lens applies to its denominators.
 
 **What travels between the two task-scoped hooks, and why it is guarded.** ``before_task``
-retrieves and remembers the ``(task_key, item_ids, hit, confidence)`` it produced;
+retrieves and remembers the ``(task_key, item_ids, confidence, adapter_id)`` it produced;
 ``after_task`` needs those ids for the episode's ``memory_item_ids`` and for the record's
-``retrieved_ids``, and the attempt itself needs the confidence hook.
+``retrieved_ids``, the attempt itself needs the confidence hook, and the record's
+``adapter_id`` must be the one the proposer was actually pointed at.
 Re-retrieving inside ``after_task`` would be cheap but WRONG: by then the store may hold a
 lesson minted from this very task, so the second read could report items the prompt never
 contained. The pending state is therefore keyed by ``task_key`` and an ``after_task`` that
@@ -59,6 +60,29 @@ place of the structural ``< 0.5`` compare. Rewriting ``status`` here in ``after_
 instead would restate history rather than change a decision, and is not done. The two
 thresholds are deliberately different rules -- see ``crucible.search.loop``'s module
 docstring.
+
+**The arm must actually GENERATE from the accepted adapter (review C1).** vLLM routes a
+runtime-loaded LoRA by MODEL NAME: a request whose ``model`` is the base checkpoint runs the
+base weights no matter what has been loaded. A run that built one proposer for the base and
+kept it forever would therefore train adapters, hot-swap them, stamp ``adapter_id`` on every
+subsequent record -- and never once generate from one, making sleep inert on the measured
+path while the records claimed otherwise. :class:`AdapterProposer` is the fix: ONE proposer
+object for the whole run whose delegate is re-pointed, once per task in ``before_task``, at
+whatever adapter the registry has accepted. The id it selects is snapshotted there and is
+what ``after_task`` stamps -- the stamp and the serving decision read the same value at the
+same instant, so the record cannot claim an adapter the attempt did not use.
+
+**Known S3 limitation: only the ORGAN survives a resume.** The driver is resumable at task
+granularity, and the memory db (episodes, lessons) and the adapter registry are both on disk,
+so they resume with it. The value model's weights and the calibrator's observation history
+are in-process only and restart from scratch -- a resumed A_full run re-learns both from the
+tasks it has left. ``build_full_hooks`` refuses the incoherent case it CAN detect (records
+without their episodes) and stamps the db with its ``(arm, stream_hash)`` so two runs cannot
+share an organ, but it cannot resurrect an untrained scorer. Persisting them is S4 scope
+(``OnlineValue.snapshot``/``restore`` and ``Calibrator.snapshot``/``restore`` already exist
+for record-keeping; nothing writes them yet). The S3 exit smoke runs start-to-finish, so no
+measurement in this slice depends on that gap -- said plainly here rather than left for
+someone to discover from a suspiciously untrained model half-way through a resumed run.
 
 *The calibrator is trained on the RAW score, never on its own output.* The record's
 ``confidence`` for A_full is the CALIBRATED p (the number the status decision used), so the
@@ -82,8 +106,8 @@ from crucible.memory.retrieve import retrieve
 from crucible.memory.schema import EpisodicRecord, content_id, episode_verified
 from crucible.memory.store import MemoryStore
 from crucible.run.arm import ArmConfig, attempt_task
-from crucible.run.driver import _mutated_unit
-from crucible.run.records import TaskRecord
+from crucible.run.driver import mutated_unit
+from crucible.run.records import TASK_RECORDS_FILE, TaskRecord, read_task_records
 from crucible.search.loop import SearchResult, TaskConfidence
 from crucible.sleep.loop import (SLEEP_THRESHOLD_DEFAULT, ServerAdapter, SleepController,
                                  SleepRecord, VllmAdapterLoader)
@@ -184,13 +208,15 @@ class _Pending:
 
     task_key: str
     item_ids: tuple[str, ...]
-    hit: bool
-    """Whether anything was retrieved. Kept beside ``confidence`` (whose ``cls`` already
-    encodes it) because it is the value the VALUE MODEL was given as its retrieval-hit
-    feature, and a record of what was fed to each organ is worth more than one derived
-    field."""
-
     confidence: _TaskConfidence
+    """The task's calibration hook. Its ``cls`` encodes the retrieval hit, so the hit is not
+    stored a second time -- one place to read it from, nothing to drift."""
+
+    adapter_id: str | None
+    """The adapter the proposer was pointed at for THIS attempt (``None`` = base model).
+    Snapshotted at selection time and stamped verbatim by ``after_task``: the record's
+    adapter lineage and the serving decision are the same value, not two readings of a
+    registry that a sleep could have moved in between."""
 
 
 class FullHooks:
@@ -203,21 +229,42 @@ class FullHooks:
     signal, and a ``getattr``-guarded call would hide it. It must also be the SAME object
     the driver passes to ``attempt_task``, or the context ``begin_task`` sets is not the
     context the search's ``score`` calls read.
+
+    ``proposer`` is the :class:`AdapterProposer` the driver generates through -- the same
+    object, so pointing it at an accepted adapter here IS what the next attempt asks the
+    server for. ``None`` (unit tests that drive the hooks directly) means no adapter is ever
+    selected and every record stamps ``adapter_id=None``, which is the honest reading: with
+    no proposer to re-point, nothing served an adapter.
     """
 
     def __init__(self, store: MemoryStore, value: OnlineValue, calibrator: Calibrator,
                  sleep_controller: SleepController, registry: AdapterRegistry, *,
-                 sleep_records_path: Path,
-                 recalibrate_window: int = RECALIBRATE_WINDOW) -> None:
+                 sleep_records_path: Path, proposer: "AdapterProposer | None" = None,
+                 recalibrate_window: int = RECALIBRATE_WINDOW, log=print) -> None:
         self._store = store
         self._value = value
         self._calibrator = calibrator
         self._sleep = sleep_controller
+        self._proposer = proposer
+        self._log = log
         self._registry = registry
         self._sleep_records_path = Path(sleep_records_path)
         self._recalibrate_window = recalibrate_window
         self._pending: _Pending | None = None
         self.sleep_records: list[SleepRecord] = []
+        self.value_update_misses: int = 0
+        """Measured outcomes that trained NOTHING because the node was never scored.
+
+        ``OnlineValue.update_by_id`` returns False for an id it has no cached features for --
+        by design, so an upstream bug degrades to a skipped training step instead of a crashed
+        run. Discarding that return would make the degradation invisible: the value model
+        would simply learn less than the record count says it did. Every miss is counted here
+        and logged; the S3 smoke asserts this is 0."""
+
+    @property
+    def proposer(self) -> "AdapterProposer | None":
+        """The re-pointable arm proposer the CALLER must generate through (see C1)."""
+        return self._proposer
 
     @property
     def sleep_threshold(self) -> int:
@@ -241,10 +288,22 @@ class FullHooks:
         block = retrieve(self._store, taskspec.unit_id, taskspec.family)
         hit = block.block is not None
         cls = provenance_class(hit, taskspec.phase)
-        self._pending = _Pending(taskspec.task_key, block.item_ids, hit,
-                                 _TaskConfidence(self._calibrator, cls))
+        self._pending = _Pending(taskspec.task_key, block.item_ids,
+                                 _TaskConfidence(self._calibrator, cls),
+                                 self._select_adapter())
         self._value.begin_task(taskspec.family, hit)
         return block.block
+
+    def _select_adapter(self) -> str | None:
+        """Point the arm's proposer at the latest ACCEPTED adapter; return what it selected.
+
+        This is the whole of "the arm runs its adapter": the returned id is both what the
+        next generate request carries and what the record is stamped with (review C1). Read
+        once, here, so a sleep firing later in the same task cannot make the two disagree.
+        """
+        if self._proposer is None:
+            return None
+        return self._proposer.select(self._registry.latest_accepted())
 
     def task_confidence(self) -> _TaskConfidence:
         """The calibration hook ``before_task`` just built -- the driver threads it into the
@@ -265,10 +324,9 @@ class FullHooks:
         re-decides either.
 
         Returns ``(retrieved_ids, adapter_id)`` for the driver to stamp. ``adapter_id`` is
-        the registry's latest ACCEPTED adapter, read now rather than at ``before_task``:
-        sleep only ever fires BETWEEN tasks, so what is accepted at the end of an attempt is
-        what served it, and reading it here also covers a resumed run whose adapter was
-        accepted by an earlier process.
+        the id ``before_task`` actually pointed the proposer at -- not a fresh read of the
+        registry -- so the record names the adapter that GENERATED this attempt and nothing
+        else (review C1).
 
         The lesson's ``flipped_tests`` are ``result.symptom_failed`` -- the visible tests
         that were failing BEFORE the fix. A verified fix passes the whole visible suite, so
@@ -289,13 +347,19 @@ class FullHooks:
         self._pending = None
 
         cls = pending.confidence.cls
-        # The record's confidence IS the calibrated p when the search used the hook; the raw
-        # score it came from survives only on the closure. Fall back to the record only when
-        # nothing calibrated (no search ran through the hook) -- then the two are the same
-        # number and the fallback is exact, not a guess.
+        # The record's confidence IS the calibrated p, so the raw score it was mapped from
+        # survives ONLY on the closure. There is no fallback to the record here (review I5):
+        # `record.confidence` would be the calibrator's own OUTPUT, and training the isotonic
+        # map on its output drifts it toward the identity a little more every task. A missing
+        # raw means the hook never reached the attempt -- which also means the arm silently
+        # ran the uncalibrated abstain rule -- so it fails loudly instead.
         raw = pending.confidence.raw
         if raw is None:
-            raw = record.confidence
+            raise ValueError(
+                f"no raw value score for {taskspec.task_key!r}: the confidence hook never "
+                f"reached the attempt, so this arm ran the uncalibrated abstain rule and "
+                f"there is no honest input to train the calibrator on"
+            )
         episode = self._episode(taskspec, record, result, pending, now, record.confidence)
         self._store.write_episode(episode)
 
@@ -308,10 +372,16 @@ class FullHooks:
             ))
 
         if record.hidden_pass is not None:           # measured, so it can be learned from
-            self._value.update_by_id(result.best_node_id, record.hidden_pass)
+            if not self._value.update_by_id(result.best_node_id, record.hidden_pass):
+                # Not fatal (an outcome for a node that was never scored trains nothing), but
+                # never silent: counted and logged, and the smoke asserts the count is 0.
+                self.value_update_misses += 1
+                self._log(f"[value] no cached features for node {result.best_node_id} "
+                          f"(task {taskspec.task_key}): outcome not trained on "
+                          f"(misses={self.value_update_misses})")
             self._calibrator.observe(raw, cls, record.hidden_pass)
 
-        return pending.item_ids, self._registry.latest_accepted()
+        return pending.item_ids, pending.adapter_id
 
     def between_tasks(self, solved_task_keys: list[str], now: str) -> None:
         """Let sleep fire if enough verified episodes have landed; recalibrate on an accept.
@@ -370,6 +440,59 @@ class FullHooks:
             fh.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
 
 
+class AdapterProposer:
+    """The arm's proposer, re-pointable at whichever adapter the run has ACCEPTED (review C1).
+
+    vLLM serves a runtime-loaded LoRA under its own model name, so "the arm is running the
+    adapter" means literally "the generate request carries ``model=<adapter_id>``". This
+    wrapper owns that choice for the measured path: :meth:`select` swaps the delegate (and
+    therefore ``self.model``, which IS what the next request will ask for), and clients are
+    built once per adapter and cached -- a run with three accepted adapters builds three, not
+    one per task.
+
+    ``base_model`` is the arm's frozen base checkpoint and never changes.
+    :func:`crucible.run.arm.attempt_task`'s served-identity guard accepts a proposer whose
+    ``model`` is the arm's model OR one that declares this ``base_model`` -- so the guard
+    still refuses a proposer serving some other checkpoint, while an adapter ON the arm's own
+    base is recognised as the arm running its own adapter rather than as a mismatch.
+
+    ``select`` is called once per task from ``before_task``; nothing else may point this
+    object anywhere, so "what served this task" has exactly one writer.
+    """
+
+    def __init__(self, base_proposer, proposer_for: Callable[[str], object],
+                 base_model: str) -> None:
+        self._base = base_proposer
+        self._proposer_for = proposer_for
+        self.base_model = base_model
+        self._cache: dict[str, object] = {}
+        self._inner = base_proposer
+        self.model = getattr(base_proposer, "model", base_model)
+        self.adapter_id: str | None = None
+
+    def select(self, adapter_id: str | None) -> str | None:
+        """Point the next generate calls at ``adapter_id`` (``None`` = the base model).
+
+        Returns the id actually selected, which the caller stamps on the record. Building the
+        client asserts the server really advertises that adapter (``VLLMProposer.__init__`` ->
+        ``assert_identity``), so an adapter the server never loaded fails HERE, loudly, rather
+        than silently serving the base weights under an adapter's name in the records.
+        """
+        if adapter_id is None:
+            self._inner = self._base
+        else:
+            if adapter_id not in self._cache:
+                self._cache[adapter_id] = self._proposer_for(adapter_id)
+            self._inner = self._cache[adapter_id]
+        self.adapter_id = adapter_id
+        self.model = getattr(self._inner, "model", self.base_model)
+        return adapter_id
+
+    def generate(self, prompt: str, *, n: int, seed: int, **kw):
+        """Delegate to whichever client :meth:`select` last chose."""
+        return self._inner.generate(prompt, n=n, seed=seed, **kw)
+
+
 class _GreedyProposer:
     """A proposer wrapper that forces ``temperature=0.0`` -- the regression slice's K=1 GREEDY.
 
@@ -392,7 +515,7 @@ class _GreedyProposer:
 class DriverSliceRunner:
     """The real :class:`~crucible.sleep.loop.SliceRunner`: re-attempt solved tasks under an adapter.
 
-    For each key: reload the unit + mutant through the driver's own ``_mutated_unit`` (reused,
+    For each key: reload the unit + mutant through the driver's own ``mutated_unit`` (reused,
     not reimplemented, so the slice repairs byte-for-byte the module the arm did), then run a
     SINGLE-SHOT greedy attempt -- one prompt, one candidate, no refinement -- and count the
     ones whose HIDDEN suite passes. "Solved" therefore means the same thing on the slice as it
@@ -442,9 +565,11 @@ class DriverSliceRunner:
             # v0's ConstantValue, never the run's own scorer: the gate is a measurement, and
             # scoring its nodes into the live value model would let sleep-internal work leak
             # into the model the ARM's search consults.
-            record, _execs, _result = attempt_task(cfg, _mutated_unit(self._stream_dir, task),
+            record, _execs, _result = attempt_task(cfg, mutated_unit(self._stream_dir, task),
                                                    task, proposer, ConstantValue())
-            solved += 1 if record.hidden_pass is True else 0
+            # The ONE success definition, shared with the driver's solved list and the
+            # episode's own ``verified`` flag -- never a re-spelling of it here.
+            solved += 1 if episode_verified(record.hidden_pass, record.tampered) else 0
         return solved
 
     def _tasks(self) -> dict[str, TaskSpec]:
@@ -454,16 +579,53 @@ class DriverSliceRunner:
         return self._by_key
 
 
+def _assert_resume_coherent(store: MemoryStore, arm_dir: Path) -> None:
+    """Refuse a resume whose records and organ disagree (review I3a).
+
+    The driver resumes from ``task_records.jsonl`` and skips every task already in it; the
+    organ resumes from the memory db. If the db holds FEWER episodes than there are prior
+    records, some attempts have records but no memory of themselves -- the run would carry on
+    with lessons and an SFT set missing exactly those tasks, and nothing downstream could tell
+    that from a run where they had simply failed. Both numbers are named in the message
+    because "which one is stale" is the operator's next question. More episodes than records
+    is not an error: the db legitimately accumulates one episode per attempt while a partially
+    written record file is always a prefix of them.
+    """
+    records_path = arm_dir / TASK_RECORDS_FILE
+    if not records_path.exists():
+        return
+    n_records = len(read_task_records(arm_dir))
+    n_episodes = len(store.episodes())
+    if n_episodes < n_records:
+        raise ValueError(
+            f"resume is incoherent: {arm_dir} holds {n_records} task record(s) but the "
+            f"memory db holds {n_episodes} episode(s) -- records and the organ must resume "
+            f"together (a fresh --memory-db against an existing run, or the reverse)"
+        )
+
+
 def build_full_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *, base_url: str,
-                     value: OnlineValue, chat: bool, memory_db: Path | None = None,
-                     sleep_threshold: int = SLEEP_THRESHOLD_DEFAULT) -> FullHooks:
+                     value: OnlineValue, chat: bool, proposer=None,
+                     memory_db: Path | None = None,
+                     sleep_threshold: int = SLEEP_THRESHOLD_DEFAULT, log=print) -> FullHooks:
     """Wire A_full's LIVE organs: memory db, calibrator, LoRA trainer, vLLM loader, slice.
 
     Everything lands under ``out_dir/<cfg.name>/`` (``memory_db`` overrides only the organ's
-    path, per ``--memory-db``). The proposer for the regression slice is constructed PER
-    ADAPTER, because vLLM serves a runtime-loaded LoRA under its own model name: the slice
-    must ask for ``adapter_id``, not for the base model, or it would measure the base twice
-    and accept every candidate.
+    path, per ``--memory-db``). Proposers are constructed PER MODEL NAME, because vLLM serves
+    a runtime-loaded LoRA under its own name: both the arm (via :class:`AdapterProposer`) and
+    the regression slice must ask for ``adapter_id`` rather than the base, or neither would
+    ever exercise an adapter it just trained.
+
+    ``proposer`` is the base-model client the caller already built; it is wrapped and handed
+    back as ``hooks.proposer``, which is what the caller must give ``run_arm`` -- passing the
+    unwrapped client instead would leave the arm permanently on the base weights. ``None``
+    (tests that never generate) leaves the wrapper absent and every record stamps no adapter.
+
+    Two resume guards run before anything is wired: the record/episode coherence check
+    (:func:`_assert_resume_coherent`) and the db's own ``(arm, stream_hash)`` stamp
+    (:meth:`~crucible.memory.store.MemoryStore.bind_identity`), which is what stops one arm's
+    organ from being pointed at another's run. What CANNOT be guarded -- the value model and
+    calibrator restarting untrained -- is documented in the module docstring.
     """
     from crucible.proposer.client import VLLMProposer          # local: the live serving path
 
@@ -473,17 +635,23 @@ def build_full_hooks(cfg: ArmConfig, stream_dir: Path, out_dir: Path, *, base_ur
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     store = MemoryStore(db_path)
+    store.bind_identity(cfg.name, stream_store.read_manifest(Path(stream_dir)).stream_hash)
+    _assert_resume_coherent(store, arm_dir)
+
     registry = AdapterRegistry(arm_dir / ADAPTER_REGISTRY_FILE)
     adapters_dir = arm_dir / ADAPTERS_DIR
     server = VllmAdapterLoader(base_url)
+    proposer_for = lambda model: VLLMProposer(base_url, model, chat=chat)   # noqa: E731
     slice_runner = DriverSliceRunner(
-        cfg, stream_dir, server=server, adapters_dir=adapters_dir,
-        proposer_for=lambda model: VLLMProposer(base_url, model, chat=chat),
+        cfg, stream_dir, server=server, adapters_dir=adapters_dir, proposer_for=proposer_for,
     )
     controller = SleepController(
         store, LoraTrainer(), server, slice_runner, registry,
         unit_loader=lambda unit_id: stream_store.read_unit(Path(stream_dir), unit_id),
         adapters_dir=adapters_dir, threshold=sleep_threshold, seed=cfg.seed,
     )
+    arm_proposer = (None if proposer is None
+                    else AdapterProposer(proposer, proposer_for, cfg.model))
     return FullHooks(store, value, Calibrator(), controller, registry,
-                     sleep_records_path=arm_dir / SLEEP_RECORDS_FILE)
+                     sleep_records_path=arm_dir / SLEEP_RECORDS_FILE,
+                     proposer=arm_proposer, log=log)

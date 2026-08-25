@@ -41,3 +41,24 @@ def test_probe_unknown_server_raises():
     with pytest.raises(IdentityMismatch):
         probe(url)
     srv.shutdown()
+
+def test_probe_lists_every_advertised_model_id():
+    # vLLM with a runtime LoRA loaded: the BASE is first, the adapter after.
+    srv, url = _serve({"/v1/models": {"data": [{"id": "Qwen/Qwen2.5-Coder-1.5B-Instruct"},
+                                               {"id": "ad-0123456789abcdef"}]}})
+    ident = probe(url)
+    assert ident.model == "Qwen/Qwen2.5-Coder-1.5B-Instruct"        # primary = the base
+    assert ident.models == ("Qwen/Qwen2.5-Coder-1.5B-Instruct", "ad-0123456789abcdef")
+    srv.shutdown()
+
+def test_assert_identity_matches_a_loaded_adapter_not_just_the_first_id():
+    # THE S3 fix: an arm (or the sleep slice) serving an accepted adapter asks for it BY NAME.
+    # Matching only data[0].id raised IdentityMismatch on the first adapter ever trained --
+    # inside maybe_sleep, after the training cost had already been paid.
+    srv, url = _serve({"/v1/models": {"data": [{"id": "Qwen/Qwen2.5-Coder-1.5B-Instruct"},
+                                               {"id": "ad-0123456789abcdef"}]}})
+    assert assert_identity(url, "ad-0123456789abcdef").kind == "vllm"
+    assert assert_identity(url, "Qwen/Qwen2.5-Coder-1.5B-Instruct").kind == "vllm"
+    with pytest.raises(IdentityMismatch):                            # still strict
+        assert_identity(url, "ad-notloadedatall")
+    srv.shutdown()

@@ -165,16 +165,17 @@ Appended at every slice merge: what the slice settled → deferred, with rulings
   hooks=None path; golden literal prompts + 500-case git-extracted S2 comparison.
 
 ### Deferred, with rulings
-- **Pre-reg §3/§5 sleep+uncertainty text needs dated amendment footnotes BEFORE
-  `prereg-lock-a`** (§12 protocol: date + old value). The approved S3 spec supersedes:
-  (1) "sleep every M=50 tasks" → episode threshold N=16 (R-S3-3); (2) "stop-serve →
-  train → reload; cannot co-reside" → live co-residency + runtime hot-swap (proven,
-  findings §2); (3) "fixed 20-unit excluded-units regression slice, Δ_min" →
-  min(12, solved) solved-task holdout, ACCEPT_MAX_DROP=1; (4) "crepes Mondrian conformal,
-  abstain on empty set at α=0.1, categories by verification state" → stdlib PAVA isotonic
-  per provenance class, abstain at calibrated p ≤ 0.2. Controller did NOT edit the
-  pre-reg (Task 13 instruction: surface, don't edit); Brice applies or delegates the
-  footnotes before lock.
+- ~~**Pre-reg §3/§5 sleep+uncertainty text needs dated amendment footnotes BEFORE
+    `prereg-lock-a`** (§12 protocol: date + old value). The approved S3 spec supersedes:
+    (1) "sleep every M=50 tasks" → episode threshold N=16 (R-S3-3); (2) "stop-serve →
+    train → reload; cannot co-reside" → live co-residency + runtime hot-swap (proven,
+    findings §2); (3) "fixed 20-unit excluded-units regression slice, Δ_min" →
+    min(12, solved) solved-task holdout, ACCEPT_MAX_DROP=1; (4) "crepes Mondrian conformal,
+    abstain on empty set at α=0.1, categories by verification state" → stdlib PAVA isotonic
+    per provenance class, abstain at calibrated p ≤ 0.2. Controller did NOT edit the
+    pre-reg (Task 13 instruction: surface, don't edit); Brice applies or delegates the
+    footnotes before lock.~~
+  **RESOLVED 2026-08-24:** amendments A2–A5 footnoted in the pre-reg §3 amendments block (cadence, co-residency, gate slice, uncertainty instrument), with markers on every amended line in §1/§5; authorized by Brice same day.
 - **Procedural store exists, unpopulated** (R-S3-1): schema + table shipped, no writer;
   populate only if a future slice earns it.
 - **LLM-written distillation variant** unbuilt (R-S3-2 chose mechanical templates);

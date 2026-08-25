@@ -89,7 +89,7 @@ SERVE: dict[str, ServeSpec] = {
     ),
     "Qwen/Qwen2.5-Coder-1.5B-Instruct": ServeSpec(
         "Qwen/Qwen2.5-Coder-1.5B-Instruct", "Qwen/Qwen2.5-Coder-1.5B-Instruct",
-        # util 0.6 -> 0.45 (2026-08-25, S3 smoke): A_full's sleep trains a LoRA WHILE this
+        # util 0.6 -> 0.45 (2026-08-24, S3 smoke): A_full's sleep trains a LoRA WHILE this
         # server runs; at 0.6 the server holds ~9.8 GiB and the trainer's ~4.9 GiB peak
         # OOMs the 16 GiB card. 0.45 (~7 GiB: 3.1 weights + KV) leaves the trainer room.
         # Sampling-neutral -- same weights, same sampler; the lens records serve flags.

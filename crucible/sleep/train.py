@@ -196,7 +196,7 @@ class LoraTrainer:
             # assistant_only_loss=True (current TRL API, v1.0.0+) masks the loss to the
             # completion turn now that the data is conversational -- see module docstring.
             # NOTE: the SFTConfig kwarg is max_length, not the older max_seq_length.
-            # Batch 1 + accumulation + checkpointing (2026-08-25, S3 smoke): TRL's default
+            # Batch 1 + accumulation + checkpointing (2026-08-24, S3 smoke): TRL's default
             # per-device batch of 8 puts eight max_length sequences of activations on the card
             # AT ONCE, and sleep trains BESIDE the vLLM server on a 16 GiB GPU -- the smoke
             # OOMed twice before this. Same effective batch (8), a fraction of the peak.

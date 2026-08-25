@@ -75,6 +75,12 @@ class TaskRecord:
     measured). ``tampered`` flags an attempt that reached the hidden oracle illegitimately.
     ``tokens`` and ``gpu_s`` are ``None`` when the serving path did not report them.
 
+    ``confidence`` means two different things depending on which arm wrote the record: for
+    every uncalibrated arm (A_noMem, the B arms) it is the raw ranker score straight off the
+    value model, and for A_full alone it is the CALIBRATED P(hidden pass) that
+    ``crucible.uncertainty.conformal.Calibrator`` produced for that attempt -- same field
+    name and type, two different lenses, distinguished only by ``arm``.
+
     ``retrieved_ids`` (the memory items whose text was in this attempt's prompt) and
     ``adapter_id`` (the sleep-trained adapter that served it, ``None`` for the base model)
     are stamped by the A_full hooks alone -- see the module docstring.

@@ -147,7 +147,7 @@ BASE_DIGEST = sha256_text(BASE_MODEL)
 
 # A server that is wedged mid-load should fail the sleep, not hang the run forever.
 _LOAD_TIMEOUT_S = 60.0
-# What vLLM answers when the lora_name is already loaded (verified live 2026-08-25). Named,
+# What vLLM answers when the lora_name is already loaded (verified live 2026-08-24). Named,
 # not inlined, because it is a claim about another program's behaviour and it is dated.
 _ALREADY_LOADED_STATUS = 400
 
@@ -175,7 +175,7 @@ class VllmAdapterLoader:
     the hot swap itself is the live smoke.
 
     *A re-load of a name the server already has is a SUCCESS, not a failure -- verified live
-    2026-08-25 (Task 12 smoke).* vLLM answers a second ``load_lora_adapter`` for an
+    2026-08-24 (Task 12 smoke).* vLLM answers a second ``load_lora_adapter`` for an
     already-loaded ``lora_name`` with HTTP 400. One sleep cycle POSTs the same name twice by
     design: ``crucible.run.full.DriverSliceRunner`` must load the CANDIDATE to measure it at
     all (the controller has accepted nothing yet), and the controller then loads it again on

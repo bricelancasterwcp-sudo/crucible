@@ -314,3 +314,50 @@ def test_train_blite_rejects_unknown_config_override_key(tmp_path):
             corpus_dir, out_dir, code_embedder=embedder, device="cpu",
             config_overrides={"NOT_A_REAL_KEY": 1},
         )
+
+
+# -- bf16-by-device-TYPE pin (round-1 review finding) --------------------------
+
+
+def test_use_bf16_decides_by_device_type_not_string_equality():
+    """`device="cuda:0"` is cuda just as much as bare `"cuda"` is -- a
+    string-compare (`device == "cuda"`) mutant would silently fall back to
+    fp32 for it, violating "bf16 iff cuda" (prereg §5.2). CPU-safe: only
+    exercises `torch.device(...).type`, never touches an actual CUDA
+    context, so it runs the same whether or not a GPU is present."""
+    assert train_module._use_bf16("cuda")
+    assert train_module._use_bf16("cuda:0")
+    assert not train_module._use_bf16("cpu")
+
+
+# -- zero-eval fallback checkpoint (round-1 review finding) --------------------
+
+
+def test_train_blite_saves_fallback_checkpoint_when_max_steps_below_eval_every(tmp_path):
+    """MAX_STEPS < EVAL_EVERY -> the loop never hits an eval boundary at
+    all, so best.pt would never be written by the improve-on-eval path.
+    train_blite must still guarantee best.pt exists (the module's own
+    contract) via the end-of-run fallback save."""
+    corpus_dir = _build_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    embedder = _make_code_embedder(TINY_OVERRIDES["D_MODEL"])
+
+    overrides = dict(TINY_OVERRIDES)
+    overrides.update({"MAX_STEPS": 3, "EVAL_EVERY": 100})
+
+    summary = train_blite(
+        corpus_dir, out_dir, code_embedder=embedder, device="cpu",
+        config_overrides=overrides,
+    )
+
+    assert summary["steps_run"] == 3
+    assert summary["stopped_reason"] == "max_steps"
+    assert summary["best_val_auroc"] is None  # no eval ever ran
+
+    assert (out_dir / "best.pt").exists()
+    on_disk_summary = json.loads((out_dir / "train_summary.json").read_text())
+    assert on_disk_summary == summary
+
+    # probes.jsonl exists (created fresh at the start of the run) but is
+    # empty -- no EVAL_EVERY boundary was ever crossed.
+    assert (out_dir / "probes.jsonl").read_text() == ""

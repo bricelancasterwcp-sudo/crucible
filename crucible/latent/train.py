@@ -341,6 +341,16 @@ def _save_checkpoint(model: BLite, cfg: dict, path: Path) -> None:
     torch.save({"state_dict": model.state_dict(), "config": cfg}, path)
 
 
+def _use_bf16(device: str) -> bool:
+    """"bf16 iff cuda" (prereg §5.2), decided by the device's TYPE
+    (`torch.device(device).type`), never by string-comparing the raw
+    `device` argument -- `device="cuda:0"` (a real, common caller value,
+    not a hypothetical one) is cuda just as much as bare `"cuda"` is, and a
+    literal `device == "cuda"` compare would silently fall back to fp32 for
+    it."""
+    return torch.device(device).type == "cuda"
+
+
 # -- the training loop ----------------------------------------------------------
 
 
@@ -360,9 +370,10 @@ def train_blite(
     ONLY -- both literal strings, never a variable. See `_load`'s own
     docstring for why the test split is structurally unreachable here.
 
-    Precision: bf16 autocast iff `device == "cuda"`, else fp32 unconditionally
-    (no autocast at all on cpu) -- both training and evaluation forward
-    passes share this discipline.
+    Precision: bf16 autocast iff `device`'s TYPE is cuda (see `_use_bf16` --
+    `device="cuda:0"` counts, not just bare `"cuda"`), else fp32
+    unconditionally (no autocast at all on cpu) -- both training and
+    evaluation forward passes share this discipline.
 
     NaN/inf total loss raises `RuntimeError` IMMEDIATELY -- per prereg §6,
     this is an infra failure (CONFOUNDED), never a training result to
@@ -411,7 +422,7 @@ def train_blite(
     ).to(torch_device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["LR"])
 
-    use_bf16 = device == "cuda"
+    use_bf16 = _use_bf16(device)
     autocast_ctx = (
         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
         if use_bf16

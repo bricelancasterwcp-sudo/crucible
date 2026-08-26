@@ -99,3 +99,32 @@ LAMBDA_ISO = 0.1
 # (prereg §4). The binary head (clean-return vs not) is the gating target;
 # this multiclass head is the descriptive/auxiliary one. chosen, prereg §5.2.
 N_OUTCOME_CLASSES = 3
+
+# ---- B-lite training harness (crucible.latent.train), chosen at lock, prereg §5.2 ----
+
+# AdamW learning rate. chosen, prereg §5.2.
+LR = 3e-4
+
+# Training batch size (samples per optimizer step). chosen, prereg §5.2.
+BATCH = 64
+
+# Hard cap on total optimizer steps for one train_blite() run -- the loop
+# stops here even if early stopping (PATIENCE) never triggers. chosen,
+# prereg §5.2.
+MAX_STEPS = 20000
+
+# Run one val-set evaluation (grounded AUROC + collapse probes, prereg §5.5)
+# every this many optimizer steps. chosen, prereg §5.2.
+EVAL_EVERY = 500
+
+# Early-stop patience, in EVAL_EVERY-spaced evaluations: training stops once
+# this many CONSECUTIVE evals fail to strictly improve the best val AUROC
+# seen so far (a flat AUROC counts as non-improving -- see train.py). chosen,
+# prereg §5.2.
+PATIENCE = 5
+
+# Seed mixed into torch/numpy/random's global RNG state at the start of
+# train_blite() -- also what the per-epoch train-batch shuffle order derives
+# from, so the same seed reproduces the exact same sequence of batches.
+# chosen, prereg §5.2.
+TRAIN_SEED = 0

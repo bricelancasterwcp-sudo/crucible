@@ -58,3 +58,11 @@ SPLIT_SEED = 0
 # Train/val/test fractions for assign_split's function-level hash partition
 # (prereg §4). Must sum to 1.0. chosen, prereg §4.
 SPLIT_FRACTIONS = (0.8, 0.1, 0.1)
+
+# Hard cap on the number of tokens crucible.latent.state.encode_snapshot
+# emits for one Snapshot. The full [LINE token, then per-local
+# KEY/name/TYPE/type_name/VAL/value_repr groups] sequence is built first and
+# THEN sliced to this length -- so truncation only ever drops whole trailing
+# tokens off the end, never reorders or half-writes a local's marker/byte
+# pairing. chosen, prereg §5.1.
+MAX_SNAPSHOT_TOKENS = 128

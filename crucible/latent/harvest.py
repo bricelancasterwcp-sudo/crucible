@@ -14,8 +14,12 @@ Honesty rules this module exists to enforce (see docs/findings and
   `outcome="timeout"`, not as a return value that happens to be missing.
 * Truncation is counted, not swallowed. `truncated=True` whenever sensorium
   itself marked a captured value truncated/unread (`meta["truncated_count"]
-  > 0`), whenever our own MAX_SNAPSHOTS cap dropped trailing snapshots, or
-  whenever the run timed out (its state is inherently partial).
+  > 0`), whenever our own MAX_SNAPSHOTS cap dropped trailing snapshots,
+  whenever our own 64-char `_VALUE_REPR_CAP` cuts a locals repr sensorium
+  itself did not already truncate (a rendering choice beyond what the brief
+  states, made for the same reason: a value_repr this module cut is a
+  value_repr this module truncated, whichever cap did it), or whenever the
+  run timed out (its state is inherently partial).
 * Determinism is actually checked by running twice and comparing, not
   assumed. Two runs disagreeing on `outcome` OR on the hash of
   (return value, snapshot sequence) come back `deterministic=False`. The
@@ -38,6 +42,25 @@ LOCAL DELTAS, not full snapshots) are ONLY emitted for code objects that
 match `--focus module:qualname`, and only when something actually changed
 since the frame's previous LINE event -- see `_build_snapshots` for how the
 full per-line locals state is folded back out of those deltas.
+
+Containment (read before trusting this as a sandbox): the recorded
+subprocess is NOT filesystem-sandboxed. `_preexec_rlimit` caps RLIMIT_AS
+(virtual memory) only, and there is no RLIMIT_FSIZE cap here the way
+`crucible.sandbox.exec`'s untrusted-code path has one -- because sensorium
+itself must be free to write its own SQLite trace file into `workdir`
+during the run, and capping file size there risks truncating the very
+trace this module depends on to report anything at all. So a sample body
+that does `open(path, "w")`, `shutil.rmtree`, or similar writes to the real
+filesystem, unbounded, for as long as `EXEC_TIMEOUT_S` allows -- rlimits
+here cover memory and wall clock, nothing else. Containment for this
+harvester rests entirely on Task 2's corpus validator rejecting samples
+that reference filesystem/network/process builtins BY NAME before they
+ever reach `harvest()`, not on anything in this module. The threat model is
+therefore "our own generator's output, occasionally buggy," not an
+adversarial sample; if the B-lite corpus ever has to ingest
+external/untrusted code, this module is not sufficient on its own and
+`crucible.sandbox.exec`'s fuller isolation (network block, FSIZE cap,
+process-group kill) should be used instead.
 """
 from __future__ import annotations
 
@@ -79,7 +102,8 @@ class HarvestResult:
     outcome: str                     # "return" | "exception:<TypeName>" | "timeout"
     return_repr: str | None          # repr of the return value, None unless outcome=="return"
     snapshots: tuple[Snapshot, ...]  # per-line locals states, in execution order, truncated to MAX_SNAPSHOTS
-    truncated: bool                  # snapshots dropped beyond the cap OR sensorium marked truncation
+    truncated: bool                  # snapshots dropped beyond MAX_SNAPSHOTS, a value_repr cut at
+                                      # _VALUE_REPR_CAP, sensorium marked truncation, OR a timeout
     deterministic: bool              # two independent recorded runs agreed (outcome + state-sequence hash)
 
 
@@ -272,6 +296,18 @@ def _build_snapshots(trace: Trace, frame_id: int | None) -> tuple[tuple[Snapshot
     the frame's previous LINE event) and `unbound` (names that went out of
     scope) -- see the module docstring on tracer.py's `_on_line`. This keeps
     a running `cur` dict and emits one full, name-sorted Snapshot per event.
+
+    Two independent truncation sources are folded into the single
+    `truncated` flag this returns, on top of what sensorium itself marks
+    (`_capture_marks_truncated`, from sensorium's own 200-char str/repr and
+    8-item sample caps): our own MAX_SNAPSHOTS cap (dropped trailing
+    snapshots, applied once at the end) and our own `_VALUE_REPR_CAP`
+    (64 chars) cutting a `value_repr` sensorium's own caps left intact --
+    e.g. a 200-char string is under sensorium's 200-char str cap but its
+    quoted repr is over 64 chars, so a value_repr this module itself had to
+    cut is reported as truncated the same as one sensorium already cut,
+    even though the brief's mechanics note only spells out sensorium's own
+    marker, the MAX_SNAPSHOTS cap, and the wall-clock timeout.
     """
     if frame_id is None:
         return (), False

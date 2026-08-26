@@ -66,3 +66,36 @@ SPLIT_FRACTIONS = (0.8, 0.1, 0.1)
 # tokens off the end, never reorders or half-writes a local's marker/byte
 # pairing. chosen, prereg §5.1.
 MAX_SNAPSHOT_TOKENS = 128
+
+# ---- B-lite model dims (crucible.latent.model), chosen at lock, prereg §5.2 ----
+
+# Shared hidden width the frozen code encoder, the trained StateEncoder's
+# projection, and the LatentPredictor all operate in. chosen, prereg §5.2.
+D_MODEL = 768
+
+# StateEncoder's internal transformer width, BEFORE the Linear(STATE_ENC_D ->
+# D_MODEL) projection -- deliberately narrower than D_MODEL since a snapshot's
+# fixed 326-token vocabulary (state.py) carries far less information per
+# token than the frozen code encoder's subword vocabulary. chosen, prereg §5.2.
+STATE_ENC_D = 512
+
+# StateEncoder's TransformerEncoder depth. chosen, prereg §5.2.
+STATE_ENC_LAYERS = 4
+
+# LatentPredictor's TransformerEncoder depth -- the ~100M-param,
+# EB-JEPA-shaped causal predictor over [z_code, z_input, z_s1..z_sT]
+# (prereg §3's arm description). chosen, prereg §5.2.
+PRED_LAYERS = 12
+
+# LatentPredictor's attention head count. chosen, prereg §5.2.
+PRED_HEADS = 12
+
+# Weight on the LeWM-style isotropy regularizer term in blite_loss (prereg
+# §3: "prediction + isotropic-Gaussian regularizer, no EMA, no stop-grad").
+# chosen, prereg §5.2.
+LAMBDA_ISO = 0.1
+
+# GroundedHead's multiclass output width: {pass-return, exception, timeout}
+# (prereg §4). The binary head (clean-return vs not) is the gating target;
+# this multiclass head is the descriptive/auxiliary one. chosen, prereg §5.2.
+N_OUTCOME_CLASSES = 3

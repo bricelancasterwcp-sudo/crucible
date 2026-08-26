@@ -119,8 +119,23 @@ def harvest(function_src: str, args_literal: str, workdir: Path) -> HarvestResul
     name -- the no-import/no-syntax-error validator is Task 2's job, and
     harvest stays permissive so the nondeterminism sample, which legitimately
     imports `random`, still runs).
+
+    `workdir` is resolved to an ABSOLUTE path first thing (round-2 live-fire
+    fix, found via the corpus run's audit trail): the `sensorium run`
+    subprocess's cwd IS `workdir`, so a RELATIVE `workdir` made every path
+    derived from it -- the script path, `SENSORIUM_DIR`, the trace path this
+    function itself checks afterward -- ambiguous about which process's cwd
+    it resolves against. A relative `SENSORIUM_DIR` inherited by the child
+    resolves a SECOND time against the child's own (already-workdir) cwd at
+    the moment sensorium's `paths.trace_root()` creates it, landing the
+    store at `workdir/workdir/.sensorium` -- a path `_execute_once`'s
+    `trace_path.exists()` check, run back in THIS process against THIS
+    process's (unrelated) cwd, never looks at. Every real call site in this
+    repo already passed an absolute path (pytest's `tmp_path`), which is why
+    this went unnoticed until a live corpus run passed a path relative to
+    its own launch directory.
     """
-    workdir = Path(workdir)
+    workdir = Path(workdir).resolve()
     workdir.mkdir(parents=True, exist_ok=True)
     fname = _function_name(function_src)
     script_path = _write_runner_script(function_src, fname, args_literal, workdir)

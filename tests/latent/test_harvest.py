@@ -9,6 +9,7 @@ counted in `truncated`, never silently dropped; two runs disagreeing on
 outcome or captured state come back as `deterministic=False`, not averaged
 away.
 """
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -177,3 +178,33 @@ def test_harvest_sensorium_marked_truncation_is_counted(tmp_path):
     r = harvest("def f():\n    x = list(range(20))\n    return len(x)\n", "()", tmp_path)
     assert r.outcome == "return" and r.return_repr == "20"
     assert r.truncated is True
+
+
+def test_harvest_relative_workdir_does_not_double_nest_the_store(tmp_path):
+    """Round-2 live-fire regression, found via the corpus run's audit trail
+    (not by any of the 13 tests already in this file -- every one of them
+    already passed an absolute `tmp_path`).
+
+    The `sensorium run` subprocess's cwd IS `workdir` (see `_execute_once`'s
+    `cwd=str(workdir)`). With a RELATIVE `workdir`, a relative
+    `SENSORIUM_DIR` inherited by that child resolves a SECOND time against
+    the child's own (already-workdir) cwd when sensorium's
+    `paths.trace_root()` creates it -- landing the real trace at
+    `workdir/workdir/.sensorium/traces/run-a.db`, a path
+    `_execute_once`'s own `trace_path.exists()` check (run back in THIS
+    process, against THIS process's unrelated cwd) never looks at, raising
+    `HarvestError` on every call. `harvest()` must resolve `workdir` to
+    absolute before deriving anything from it -- verified live: a relative
+    workdir reproduced exactly the double-nested path described above on
+    the unfixed code.
+    """
+    old_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        rel = Path("rel_scratch")
+        rel.mkdir()
+        r = harvest("def f():\n    x = 1\n    return x\n", "()", rel)
+    finally:
+        os.chdir(old_cwd)
+    assert r.outcome == "return" and r.return_repr == "1"
+    assert r.snapshots

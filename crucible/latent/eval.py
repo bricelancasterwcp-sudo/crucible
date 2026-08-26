@@ -42,12 +42,18 @@ here precisely since nothing else in this codebase specifies it): a JSON
 object at `blite_scores_path` / `ctrl_scores_path`, mapping a per-sample key
 `f"{fn_id}:{args}"` (both fields exactly as stored on `corpus.Sample`) to a
 single float -- the arm's predicted probability that the sample's outcome
-is a clean return (`crucible.latent.gen.binary_label`'s `1`). Every key in
-the test split must appear in the score file, and every key in the score
-file must be a real test-split sample -- `evaluate_gate` RAISES on either a
-missing or an extra key (`_align_scores`) rather than silently scoring the
-inner join, which would fabricate the test-set denominator the whole gate's
-credibility rests on.
+is a clean return (`crucible.latent.gen.binary_label`'s `1`). Every value
+must be numeric, finite, and in `[0, 1]` (`_load_scores` raises, naming the
+key, on a NaN/Infinity/out-of-range value -- a diverged arm writing garbage
+scores must not silently produce a real-looking AUROC/SE/verdict). Every
+key in the test split must appear in the score file, and every key in the
+score file must be a real test-split sample -- `evaluate_gate` RAISES on
+either a missing or an extra key (`_align_scores`) rather than silently
+scoring the inner join, which would fabricate the test-set denominator the
+whole gate's credibility rests on. The test split itself must also carry no
+duplicate `f"{fn_id}:{args}"` keys (`_check_no_duplicate_sample_keys`) --
+two colliding samples would silently share one score under `_align_scores`'
+set-based comparison.
 
 References:
   DeLong, DeLong & Clarke-Pearson (1988), "Comparing the Areas under Two or
@@ -63,6 +69,7 @@ from __future__ import annotations
 
 import ast
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -396,10 +403,57 @@ def _score_key(sample) -> str:
 
 
 def _load_scores(path) -> dict:
+    """Parse `path` as a JSON object mapping sample keys to probabilities,
+    validating EVERY value: must be numeric, finite (no NaN/Infinity --
+    `json.loads` parses those non-standard tokens by default, and a
+    diverged arm that writes NaN would otherwise silently propagate into
+    `delong_paired` as a real-looking score), and within `[0, 1]`. Raises
+    `ValueError` naming the offending key on the first violation -- a
+    fabricated 1.0-AUROC, zero-SE, definite-looking verdict from garbage
+    input is worse than a loud failure at load time."""
     data = json.loads(Path(path).read_text())
     if not isinstance(data, dict):
         raise ValueError(f"score file {path} must be a JSON object mapping sample keys to probabilities")
-    return {str(k): float(v) for k, v in data.items()}
+    scores: dict[str, float] = {}
+    for key, raw_value in data.items():
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"score file {path}: key {key!r} has a non-numeric value {raw_value!r}"
+            ) from exc
+        if not math.isfinite(value) or not (0.0 <= value <= 1.0):
+            raise ValueError(
+                f"score file {path}: key {key!r} has an invalid probability "
+                f"{raw_value!r} (must be finite and in [0, 1])"
+            )
+        scores[str(key)] = value
+    return scores
+
+
+def _check_no_duplicate_sample_keys(samples) -> None:
+    """Raise `ValueError` if any two `samples` share a `_score_key`.
+    `_align_scores` compares KEY SETS -- two different `Sample`s that
+    happen to collide on the same `f"{fn_id}:{args}"` key would collapse
+    onto the SAME set element, so a missing/extra-key count of zero would
+    look like a clean alignment while one score is silently reused for two
+    distinct test samples (or, e.g., the second sample's true label
+    contributes to the denominator with the first's score entirely). This
+    is checked once, right after the test split is read, before any
+    alignment happens."""
+    keys = [_score_key(s) for s in samples]
+    seen: set[str] = set()
+    dupes: set[str] = set()
+    for key in keys:
+        if key in seen:
+            dupes.add(key)
+        seen.add(key)
+    if dupes:
+        raise ValueError(
+            f"test split has {len(dupes)} duplicate sample key(s) "
+            f"(e.g. {sorted(dupes)[:3]}) -- a duplicated (fn_id, args) pair "
+            "would silently share one score under key-based alignment"
+        )
 
 
 def _align_scores(samples, scores: dict, arm_name: str) -> np.ndarray:
@@ -407,7 +461,10 @@ def _align_scores(samples, scores: dict, arm_name: str) -> np.ndarray:
     mismatch between the two key sets -- missing OR extra. A silent inner
     join (scoring only the overlap) would fabricate the test-set
     denominator: the gate's whole credibility rests on accounting for
-    EVERY test sample, not whichever subset happened to have a score."""
+    EVERY test sample, not whichever subset happened to have a score.
+    Callers must ensure `samples` has no duplicate keys first
+    (`_check_no_duplicate_sample_keys`) -- this function's set-based
+    comparison cannot detect that on its own."""
     sample_keys = [_score_key(s) for s in samples]
     sample_key_set = set(sample_keys)
     score_key_set = set(scores.keys())
@@ -461,7 +518,8 @@ def evaluate_gate(corpus_dir, blite_scores_path, ctrl_scores_path, out_path) -> 
     """Compute the pre-registered B-lite gate verdict (prereg §5.4/§6) and
     write it to `out_path`. Returns the same dict.
 
-    Order of operations, load-bearing for the ONE-READ discipline:
+    Order of operations, load-bearing for the ONE-READ discipline (and for
+    shrinking the window in which the test split gets read at all):
 
     1. `out_path` existence is checked FIRST, before anything else runs --
        a second call against the same `out_path` raises `FileExistsError`
@@ -470,23 +528,36 @@ def evaluate_gate(corpus_dir, blite_scores_path, ctrl_scores_path, out_path) -> 
        function as a whole, not just of one call in isolation: there is no
        way to reach a second `load_split(corpus_dir, "test")` through this
        function, ever, for a given `out_path`.
-    2. `load_split(corpus_dir, "test")` -- the ONE call, assigned to
+    2. Both score files are loaded AND VALIDATED (`_load_scores`: valid
+       JSON object, every value numeric, finite, in `[0, 1]`) BEFORE the
+       test split is ever read. A malformed or garbage score file (bad
+       JSON, NaN, out-of-range) fails here, with `load_split` never called
+       at all for this invocation -- a caller who fixes a broken score
+       file and retries with the same `out_path` only ever reads test on
+       the eventual successful call, not once per broken attempt.
+    3. `load_split(corpus_dir, "test")` -- the ONE call, assigned to
        `test_samples` and reused for every downstream computation (P1, P2,
        the static floor's `predict`, P3). No other `load_split(..., "test")`
        call site exists anywhere in this function.
-    3. Score files are loaded and aligned to `test_samples` by
-       `f"{fn_id}:{args}"` key (see module docstring for the exact format);
-       ANY missing or extra key raises (`_align_scores`).
-    4. `fit_static_floor` is fit on `load_split(corpus_dir, "train")` --
+    4. `_check_no_duplicate_sample_keys(test_samples)` -- two test samples
+       colliding on the same `f"{fn_id}:{args}"` key would silently share
+       one score under `_align_scores`' set-based comparison; checked
+       once, immediately after the read.
+    5. Scores are aligned to `test_samples` by key (see module docstring
+       for the exact format); ANY missing or extra key raises
+       (`_align_scores`) -- this step DOES require the test split (the
+       actual key set being aligned against), so it is the one part of
+       "misalignment" detection that cannot happen before step 3.
+    6. `fit_static_floor` is fit on `load_split(corpus_dir, "train")` --
        train, never test; its `predict` is then applied to `test_samples`
        to score the floor on the same held-out set the two arms are scored
        on.
-    5. P1: `delong_paired(y, blite_scores, ctrl_scores)`; verdict `"PASS"`
+    7. P1: `delong_paired(y, blite_scores, ctrl_scores)`; verdict `"PASS"`
        iff `diff >= 2 * se_diff` (B-lite must beat control by at least two
        standard errors), plus a bootstrap CI on that diff.
-    6. P2: each arm vs. the static floor, same `>= 2*se_diff` rule,
+    8. P2: each arm vs. the static floor, same `>= 2*se_diff` rule,
        independently for B-lite and control.
-    7. P3: per-outcome-bucket accuracy-at-0.5 for both arms, ECE for both
+    9. P3: per-outcome-bucket accuracy-at-0.5 for both arms, ECE for both
        arms. Also reports the TRIVIAL majority-class floor (a constant
        score at train's class-1 prevalence; AUROC 0.5 BY CONSTRUCTION,
        since every comparison against a constant score is a tie) --
@@ -504,6 +575,12 @@ def evaluate_gate(corpus_dir, blite_scores_path, ctrl_scores_path, out_path) -> 
 
     corpus_dir = Path(corpus_dir)
 
+    # Score files are parsed + validated BEFORE the test split is ever
+    # read (see this function's own docstring, step 2) -- a malformed or
+    # out-of-range score file fails here without load_split being called.
+    blite_scores_raw = _load_scores(blite_scores_path)
+    ctrl_scores_raw = _load_scores(ctrl_scores_path)
+
     # The ONE call site of load_split(..., "test") in this function -- see
     # this function's own docstring for why that makes the whole module's
     # one-read discipline true.
@@ -511,11 +588,11 @@ def evaluate_gate(corpus_dir, blite_scores_path, ctrl_scores_path, out_path) -> 
     if not test_samples:
         raise ValueError("empty test split -- nothing to gate on")
 
+    _check_no_duplicate_sample_keys(test_samples)
+
     y = np.array([binary_label(s.outcome) for s in test_samples], dtype=np.int64)
     outcomes = [s.outcome for s in test_samples]
 
-    blite_scores_raw = _load_scores(blite_scores_path)
-    ctrl_scores_raw = _load_scores(ctrl_scores_path)
     s_blite = _align_scores(test_samples, blite_scores_raw, "blite")
     s_ctrl = _align_scores(test_samples, ctrl_scores_raw, "ctrl")
 

@@ -164,6 +164,52 @@ def test_delong_paired_tie_handling_matches_hand_value():
     assert result["se_diff"] == 0.0
 
 
+def test_delong_paired_asymmetric_m_n_pins_the_correct_denominators():
+    """Mutation pin: every case above has m == n (equal positives and
+    negatives), so a mutant that SWAPS the `/m` and `/n` denominators in
+    `var(diff) = var(d10)/m + var(d01)/n` is invisible to them. This case
+    uses m=2 positives, n=3 negatives specifically to make the swap
+    detectable.
+
+    y = [1,1,0,0,0]; s1 = [10,9,3,2,1] (perfect separator, both positives
+    beat all 3 negatives); s2 = [10,9,3,2,9.5] (one inversion: the last
+    negative's score 9.5 beats the weaker positive's score 9, but not the
+    stronger positive's score 10).
+
+    Hand derivation (structural components, DeLong's own notation):
+      V10_1 = [1, 1]              (each positive beats all n=3 negatives, /3)
+      V01_1 = [1, 1, 1]
+      V10_2 = [1, 2/3]            (second positive: 2 of 3 negatives beaten)
+      V01_2 = [1, 1, 1/2]         (third negative: beats 1 of m=2 positives)
+      auroc1 = mean(V10_1) = 1.0 ; auroc2 = mean(V10_2) = 5/6
+      d10 = V10_1 - V10_2 = [0, 1/3]      (m=2 elements)
+      d01 = V01_1 - V01_2 = [0, 0, 1/2]   (n=3 elements)
+      var(d10, ddof=1) = 1/18 ; var(d01, ddof=1) = 1/12
+
+      CORRECT:  var(diff) = var(d10)/m + var(d01)/n = (1/18)/2 + (1/12)/3
+                           = 1/36 + 1/36 = 1/18  ->  se_diff = sqrt(1/18) = 0.235702...
+      SWAPPED:  var(diff) = var(d10)/n + var(d01)/m = (1/18)/3 + (1/12)/2
+                           = 1/54 + 1/24 = 13/216  ->  se_diff = sqrt(13/216) = 0.245327...
+
+    (Reviewer-independent derivation; matches the reviewer's stated
+    correct=0.23570 / swapped=0.24533 to 5 significant figures.)
+    """
+    y = np.array([1, 1, 0, 0, 0])
+    s1 = np.array([10.0, 9.0, 3.0, 2.0, 1.0])
+    s2 = np.array([10.0, 9.0, 3.0, 2.0, 9.5])
+
+    result = delong_paired(y, s1, s2)
+
+    assert result["auroc1"] == 1.0
+    assert result["auroc2"] == pytest.approx(5.0 / 6.0)
+    assert result["diff"] == pytest.approx(1.0 / 6.0)
+    assert result["se_diff"] == pytest.approx(math.sqrt(1.0 / 18.0), abs=1e-6)
+    assert result["se_diff"] == pytest.approx(0.235702, abs=1e-6)
+    # The swapped-denominator value must NOT match, confirming the two are
+    # numerically distinguishable at this m != n shape.
+    assert result["se_diff"] != pytest.approx(0.245327, abs=1e-6)
+
+
 def test_delong_paired_raises_when_a_class_is_absent():
     y = np.array([1, 1, 1])
     s = np.array([0.1, 0.2, 0.3])
@@ -196,6 +242,28 @@ def test_bootstrap_diff_ci_is_deterministic_given_same_seed():
     ci_b = bootstrap_diff_ci(y, s1, s2, n=300, seed=7)
 
     assert ci_a == ci_b
+
+
+def test_bootstrap_diff_ci_identical_scores_gives_exactly_zero_zero():
+    """Mutation pin: PAIRED resampling draws ONE shared index vector and
+    applies it to `y`, `s1`, AND `s2` together -- so when `s2 == s1`
+    (value-equal, not the same object), every single resample computes
+    `auroc(yb, s1[idx]) - auroc(yb, s1[idx]) == 0.0` EXACTLY (both terms
+    are the same deterministic computation on the same resampled array).
+    The percentile of an all-zero array is `(0.0, 0.0)` exactly.
+
+    An UNPAIRED mutant that draws independent index vectors for `s1` and
+    `s2` (breaking the sample-level correspondence) would score each arm
+    against a different, uncorrelated resample and produce a nonzero
+    spread even here -- this is the crisp, deterministic pin for that."""
+    y = np.array([1, 1, 1, 0, 0, 0, 1, 0, 1, 0])
+    s1 = np.array([0.9, 0.3, 0.7, 0.1, 0.5, 0.2, 0.6, 0.4, 0.8, 0.15])
+    s2 = np.array(s1, copy=True)
+
+    lo, hi = bootstrap_diff_ci(y, s1, s2, n=500, seed=3)
+
+    assert lo == 0.0
+    assert hi == 0.0
 
 
 # =============================================================================
@@ -459,6 +527,95 @@ def test_evaluate_gate_raises_on_extra_score_key(tmp_path):
     full_scores = {**_scores_for(test_pos_ids, 0.9), **_scores_for(test_neg_ids, 0.1)}
     _write_json(blite_path, scores)
     _write_json(ctrl_path, full_scores)
+
+    with pytest.raises(ValueError):
+        evaluate_gate(corpus_dir, blite_path, ctrl_path, tmp_path / "gate_report.json")
+
+
+def test_evaluate_gate_raises_on_nan_score_value(tmp_path):
+    """A diverged arm writing NaN must be refused loud, not silently
+    turned into a definite-looking verdict (a constant NaN input can make
+    `delong_paired` emit auroc=1.0/se=0 through downstream float
+    comparisons)."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    test_pos_ids, test_neg_ids = _build_gate_corpus(corpus_dir)
+
+    blite_path = tmp_path / "blite.json"
+    ctrl_path = tmp_path / "ctrl.json"
+    good_scores = {**_scores_for(test_pos_ids, 0.9), **_scores_for(test_neg_ids, 0.1)}
+    bad_scores = dict(good_scores)
+    bad_scores[f"{test_pos_ids[0]}:()"] = float("nan")
+    _write_json(ctrl_path, good_scores)
+    # `json.dumps` emits a literal `NaN` token by default (allow_nan=True
+    # is the stdlib default), and `json.loads` parses it back to
+    # `float('nan')` -- exactly what a real score-writer using the stdlib
+    # `json` module would produce for a diverged arm.
+    _write_json(blite_path, bad_scores)
+
+    with pytest.raises(ValueError):
+        evaluate_gate(corpus_dir, blite_path, ctrl_path, tmp_path / "gate_report.json")
+
+
+def test_evaluate_gate_raises_on_out_of_range_score_value(tmp_path):
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    test_pos_ids, test_neg_ids = _build_gate_corpus(corpus_dir)
+
+    blite_path = tmp_path / "blite.json"
+    ctrl_path = tmp_path / "ctrl.json"
+    good_scores = {**_scores_for(test_pos_ids, 0.9), **_scores_for(test_neg_ids, 0.1)}
+    bad_scores = dict(good_scores)
+    bad_scores[f"{test_pos_ids[0]}:()"] = 1.5
+    _write_json(ctrl_path, good_scores)
+    _write_json(blite_path, bad_scores)
+
+    with pytest.raises(ValueError):
+        evaluate_gate(corpus_dir, blite_path, ctrl_path, tmp_path / "gate_report.json")
+
+
+def test_evaluate_gate_bad_score_value_never_reaches_load_split(tmp_path, monkeypatch):
+    """Score files are loaded and validated BEFORE the test split is ever
+    read -- a NaN score must fail without `load_split` being called at
+    all, shrinking the window in which the test split gets touched."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    # Deliberately no samples.jsonl written -- load_split must never be
+    # reached, so its absence must never matter.
+
+    blite_path = tmp_path / "blite.json"
+    ctrl_path = tmp_path / "ctrl.json"
+    blite_path.write_text(json.dumps({"whatever:()": float("nan")}))
+    _write_json(ctrl_path, {})
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("load_split must not be called before score files are validated")
+
+    monkeypatch.setattr(gate_eval._corpus, "load_split", _explode)
+
+    with pytest.raises(ValueError):
+        evaluate_gate(corpus_dir, blite_path, ctrl_path, tmp_path / "gate_report.json")
+
+
+def test_evaluate_gate_raises_on_duplicate_test_sample_key(tmp_path):
+    """Two samples.jsonl rows with the SAME `fn_id` and `args` land in the
+    same split (split is a pure function of `fn_id`) and collide on the
+    same score-file key -- `_align_scores`' set-based comparison cannot
+    see this on its own (missing/extra counts both stay zero), so it must
+    be caught explicitly."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    fn_id = _fn_id_for_split("test", 0, prefix="dup")
+    rows = [
+        _sample_row(fn_id, outcome="return", pad="X" * 200),
+        _sample_row(fn_id, outcome="return", pad="X" * 200),
+    ]
+    _write_samples_jsonl(corpus_dir / "samples.jsonl", rows)
+
+    blite_path = tmp_path / "blite.json"
+    ctrl_path = tmp_path / "ctrl.json"
+    _write_json(blite_path, {})
+    _write_json(ctrl_path, {})
 
     with pytest.raises(ValueError):
         evaluate_gate(corpus_dir, blite_path, ctrl_path, tmp_path / "gate_report.json")

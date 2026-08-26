@@ -131,4 +131,9 @@ rule) for both arms; SE method (DeLong, paired); library versions.
 
 Pre-lock: edit with date + old value, mark the line. Post-lock: §6–§8 immutable.
 
-*(none yet)*
+- **2026-08-26 (pre-lock):** §8's determinism kill criterion ("> 40% of generated
+  samples") made precise: the denominator is every harvested sample that produced a
+  determinism verdict — nondet-rejected + truncation-rejected + balance-rejected +
+  accepted — excluding only harvest-error samples (no verdict produced). The rate is
+  `nondet_rejected / that population`, computed once in `build_manifest` and read as a
+  verdict.

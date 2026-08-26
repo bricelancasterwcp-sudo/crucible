@@ -167,6 +167,75 @@ def test_jina_code_embedder_output_shape_dtype_device_and_no_grad(monkeypatch):
     assert out.requires_grad is False  # torch.no_grad() path
 
 
+class _FixedMaskPoolingTokenizer:
+    """Returns a FIXED `(input_ids, attention_mask)` batch regardless of
+    `sources`' actual content -- shape `(2, 3)`, sample 1 all-real
+    (`[1, 1, 1]`), sample 2 one real token plus two pad positions
+    (`[1, 0, 0]`) -- so the pooling test below controls exactly which
+    positions are real vs. pad, independent of any tokenization detail."""
+
+    @classmethod
+    def from_pretrained(cls, model_id, revision=None, trust_remote_code=None):
+        return cls()
+
+    def __call__(self, sources, padding=True, truncation=True, max_length=1024, return_tensors="pt"):
+        assert len(sources) == 2
+        input_ids = torch.zeros((2, 3), dtype=torch.long)  # values irrelevant -- the fake model ignores them
+        attention_mask = torch.tensor([[1, 1, 1], [1, 0, 0]], dtype=torch.long)
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+
+class _FixedHiddenStateModel(torch.nn.Module):
+    """Ignores `input_ids` entirely -- always returns a FIXED
+    `last_hidden_state`-shaped tuple, `(2, 3, 1)`, whose PAD-position
+    values (`100.0`) are deliberately far from the real-token values, so a
+    raw (pad-included) mean would land on an obviously, unmistakably wrong
+    number rather than one that could pass by coincidence."""
+
+    def __init__(self):
+        super().__init__()
+        self.dummy = torch.nn.Parameter(torch.zeros(1))  # a real param, so freezing still applies
+        self._hidden = torch.tensor([[[1.0], [2.0], [3.0]], [[10.0], [100.0], [100.0]]])
+
+    def forward(self, input_ids, attention_mask=None):
+        return (self._hidden,)
+
+
+class _FixedHiddenStateAutoModel:
+    @classmethod
+    def from_pretrained(cls, model_id, revision=None, trust_remote_code=None, torch_dtype=None):
+        return _FixedHiddenStateModel()
+
+
+def test_jina_code_embedder_pools_mask_weighted_mean_not_raw_mean(monkeypatch):
+    """Pins the ACTUAL pooled VALUES against a hand-computed mask-weighted
+    mean -- every other test in this file only pins shape/dtype/device,
+    which a regression to raw `.mean(dim=1)` (pad positions included)
+    would pass identically (same shape, same dtype, same device). Only a
+    values-level assertion, with pad-position hidden values deliberately
+    set far from the real-token values, can catch that regression.
+
+    Hand computation (attention_mask = [[1,1,1],[1,0,0]]):
+      sample 1 (no padding): mask-weighted mean of [1, 2, 3] over 3 real
+        tokens = 2.0 -- identical to the raw mean here (no pad to skew it).
+      sample 2 (2 of 3 positions are pad): mask-weighted mean of [10] over
+        its ONE real token (the two 100.0 pad values are masked OUT) =
+        10.0. A raw mean over all 3 positions would instead give
+        (10 + 100 + 100) / 3 = 70.0 -- an obviously different number,
+        confirmed by mutation below to actually catch the regression.
+    """
+    import transformers
+
+    monkeypatch.setattr(transformers, "AutoModel", _FixedHiddenStateAutoModel)
+    monkeypatch.setattr(transformers, "AutoTokenizer", _FixedMaskPoolingTokenizer)
+
+    embed = pretrained.jina_code_embedder("cpu")
+    out = embed(["source one", "source two"])
+
+    expected = torch.tensor([[2.0], [10.0]])
+    assert torch.allclose(out, expected, atol=1e-6)
+
+
 # -- codeexecutor_factory + codeexecutor_tokenizer -----------------------------
 
 

@@ -99,6 +99,66 @@ def test_blite_forward_respects_per_sample_snapshot_count():
     _, _, valid_mask, _, _ = model(code_embed, input_ids, input_pad_mask, state_ids, state_pad_mask, seq_mask)
     assert valid_mask[0].tolist() == [True, True, False, False]
     assert valid_mask[1].tolist() == [True, True, True, True]
+    # Minor (review): valid_mask's True run must be a contiguous prefix per
+    # sample -- LatentPredictor's `last_idx = valid.sum(dim=1) - 1` gather
+    # assumes there is no True-after-a-False gap.
+    assert not ((~valid_mask[:, :-1]) & valid_mask[:, 1:]).any()
+
+
+# ---- pred/target alignment: the off-by-one pin -----------------------------
+
+
+def test_pred_states_do_not_depend_on_their_own_target():
+    """(Review finding, round 1) Kills the `hidden[:, 2:, :]` mutant for
+    `pred_states` (using hidden at the TARGET's own seq position instead of
+    the position just before it) -- an "identity map" bug: pred_states[k]
+    would then be computed from a query that causally attends up to and
+    including its own target, seq[2+k]. That mutant has IDENTICAL output
+    shape to the correct `hidden[:, 1:-1, :]` (both give (B, T, d)), so no
+    shape assertion anywhere in this file can catch it.
+
+    Caught via autograd dependency: register a forward-pre-hook on
+    `model.predictor` to grab the actual `seq` tensor BLite builds
+    internally (no change to BLite's public API needed) and retain its
+    grad, then backprop from a single pred_states[:, k] position. Under the
+    correct indexing, pred_states[k] = hidden[1+k], which causally sees
+    seq[0 .. 1+k] only -- so its target position `2+k` (== target_states[k])
+    must get EXACTLY ZERO gradient, while a causally-visible past position
+    (`2+k-1`) must get NONZERO gradient. Under the `hidden[:, 2:, :]`
+    mutant, pred_states[k] = hidden[2+k], whose query position causally
+    attends up to AND INCLUDING itself -- so the "own target" gradient
+    would be nonzero there, failing the first assertion.
+    """
+    model = _tiny_blite()
+    model.train()  # avoid the eval-mode fused TransformerEncoderLayer fast path
+    B, T = 1, 3
+    args = list(_tiny_batch(B=B, T=T))
+
+    captured: dict[str, torch.Tensor] = {}
+
+    def _capture_seq(module, inputs):
+        seq, _seq_mask = inputs
+        seq.retain_grad()
+        captured["seq"] = seq
+
+    handle = model.predictor.register_forward_pre_hook(_capture_seq)
+    try:
+        pred_states, target_states, valid_mask, _, _ = model(*args)
+    finally:
+        handle.remove()
+
+    seq = captured["seq"]
+    k = 1  # middle state position (T=3 -> k in {0,1,2})
+    pred_states[:, k, :].sum().backward()
+
+    own_target_pos = 2 + k  # seq position of target_states[k] (z_s_{k+1})
+    past_pos = 2 + k - 1  # a causally-visible earlier state position
+
+    own_target_grad = seq.grad[:, own_target_pos, :]
+    past_grad = seq.grad[:, past_pos, :]
+
+    assert torch.allclose(own_target_grad, torch.zeros_like(own_target_grad), atol=1e-7)
+    assert past_grad.abs().max().item() > 1e-7
 
 
 # ---- StateEncoder: shape + the all-pad-row NaN guard -----------------------

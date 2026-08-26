@@ -60,7 +60,7 @@ from torch import nn
 from crucible.latent import config
 from crucible.latent import control as control_module
 from crucible.latent import corpus
-from crucible.latent.control import render_control_input, train_control
+from crucible.latent.control import render_control_input, score_split_control, train_control
 
 # -- synthetic corpus construction --------------------------------------------
 
@@ -407,3 +407,60 @@ def test_train_control_is_deterministic_given_same_seed(tmp_path, monkeypatch):
     first_b = json.loads(lines_b[0])
     assert first_a["epoch"] == first_b["epoch"]
     assert first_a["val_auroc"] == first_b["val_auroc"]
+
+
+# -- score_split_control: the control-arm mirror of train.score_split ---------
+
+
+def test_score_split_control_writes_probabilities_for_every_sample_in_split(tmp_path, monkeypatch):
+    corpus_dir = _build_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    tokenizer = _make_hash_tokenizer(VOCAB_SIZE)
+    model_factory = lambda: TinyStubModel(VOCAB_SIZE)  # noqa: E731
+
+    monkeypatch.setattr(control_module.config, "CTRL_MAX_EPOCHS", 2)
+    monkeypatch.setattr(control_module.config, "CTRL_LR", 0.2)
+    monkeypatch.setattr(control_module.config, "BATCH", 4)
+
+    train_control(
+        corpus_dir, out_dir, model_factory=model_factory, tokenizer=tokenizer, device="cpu",
+    )
+
+    scores_path = tmp_path / "val_scores.json"
+    score_split_control(
+        model_factory, tokenizer, out_dir / "best.pt", corpus_dir, "val", scores_path,
+        device="cpu",
+    )
+
+    assert scores_path.exists()
+    scores = json.loads(scores_path.read_text())
+
+    val_samples = control_module._load(corpus_dir, "val")
+    expected_keys = {f"{s.fn_id}:{s.args}" for s in val_samples}
+    assert set(scores) == expected_keys
+    assert len(scores) == len(val_samples)
+    for prob in scores.values():
+        assert isinstance(prob, float)
+        assert 0.0 <= prob <= 1.0
+
+
+def test_score_split_control_refuses_test_split_without_allow_test(tmp_path, monkeypatch):
+    corpus_dir = _build_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    tokenizer = _make_hash_tokenizer(VOCAB_SIZE)
+    model_factory = lambda: TinyStubModel(VOCAB_SIZE)  # noqa: E731
+
+    monkeypatch.setattr(control_module.config, "CTRL_MAX_EPOCHS", 2)
+    monkeypatch.setattr(control_module.config, "CTRL_LR", 0.2)
+    monkeypatch.setattr(control_module.config, "BATCH", 4)
+
+    train_control(
+        corpus_dir, out_dir, model_factory=model_factory, tokenizer=tokenizer, device="cpu",
+    )
+
+    with pytest.raises(ValueError):
+        score_split_control(
+            model_factory, tokenizer, out_dir / "best.pt", corpus_dir, "test",
+            tmp_path / "test_scores.json", device="cpu",
+        )
+    assert not (tmp_path / "test_scores.json").exists()

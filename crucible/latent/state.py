@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from crucible.latent.config import MAX_SNAPSHOT_TOKENS
+from crucible.latent.config import INPUT_CHAR_CAP, MAX_SNAPSHOT_TOKENS, STATE_VALUE_CAP
 from crucible.latent.harvest import Snapshot
 
 PAD = 256
@@ -41,9 +41,6 @@ _NUM_LINE_BUCKETS = 64
 _MAX_LINE_BUCKET = _NUM_LINE_BUCKETS - 1
 
 VOCAB_SIZE = LINE_BASE + _NUM_LINE_BUCKETS
-
-_ARGS_LITERAL_CAP = 96
-_VALUE_REPR_CAP = 24
 
 
 def encode_snapshot(s: Snapshot) -> list[int]:
@@ -69,14 +66,14 @@ def encode_snapshot(s: Snapshot) -> list[int]:
         tokens.append(TYPE)
         tokens.extend(type_name.encode("utf-8"))
         tokens.append(VAL)
-        tokens.extend(value_repr[:_VALUE_REPR_CAP].encode("utf-8"))
+        tokens.extend(value_repr[:STATE_VALUE_CAP].encode("utf-8"))
     return tokens[:MAX_SNAPSHOT_TOKENS]
 
 
 def encode_input(args_literal: str) -> list[int]:
     """The call's args literal -> `[BOS] + utf8(args_literal[:96]) + [EOS]`."""
     tokens: list[int] = [BOS]
-    tokens.extend(args_literal[:_ARGS_LITERAL_CAP].encode("utf-8"))
+    tokens.extend(args_literal[:INPUT_CHAR_CAP].encode("utf-8"))
     tokens.append(EOS)
     return tokens
 

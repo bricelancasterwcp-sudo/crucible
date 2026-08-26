@@ -15,7 +15,7 @@ Honesty rules this module exists to enforce (see docs/findings and
 * Truncation is counted, not swallowed. `truncated=True` whenever sensorium
   itself marked a captured value truncated/unread (`meta["truncated_count"]
   > 0`), whenever our own MAX_SNAPSHOTS cap dropped trailing snapshots,
-  whenever our own 64-char `_VALUE_REPR_CAP` cuts a locals repr sensorium
+  whenever our own 64-char `VALUE_REPR_CAP` cuts a locals repr sensorium
   itself did not already truncate (a rendering choice beyond what the brief
   states, made for the same reason: a value_repr this module cut is a
   value_repr this module truncated, whichever cap did it), or whenever the
@@ -77,12 +77,12 @@ from pathlib import Path
 
 from sensorium.store.reader import Trace
 
-from crucible.latent.config import EXEC_RLIMIT_AS_MB, EXEC_TIMEOUT_S, MAX_SNAPSHOTS
-
-# Local variable value reprs are capped tighter than sensorium's own 200-char
-# repr/str CAPS: a snapshot is a glance at state, not a value dump, and Task 4
-# reads these tuples expecting short, name-sorted rows.
-_VALUE_REPR_CAP = 64
+from crucible.latent.config import (
+    EXEC_RLIMIT_AS_MB,
+    EXEC_TIMEOUT_S,
+    MAX_SNAPSHOTS,
+    VALUE_REPR_CAP,
+)
 
 _RUNNER_FILENAME = "harvest_target.py"
 _RUN_ID_A = "run-a"
@@ -103,7 +103,7 @@ class HarvestResult:
     return_repr: str | None          # repr of the return value, None unless outcome=="return"
     snapshots: tuple[Snapshot, ...]  # per-line locals states, in execution order, truncated to MAX_SNAPSHOTS
     truncated: bool                  # snapshots dropped beyond MAX_SNAPSHOTS, a value_repr cut at
-                                      # _VALUE_REPR_CAP, sensorium marked truncation, OR a timeout
+                                      # VALUE_REPR_CAP, sensorium marked truncation, OR a timeout
     deterministic: bool              # two independent recorded runs agreed (outcome + state-sequence hash)
 
 
@@ -248,20 +248,35 @@ def _read_result(trace: Trace, fname: str) -> tuple[str, str | None, tuple[Snaps
         # measured, so it is not reported as one.
         return "timeout", None, (), True
 
-    uncaught = meta.get("uncaught")
-    if uncaught is not None:
-        return f"exception:{uncaught['type']}", None, (), _meta_truncated(meta)
-
+    # Frame/snapshot lookup happens ONCE, ahead of the outcome branch, and is
+    # shared by both the exception and return paths below (final review
+    # CRITICAL): an `exception:*` outcome still keeps the LINE-event
+    # snapshots recorded before the raise -- sensorium's own tracer fires a
+    # frame's LINE event for a line BEFORE that line executes (see
+    # `_build_snapshots`' docstring and `harvest_target.py`'s runner), so the
+    # snapshot for the very line that raises still reflects real pre-raise
+    # locals, not anything invented after the fact. Discarding these
+    # unconditionally on the exception path (the pre-fix behavior) made
+    # `outcome != "return"` synonymous with an EMPTY snapshot sequence --
+    # label 0 (`crucible.latent.gen.binary_label`) would then be readable
+    # straight off `len(snapshots) == 0`, independent of anything the model
+    # is supposed to have learned. `return_repr` stays `None` for an
+    # exception regardless (there is no return value to report).
     code_id = _code_id_for(trace, fname)
     frame = _first_frame(trace, code_id)
+    snapshots, snap_truncated = _build_snapshots(trace, frame.id if frame is not None else None)
+    truncated = snap_truncated or _meta_truncated(meta)
+
+    uncaught = meta.get("uncaught")
+    if uncaught is not None:
+        return f"exception:{uncaught['type']}", None, snapshots, truncated
+
     return_repr = None
     if frame is not None and frame.return_event_id is not None:
         ev = trace.event(frame.return_event_id)
         if ev is not None and ev.payload is not None:
             return_repr = _capture_repr(ev.payload.get("value", {"k": "none"}))
 
-    snapshots, snap_truncated = _build_snapshots(trace, frame.id if frame is not None else None)
-    truncated = snap_truncated or _meta_truncated(meta)
     return "return", return_repr, snapshots, truncated
 
 
@@ -301,7 +316,7 @@ def _build_snapshots(trace: Trace, frame_id: int | None) -> tuple[tuple[Snapshot
     `truncated` flag this returns, on top of what sensorium itself marks
     (`_capture_marks_truncated`, from sensorium's own 200-char str/repr and
     8-item sample caps): our own MAX_SNAPSHOTS cap (dropped trailing
-    snapshots, applied once at the end) and our own `_VALUE_REPR_CAP`
+    snapshots, applied once at the end) and our own `VALUE_REPR_CAP`
     (64 chars) cutting a `value_repr` sensorium's own caps left intact --
     e.g. a 200-char string is under sensorium's 200-char str cap but its
     quoted repr is over 64 chars, so a value_repr this module itself had to
@@ -333,8 +348,8 @@ def _build_snapshots(trace: Trace, frame_id: int | None) -> tuple[tuple[Snapshot
         for name in sorted(cur):
             cap = cur[name]
             full_repr = _capture_repr(cap)
-            value_repr = full_repr[:_VALUE_REPR_CAP]
-            if len(full_repr) > _VALUE_REPR_CAP:
+            value_repr = full_repr[:VALUE_REPR_CAP]
+            if len(full_repr) > VALUE_REPR_CAP:
                 truncated = True
             entries.append((name, _capture_type_name(cap), value_repr))
         snapshots.append(Snapshot(line=ev.line, locals=tuple(entries)))

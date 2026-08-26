@@ -33,6 +33,41 @@ def test_harvest_clean_return(tmp_path):
 def test_harvest_exception_names_the_type(tmp_path):
     r = harvest("def f(a):\n    return a[10]\n", "([1],)", tmp_path)
     assert r.outcome == "exception:IndexError" and r.return_repr is None
+    # An exception no longer forces an empty snapshot sequence (final review
+    # CRITICAL fix) -- sensorium's LINE event for the raising line fires
+    # BEFORE that line executes, so even this single-statement body carries
+    # one legitimate pre-raise snapshot of its parameter. The assertion here
+    # is on LEGITIMACY, not on a specific count: whatever is present must be
+    # real captured locals, never fabricated.
+    for s in r.snapshots:
+        assert isinstance(s, Snapshot)
+        for name, type_name, value_repr in s.locals:
+            assert isinstance(name, str) and isinstance(type_name, str) and isinstance(value_repr, str)
+    names = {n for s in r.snapshots for (n, _t, _v) in s.locals}
+    assert names <= {"a"}  # the only local ever in scope before the raise
+
+
+def test_harvest_exception_keeps_pre_raise_snapshots(tmp_path):
+    """THE critical-fix pin: an exception raised partway through a
+    multi-line function must not discard the LINE-event snapshots recorded
+    before the raise. Pre-fix, `label 0` (a non-"return" outcome) collapsed
+    to an always-empty snapshot sequence -- a gate model conditioned on
+    `s.snapshots` could read the label straight off that emptiness, which is
+    exactly the leakage this fix closes. Verified empirically (not
+    guessed): `b = a + 1` then `c = b + 1` then `return c[0]` (raises
+    TypeError on line 4, `c` is an int) produces real pre-raise snapshots at
+    lines 2-4, carrying `a`, `b`, and `c` -- confirmed against a live
+    sensorium run before this test was written.
+    """
+    src = "def f(a):\n    b = a + 1\n    c = b + 1\n    return c[0]\n"
+    r = harvest(src, "(1,)", tmp_path)
+    assert r.outcome == "exception:TypeError" and r.return_repr is None
+    assert len(r.snapshots) == 3
+    assert [s.line for s in r.snapshots] == [2, 3, 4]
+    names_by_line = {s.line: {n for n, _t, _v in s.locals} for s in r.snapshots}
+    assert names_by_line[2] == {"a"}
+    assert names_by_line[3] == {"a", "b"}
+    assert names_by_line[4] == {"a", "b", "c"}
 
 
 def test_harvest_timeout_is_marked_not_hung(tmp_path):

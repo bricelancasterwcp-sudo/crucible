@@ -496,6 +496,53 @@ def test_evaluate_gate_second_call_never_reaches_load_split(tmp_path, monkeypatc
         evaluate_gate(corpus_dir, blite_path, ctrl_path, out_path)
 
 
+def test_evaluate_gate_crash_after_read_leaves_lock_sentinel_and_refuses_rerun(tmp_path, monkeypatch):
+    """final review MEDIUM: if evaluate_gate crashes AFTER reading the test
+    split but before writing `out_path`, the `<out_path>.lock` sentinel
+    must still exist -- the honest "test was read" marker -- and a second
+    call against the same `out_path` must be refused, even though
+    `out_path` itself was never written."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    test_pos_ids, test_neg_ids = _build_gate_corpus(corpus_dir)
+    scores = {**_scores_for(test_pos_ids, 0.9), **_scores_for(test_neg_ids, 0.1)}
+    blite_path = tmp_path / "blite.json"
+    ctrl_path = tmp_path / "ctrl.json"
+    _write_json(blite_path, scores)
+    _write_json(ctrl_path, scores)
+
+    out_path = tmp_path / "gate_report.json"
+    lock_path = Path(str(out_path) + ".lock")
+
+    real_load_split = gate_eval._corpus.load_split
+
+    def _crash_right_after_test_read(corpus_dir_arg, split):
+        result = real_load_split(corpus_dir_arg, split)
+        if split == "test":
+            raise RuntimeError("simulated crash right after the one test read")
+        return result
+
+    monkeypatch.setattr(gate_eval._corpus, "load_split", _crash_right_after_test_read)
+
+    with pytest.raises(RuntimeError):
+        evaluate_gate(corpus_dir, blite_path, ctrl_path, out_path)
+
+    assert lock_path.exists(), "the lock sentinel must survive a crash right after the test read"
+    assert not out_path.exists(), "the run crashed before the report was ever written"
+
+    # Restore the real load_split -- the second call must be refused by the
+    # lock sentinel alone, before load_split is ever reached again.
+    monkeypatch.setattr(gate_eval._corpus, "load_split", real_load_split)
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("load_split must not be called once the lock sentinel exists")
+
+    monkeypatch.setattr(gate_eval._corpus, "load_split", _explode)
+
+    with pytest.raises(FileExistsError):
+        evaluate_gate(corpus_dir, blite_path, ctrl_path, out_path)
+
+
 def test_evaluate_gate_raises_on_missing_score_key(tmp_path):
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()

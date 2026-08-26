@@ -186,6 +186,23 @@ def build_manifest(corpus_dir: Path) -> dict:
     accepted_functions = len(functions)
     accepted_samples = len(samples)
 
+    def _required_stat(key: str) -> int:
+        """`gen_stats[key]`, or a clear `KeyError` naming the missing
+        bucket -- NEVER `.get(key, 0)` (final review MEDIUM): a malformed
+        or truncated `gen_stats.json` missing a required bucket must not
+        silently read as zero, which could flip `nondet_kill` (or
+        `floor_functions`, transitively, via a misleadingly-empty
+        `nondet_rate` denominator) to a false PASS. A malformed stats file
+        must fail loud, never read as a clean corpus."""
+        try:
+            return gen_stats[key]
+        except KeyError as exc:
+            raise KeyError(
+                f"gen_stats.json is missing required bucket {key!r} -- "
+                "a malformed stats file must not silently read as 0 and "
+                "risk a false floor PASS"
+            ) from exc
+
     binary_counts = {"0": 0, "1": 0}
     multiclass_counts: dict[str, int] = {}
     for row in samples:
@@ -206,10 +223,10 @@ def build_manifest(corpus_dir: Path) -> dict:
     # Determinism-verdict denominator (spec §12 amendment) -- see module
     # docstring: every bucket a harvested pair with a real determinism
     # verdict can land in, EXCEPT harvest_error (no HarvestResult at all).
-    nondet_rejected = gen_stats.get("nondet_rejected", 0)
-    truncated_rejected = gen_stats.get("truncated_rejected", 0)
-    balance_rejected = gen_stats.get("balance_rejected", 0)
-    gen_accepted_samples = gen_stats.get("accepted_samples", 0)
+    nondet_rejected = _required_stat("nondet_rejected")
+    truncated_rejected = _required_stat("truncated_rejected")
+    balance_rejected = _required_stat("balance_rejected")
+    gen_accepted_samples = _required_stat("accepted_samples")
     screened = nondet_rejected + truncated_rejected + balance_rejected + gen_accepted_samples
     nondet_rate = (nondet_rejected / screened) if screened else 0.0
     nondet_kill_pass = nondet_rate <= NONDET_REJECT_KILL

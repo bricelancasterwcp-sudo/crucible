@@ -288,6 +288,22 @@ def test_build_manifest_nondet_rate_uses_the_determinism_verdict_denominator(tmp
     assert manifest["floors"]["nondet_rate"] == pytest.approx(2 / 11)
 
 
+def test_build_manifest_raises_keyerror_on_missing_gen_stats_bucket(tmp_path):
+    """final review MEDIUM: a malformed `gen_stats.json` missing a required
+    bucket must fail loud (`KeyError`), never silently read as 0 via
+    `.get(key, 0)` -- that could flip `nondet_kill` to a false PASS on a
+    corrupted stats file."""
+    fn_id = "fn-missing-bucket"
+    _write_jsonl(tmp_path / "functions.jsonl", [{"fn_id": fn_id, "function_src": "def f():\n    return 1\n"}])
+    _write_jsonl(tmp_path / "samples.jsonl", [_sample_row(fn_id)])
+    # Deliberately missing "truncated_rejected".
+    (tmp_path / "gen_stats.json").write_text(json.dumps({
+        "nondet_rejected": 0, "balance_rejected": 0, "accepted_samples": 1,
+    }))
+    with pytest.raises(KeyError):
+        corpus.build_manifest(tmp_path)
+
+
 def test_build_manifest_samples_sha256_matches_the_file(tmp_path):
     fn_id = "fn-sha"
     _write_corpus(

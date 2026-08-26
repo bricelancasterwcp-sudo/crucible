@@ -37,6 +37,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from crucible.latent import config
+from crucible.latent import corpus as _corpus
 from crucible.latent.corpus import Sample
 from crucible.latent.gen import binary_label
 from crucible.latent.train import _load, _rank_auroc
@@ -412,3 +413,74 @@ def train_control(
     }
     (out_dir / "train_summary.json").write_text(json.dumps(summary, indent=2))
     return summary
+
+
+# -- honest test-time scoring: the control-arm mirror of train.score_split ----
+
+
+def score_split_control(
+    model_factory: Callable[[], "torch.nn.Module"],
+    tokenizer: Callable[[str], list[int]],
+    checkpoint_path,
+    corpus_dir,
+    split: str,
+    out_path,
+    *,
+    device: str,
+    allow_test: bool = False,
+) -> None:
+    """Mirror of `crucible.latent.train.score_split` for the control arm --
+    same contract, same `allow_test` guard, same score-file format. The
+    control arm never had a leakage problem to begin with (it always
+    scored purely from `render_control_input(function_src, args)` -- code
+    text plus the call's argument literal, never a recorded trace), so
+    there is no `unroll`-equivalent change here; this function exists
+    purely to give the control arm the same file-writer + one-legitimate-
+    test-read contract the treatment arm's `score_split` has, so
+    `crucible.latent.eval.evaluate_gate` can read both arms' score files
+    produced the exact same way.
+
+    Calls the SAME `_load` this module's `train_control` calls for
+    `split in ("train", "val")` -- `_load` (imported from
+    `crucible.latent.train`, not reimplemented) has no `allow_test` escape
+    hatch and never will. `split == "test"` is refused here too, unless
+    `allow_test=True` is passed explicitly, in which case this function
+    bypasses `_load` (it would always raise for "test") and calls
+    `crucible.latent.corpus.load_split(..., "test")` directly. Same
+    one-legitimate-caller contract as `train.score_split`: exactly once
+    per arm, by the ops gate procedure, after the prereg lock.
+    """
+    if split == "test" and not allow_test:
+        raise ValueError(
+            'crucible.latent.control.score_split_control refuses split="test" '
+            "unless allow_test=True is passed explicitly -- see this "
+            "function's own docstring for the one legitimate caller (the "
+            "ops gate procedure, exactly once per arm, after the prereg "
+            "lock)"
+        )
+
+    corpus_dir = Path(corpus_dir)
+    samples = (
+        _corpus.load_split(corpus_dir, "test") if split == "test" else _load(corpus_dir, split)
+    )
+
+    checkpoint = torch.load(Path(checkpoint_path), weights_only=False)
+    cfg = checkpoint["config"]
+    torch_device = torch.device(device)
+    model = model_factory().to(torch_device)
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+
+    scores: dict[str, float] = {}
+    batch_size = cfg["BATCH"]
+    max_len = cfg["CTRL_MAXLEN"]
+    with torch.no_grad():
+        for start in range(0, len(samples), batch_size):
+            batch = samples[start:start + batch_size]
+            logits, _binary_y = _forward_batch(model, tokenizer, batch, torch_device, max_len)
+            probs = torch.sigmoid(logits).cpu().numpy()
+
+            for sample, prob in zip(batch, probs):
+                scores[f"{sample.fn_id}:{sample.args}"] = float(prob)
+
+    Path(out_path).write_text(json.dumps(scores))

@@ -45,6 +45,7 @@ from crucible.latent.config import (
     PRED_HEADS,
     PRED_LAYERS,
     STATE_ENC_D,
+    STATE_ENC_HEADS,
     STATE_ENC_LAYERS,
 )
 
@@ -85,7 +86,7 @@ class StateEncoder(nn.Module):
         d_state: int = STATE_ENC_D,
         d_model: int = D_MODEL,
         n_layers: int = STATE_ENC_LAYERS,
-        n_heads: int = 8,
+        n_heads: int = STATE_ENC_HEADS,
     ) -> None:
         super().__init__()
         self.embed = nn.Embedding(vocab_size, d_state)
@@ -212,7 +213,7 @@ class BLite(nn.Module):
         d_model: int = D_MODEL,
         d_state: int = STATE_ENC_D,
         state_enc_layers: int = STATE_ENC_LAYERS,
-        state_enc_heads: int = 8,
+        state_enc_heads: int = STATE_ENC_HEADS,
         pred_layers: int = PRED_LAYERS,
         pred_heads: int = PRED_HEADS,
         n_classes: int = N_OUTCOME_CLASSES,
@@ -282,6 +283,68 @@ class BLite(nn.Module):
 
         binary_logit, class_logits = self.head(final_hidden)
         return pred_states, target_states, valid_mask, binary_logit, class_logits
+
+    def unroll(
+        self,
+        code_embed: Tensor,
+        input_ids: Tensor,
+        input_mask: Tensor,
+        n_steps: int,
+    ) -> Tensor:
+        """The honest test-time contract (final review CRITICAL): predict
+        forward from ``[z_code, z_input]`` alone, ``n_steps`` times,
+        NEVER touching a recorded/observed state -- no ``state_ids``, no
+        ``state_pad_mask``, no ``snapshots``, nowhere in this method. This
+        is what ``crucible.latent.train`` now grades the grounded head on
+        (both during training and at eval/gate time): the model predicts
+        what execution would look like, it never reads the trace it is
+        being scored against.
+
+        Args:
+            code_embed: ``(B, d_model)`` -- same frozen-encoder output
+                ``forward`` takes, used identically.
+            input_ids, input_mask: ``(B, L_in)`` -- ``encode_input``'s
+                token ids + PAD mask (True = PAD), the SAME embedding path
+                ``forward`` uses for ``z_input`` (``self.state_encoder``).
+            n_steps: number of self-predicted next-state positions to
+                append, one at a time.
+
+        Returns:
+            ``(B, d_model)`` -- the hidden at the LAST position after
+            ``n_steps`` autoregressive appends. Concretely: each step runs
+            ``self.predictor`` on the CURRENT sequence, takes its
+            ``final_hidden`` (the predictor's own next-state prediction from
+            the current last position), and appends that as the new last
+            position before the next step -- so the last step's
+            ``final_hidden`` IS the value sitting at the sequence's own
+            final position when the loop ends, returned directly rather
+            than recomputed with one more predictor call.
+
+        Fully differentiable (no ``torch.no_grad`` anywhere in this method)
+        -- gradients flow back through every predictor call and through
+        ``self.state_encoder`` via ``z_input``, same discipline as
+        ``forward``. Causal masking is ``self.predictor``'s own (unchanged
+        from ``forward``'s), re-applied fresh each step as the sequence
+        grows by one position. Deterministic in eval mode: no dropout runs
+        (``nn.Module.eval()`` disables it) and nothing else here is
+        stochastic.
+        """
+        if n_steps < 1:
+            raise ValueError(f"unroll requires n_steps >= 1, got {n_steps!r}")
+
+        z_input = self.state_encoder(input_ids, input_mask)  # (B, d_model)
+        seq = torch.cat([code_embed.unsqueeze(1), z_input.unsqueeze(1)], dim=1)  # (B, 2, d)
+        B = seq.shape[0]
+        seq_mask = torch.ones(B, 2, dtype=torch.bool, device=seq.device)
+
+        final_hidden = None
+        for _ in range(n_steps):
+            _hidden, final_hidden = self.predictor(seq, seq_mask)
+            seq = torch.cat([seq, final_hidden.unsqueeze(1)], dim=1)
+            seq_mask = torch.cat(
+                [seq_mask, torch.ones(B, 1, dtype=torch.bool, device=seq.device)], dim=1
+            )
+        return final_hidden
 
 
 def prediction_loss(pred: Tensor, target: Tensor, valid_mask: Tensor) -> Tensor:

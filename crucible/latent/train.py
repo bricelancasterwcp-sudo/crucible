@@ -63,8 +63,8 @@ from crucible.latent.state import PAD, VOCAB_SIZE, encode_input, encode_state_se
 # the call boundary, not a silently-ignored typo.
 _OVERRIDABLE_KEYS = (
     "LR", "BATCH", "MAX_STEPS", "EVAL_EVERY", "PATIENCE", "TRAIN_SEED",
-    "D_MODEL", "STATE_ENC_D", "STATE_ENC_LAYERS", "PRED_LAYERS", "PRED_HEADS",
-    "LAMBDA_ISO", "N_OUTCOME_CLASSES",
+    "D_MODEL", "STATE_ENC_D", "STATE_ENC_LAYERS", "STATE_ENC_HEADS",
+    "PRED_LAYERS", "PRED_HEADS", "LAMBDA_ISO", "N_OUTCOME_CLASSES",
 )
 
 
@@ -185,7 +185,21 @@ def _flatten_valid(x: Tensor, valid_mask: Tensor) -> Tensor:
 def _forward_batch(model: BLite, code_embedder, samples: list[Sample], device: torch.device):
     """One batch of `Sample`s through `model`. Returns the same six-tuple
     `BLite.forward` returns, plus `(binary_y, class_y)` -- the grounded
-    targets, built here from each sample's `outcome` string."""
+    targets, built here from each sample's `outcome` string.
+
+    Honest test-time contract (final review CRITICAL): `pred_states` /
+    `target_states` / `valid_mask` still come from `model.forward(...)`,
+    teacher-forced on the RECORDED state sequence -- `prediction_loss` and
+    `isotropy_loss` are unchanged, both still measured on the model's
+    ability to predict the ACTUAL observed next state. `binary_logit` /
+    `class_logits`, the grounded outcome targets the gate is graded on, are
+    computed SEPARATELY via `model.unroll(...)` + `model.head(...)` --
+    never from `forward`'s own (state-conditioned) `final_hidden`, whose
+    `binary_logit`/`class_logits` this function discards unused. This is
+    the honest test-time contract: the grounded head is trained on exactly
+    the representation it will be scored on at eval/gate time (`unroll`
+    alone), never on one that got to peek at the recorded trace.
+    """
     code_texts = [s.function_src for s in samples]
     # `.detach()` regardless of what the injected callable itself does --
     # a structural guarantee, on top of whatever "frozen" discipline the
@@ -195,21 +209,23 @@ def _forward_batch(model: BLite, code_embedder, samples: list[Sample], device: t
 
     input_seqs = [encode_input(s.args) for s in samples]
     input_ids, input_pad_mask = _pad_sequences(input_seqs, PAD)
+    input_ids, input_pad_mask = input_ids.to(device), input_pad_mask.to(device)
 
     state_seqs = [encode_state_sequence(s.snapshots, MAX_SNAPSHOTS) for s in samples]
     state_ids, state_pad_mask, seq_mask = _pad_state_batch(state_seqs, PAD)
-
-    binary_y = torch.tensor([binary_label(s.outcome) for s in samples], dtype=torch.float32)
-    class_y = torch.tensor([_outcome_class(s.outcome) for s in samples], dtype=torch.long)
-
-    input_ids, input_pad_mask = input_ids.to(device), input_pad_mask.to(device)
     state_ids, state_pad_mask = state_ids.to(device), state_pad_mask.to(device)
     seq_mask = seq_mask.to(device)
-    binary_y, class_y = binary_y.to(device), class_y.to(device)
 
-    pred_states, target_states, valid_mask, binary_logit, class_logits = model(
+    binary_y = torch.tensor([binary_label(s.outcome) for s in samples], dtype=torch.float32, device=device)
+    class_y = torch.tensor([_outcome_class(s.outcome) for s in samples], dtype=torch.long, device=device)
+
+    pred_states, target_states, valid_mask, _leaky_binary_logit, _leaky_class_logits = model(
         code_embed, input_ids, input_pad_mask, state_ids, state_pad_mask, seq_mask
     )
+
+    unrolled_final_hidden = model.unroll(code_embed, input_ids, input_pad_mask, n_steps=config.N_UNROLL_STEPS)
+    binary_logit, class_logits = model.head(unrolled_final_hidden)
+
     return pred_states, target_states, valid_mask, binary_logit, class_logits, binary_y, class_y
 
 
@@ -296,27 +312,54 @@ def _effective_rank(z: np.ndarray) -> float:
     return float(np.exp(entropy))
 
 
+def _unroll_batch(model: BLite, code_embedder, samples: list[Sample], device: torch.device):
+    """One batch of `Sample`s through `model.unroll` ONLY -- NEVER calls
+    `encode_state_sequence` and never builds `state_ids`/`state_pad_mask`/
+    `seq_mask` at all. This is the val-path counterpart to `_forward_batch`
+    (final review CRITICAL): early stopping now selects on exactly the
+    representation the gate reads at test time, so this function has no
+    code path through which a recorded snapshot sequence could reach it.
+    Returns `(binary_logit, unrolled_final_hidden, binary_y)`.
+    """
+    code_texts = [s.function_src for s in samples]
+    code_embed = code_embedder(code_texts).to(device).detach()
+
+    input_seqs = [encode_input(s.args) for s in samples]
+    input_ids, input_pad_mask = _pad_sequences(input_seqs, PAD)
+    input_ids, input_pad_mask = input_ids.to(device), input_pad_mask.to(device)
+
+    binary_y = torch.tensor([binary_label(s.outcome) for s in samples], dtype=torch.float32, device=device)
+
+    unrolled_final_hidden = model.unroll(code_embed, input_ids, input_pad_mask, n_steps=config.N_UNROLL_STEPS)
+    binary_logit, _class_logits = model.head(unrolled_final_hidden)
+    return binary_logit, unrolled_final_hidden, binary_y
+
+
 @torch.no_grad()
 def _evaluate(model: BLite, code_embedder, val_samples: list[Sample], device: torch.device,
               batch_size: int, d_model: int) -> dict:
     """One full pass over `val_samples`: grounded binary AUROC (via
     `_rank_auroc`) plus the two collapse probes (`latent_std_mean`,
-    `effective_rank`), both measured on the predictor's own PREDICTED latent
-    states (`pred_states`, the branch most exposed to collapse -- see
-    train_blite's docstring for why that branch was chosen over the target
-    states)."""
+    `effective_rank`) -- ALL THREE computed from `model.unroll`'s output
+    ONLY (`_unroll_batch`, final review CRITICAL). This function never
+    calls `encode_state_sequence` and never touches a sample's recorded
+    trace: early stopping now selects on exactly the honest test-time
+    regime the gate (`crucible.latent.eval`) reads, not on a
+    state-conditioned representation that would never be reachable at
+    actual gate time. The collapse probes are measured on `unroll`'s own
+    self-predicted final hidden (the model's "dreamed" state, the same
+    branch every grounded decision is now read from), replacing the
+    pre-fix probes' use of the teacher-forced `pred_states` -- consistent
+    with "the gate's regime" this early-stop signal is meant to track.
+    """
     model.eval()
     score_parts, y_parts, latent_parts = [], [], []
     for start in range(0, len(val_samples), batch_size):
         batch = val_samples[start:start + batch_size]
-        pred_states, _target, valid_mask, binary_logit, _class_logits, binary_y, _class_y = _forward_batch(
-            model, code_embedder, batch, device
-        )
+        binary_logit, unrolled_final_hidden, binary_y = _unroll_batch(model, code_embedder, batch, device)
         score_parts.append(torch.sigmoid(binary_logit).detach().cpu().numpy())
         y_parts.append(binary_y.detach().cpu().numpy())
-        z = _flatten_valid(pred_states, valid_mask).detach().float().cpu().numpy()
-        if z.shape[0]:
-            latent_parts.append(z)
+        latent_parts.append(unrolled_final_hidden.detach().float().cpu().numpy())
     model.train()
 
     scores = np.concatenate(score_parts) if score_parts else np.zeros(0)
@@ -416,6 +459,7 @@ def train_blite(
         d_model=cfg["D_MODEL"],
         d_state=cfg["STATE_ENC_D"],
         state_enc_layers=cfg["STATE_ENC_LAYERS"],
+        state_enc_heads=cfg["STATE_ENC_HEADS"],
         pred_layers=cfg["PRED_LAYERS"],
         pred_heads=cfg["PRED_HEADS"],
         n_classes=cfg["N_OUTCOME_CLASSES"],
@@ -491,3 +535,99 @@ def train_blite(
     }
     (out_dir / "train_summary.json").write_text(json.dumps(summary, indent=2))
     return summary
+
+
+# -- honest test-time scoring: unroll-only, no snapshots (final review CRITICAL) --
+
+
+def score_split(
+    checkpoint_path,
+    corpus_dir,
+    split: str,
+    out_path,
+    *,
+    code_embedder,
+    device: str,
+    allow_test: bool = False,
+) -> None:
+    """Score every sample in `split` with a trained B-lite checkpoint,
+    using ONLY `BLite.unroll` (never the recorded trace) -- the same
+    honest test-time contract `_evaluate`'s val-AUROC probe uses. Writes
+    the score-file format `crucible.latent.eval` documents: a JSON object
+    mapping `f"{fn_id}:{args}"` -> the predicted P(clean return) (sigmoid
+    of the unrolled binary logit).
+
+    Calls the SAME `_load` this module's training loop calls for
+    `split in ("train", "val")` -- `_load` itself has NO `allow_test`
+    escape hatch and never will: its whole job is to make "test"
+    structurally unreachable from the training code path, unconditionally.
+
+    `split == "test"` is refused HERE too, unless `allow_test=True` is
+    passed explicitly. When it is, this function bypasses `_load` entirely
+    (it would always raise) and calls `crucible.latent.corpus.load_split(
+    ..., "test")` directly. This does NOT reopen the one-read hole
+    `crucible.latent.eval.evaluate_gate` closes: `evaluate_gate` remains
+    the only code path that reads test AND gates a verdict on it, and it
+    still refuses a second run against the same `out_path` (its own lock
+    sentinel). `score_split`'s `allow_test=True` branch is a narrow,
+    explicit exception whose docstring is also its contract: it may be
+    called EXACTLY ONCE per arm, by the ops gate procedure, AFTER the
+    prereg lock, to produce the very score file `evaluate_gate` reads --
+    never from a retry loop, never speculatively, and never more than once
+    per arm's test scoring.
+
+    Loads `checkpoint_path` (a `train_blite`/`_save_checkpoint`-format
+    `{state_dict, config}` file) and reconstructs the exact `BLite`
+    architecture from its `config` snapshot -- including
+    `STATE_ENC_HEADS`, which `train_blite` now includes in every
+    checkpoint it writes for exactly this reason.
+    """
+    if split == "test" and not allow_test:
+        raise ValueError(
+            'crucible.latent.train.score_split refuses split="test" unless '
+            "allow_test=True is passed explicitly -- see this function's own "
+            "docstring for the one legitimate caller (the ops gate procedure, "
+            "exactly once per arm, after the prereg lock)"
+        )
+
+    corpus_dir = Path(corpus_dir)
+    samples = (
+        _corpus.load_split(corpus_dir, "test") if split == "test" else _load(corpus_dir, split)
+    )
+
+    checkpoint = torch.load(Path(checkpoint_path), weights_only=False)
+    cfg = checkpoint["config"]
+    torch_device = torch.device(device)
+    model = BLite(
+        VOCAB_SIZE,
+        d_model=cfg["D_MODEL"],
+        d_state=cfg["STATE_ENC_D"],
+        state_enc_layers=cfg["STATE_ENC_LAYERS"],
+        state_enc_heads=cfg["STATE_ENC_HEADS"],
+        pred_layers=cfg["PRED_LAYERS"],
+        pred_heads=cfg["PRED_HEADS"],
+        n_classes=cfg["N_OUTCOME_CLASSES"],
+    ).to(torch_device)
+    model.load_state_dict(checkpoint["state_dict"])
+    model.eval()
+
+    scores: dict[str, float] = {}
+    batch_size = cfg["BATCH"]
+    with torch.no_grad():
+        for start in range(0, len(samples), batch_size):
+            batch = samples[start:start + batch_size]
+            code_texts = [s.function_src for s in batch]
+            code_embed = code_embedder(code_texts).to(torch_device).detach()
+
+            input_seqs = [encode_input(s.args) for s in batch]
+            input_ids, input_pad_mask = _pad_sequences(input_seqs, PAD)
+            input_ids, input_pad_mask = input_ids.to(torch_device), input_pad_mask.to(torch_device)
+
+            unrolled_final_hidden = model.unroll(code_embed, input_ids, input_pad_mask, n_steps=config.N_UNROLL_STEPS)
+            binary_logit, _class_logits = model.head(unrolled_final_hidden)
+            probs = torch.sigmoid(binary_logit).cpu().numpy()
+
+            for sample, prob in zip(batch, probs):
+                scores[f"{sample.fn_id}:{sample.args}"] = float(prob)
+
+    Path(out_path).write_text(json.dumps(scores))

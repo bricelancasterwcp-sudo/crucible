@@ -18,6 +18,16 @@ EXEC_RLIMIT_AS_MB = 512
 # keeps the first MAX_SNAPSHOTS in execution order. chosen, prereg §4.
 MAX_SNAPSHOTS = 32
 
+# Hard cap, in characters, on one local's `value_repr` as harvest.py builds
+# it (`crucible.latent.harvest._build_snapshots`) -- tighter than
+# sensorium's own 200-char repr/str caps, deliberately: a snapshot is a
+# glance at state, not a value dump, and Task 4's state.py reads these
+# tuples expecting short, name-sorted rows. Moved here from a
+# harvest.py-local constant (final review MEDIUM: every other "chosen"
+# numeric threshold in this codebase lives in config.py with a citation).
+# chosen, prereg §4.
+VALUE_REPR_CAP = 64
+
 # Hard cap on a candidate function's total AST node count (ast.walk over the
 # whole module). A generated function above this is rejected by the corpus
 # validator with reason "node-count-exceeded" -- a crude but cheap guard
@@ -32,6 +42,15 @@ MAX_AST_NODES = 400
 # fraction exceeds this limit -- see crucible.latent.gen.generate_corpus.
 # chosen, prereg §4.
 SKEW_LIMIT = 0.80
+
+# Below this many ACCEPTED samples, the balance guard above never fires --
+# an early lucky/unlucky run of one class would trip it on noise alone. See
+# crucible.latent.gen._balance_guard_rejects. Moved here from a
+# gen.py-local constant (final review MEDIUM); tests still monkeypatch it
+# via `gen.BALANCE_GUARD_MIN_SAMPLES` (gen.py imports the name into its own
+# module namespace, so the monkeypatch target is unchanged) to exercise the
+# guard without generating 1000 real samples. chosen, prereg §4.
+BALANCE_GUARD_MIN_SAMPLES = 1000
 
 # Target number of ACCEPTED FUNCTIONS the corpus harvest (crucible.latent.gen
 # .generate_corpus) drives toward. chosen, prereg §4.
@@ -67,6 +86,24 @@ SPLIT_FRACTIONS = (0.8, 0.1, 0.1)
 # pairing. chosen, prereg §5.1.
 MAX_SNAPSHOT_TOKENS = 128
 
+# Hard cap, in CODEPOINTS, on one local's `value_repr` as
+# crucible.latent.state.encode_snapshot serializes it (sliced BEFORE utf-8
+# encoding, never after -- see encode_snapshot's own codepoint-vs-byte
+# note). Moved here from a state.py-local constant (final review MEDIUM);
+# behavior unchanged. Distinct from harvest.py's own VALUE_REPR_CAP (64
+# chars, a different cap applied at a different stage: harvest's caps the
+# repr harvest.py itself builds from sensorium's capture dict, this one
+# caps how much of THAT already-capped repr state.py further serializes
+# into snapshot tokens). chosen, prereg §5.1.
+STATE_VALUE_CAP = 24
+
+# Hard cap, in CODEPOINTS, on the call's args literal as
+# crucible.latent.state.encode_input serializes it (sliced BEFORE utf-8
+# encoding, same codepoint discipline as STATE_VALUE_CAP). Moved here from
+# a state.py-local constant (final review MEDIUM); behavior unchanged.
+# chosen, prereg §5.1.
+INPUT_CHAR_CAP = 96
+
 # ---- B-lite model dims (crucible.latent.model), chosen at lock, prereg §5.2 ----
 
 # Shared hidden width the frozen code encoder, the trained StateEncoder's
@@ -81,6 +118,16 @@ STATE_ENC_D = 512
 
 # StateEncoder's TransformerEncoder depth. chosen, prereg §5.2.
 STATE_ENC_LAYERS = 4
+
+# StateEncoder's attention head count -- shared by BOTH its callers
+# (`crucible.latent.model.StateEncoder`'s own constructor default and
+# `BLite`'s `state_enc_heads` constructor default, which forwards it down).
+# Moved here from a bare `8` literal at each of those two call sites (final
+# review MEDIUM); `train.py`'s checkpoint config snapshot also carries this
+# value (`_OVERRIDABLE_KEYS`), so a later loader (`score_split`) can
+# reconstruct the exact architecture a checkpoint was trained with even if
+# this default later changes. chosen, prereg §5.2.
+STATE_ENC_HEADS = 8
 
 # LatentPredictor's TransformerEncoder depth -- the ~100M-param,
 # EB-JEPA-shaped causal predictor over [z_code, z_input, z_s1..z_sT]
@@ -99,6 +146,17 @@ LAMBDA_ISO = 0.1
 # (prereg §4). The binary head (clean-return vs not) is the gating target;
 # this multiclass head is the descriptive/auxiliary one. chosen, prereg §5.2.
 N_OUTCOME_CLASSES = 3
+
+# Number of autoregressive steps `BLite.unroll` takes -- [z_code, z_input]
+# plus this many self-predicted next-state embeddings, appended one at a
+# time, NEVER any recorded/observed state. This is the honest test-time
+# contract (final review CRITICAL): the grounded head's binary/class
+# predictions, at both train and eval/gate time, are read off `unroll`'s
+# output, never off a sequence built from `crucible.latent.harvest`'s
+# recorded snapshots -- the model predicts what execution would look like,
+# it never gets to read the trace it is being graded on. chosen, prereg
+# §5.2.
+N_UNROLL_STEPS = 8
 
 # ---- B-lite training harness (crucible.latent.train), chosen at lock, prereg §5.2 ----
 

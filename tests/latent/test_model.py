@@ -29,6 +29,7 @@ CPU, seeded, per the 4G-scope constraint on this test command.
 """
 from __future__ import annotations
 
+import pytest
 import torch
 
 from crucible.latent.model import (
@@ -431,6 +432,104 @@ def test_predictor_final_hidden_gathers_last_valid_position():
 
 
 # ---- GroundedHead: shapes + gradient flow ----------------------------------
+
+
+# ---- BLite.unroll: the honest test-time contract (final review CRITICAL) --
+
+
+def test_unroll_needs_only_code_and_input_and_has_the_right_shape():
+    """Signature pin: `unroll` takes exactly `(code_embed, input_ids,
+    input_mask, n_steps)` -- no state_ids, no state_pad_mask, no seq_mask,
+    no snapshots, nowhere in the call. Output is `(B, d_model)`."""
+    model = _tiny_blite()
+    B, L_in = 3, 5
+    code_embed = torch.randn(B, 16)
+    input_ids = torch.randint(0, VOCAB_SIZE, (B, L_in))
+    input_mask = torch.zeros(B, L_in, dtype=torch.bool)
+
+    out = model.unroll(code_embed, input_ids, input_mask, n_steps=4)
+    assert out.shape == (B, 16)
+    assert torch.isfinite(out).all()
+
+
+def test_unroll_is_deterministic_in_eval_mode():
+    model = _tiny_blite()
+    model.eval()
+    B, L_in = 2, 5
+    code_embed = torch.randn(B, 16)
+    input_ids = torch.randint(0, VOCAB_SIZE, (B, L_in))
+    input_mask = torch.zeros(B, L_in, dtype=torch.bool)
+
+    with torch.no_grad():
+        out_a = model.unroll(code_embed, input_ids, input_mask, n_steps=4)
+        out_b = model.unroll(code_embed, input_ids, input_mask, n_steps=4)
+    assert torch.equal(out_a, out_b)
+
+
+def test_unroll_gradient_flows_to_predictor_and_state_encoder_params():
+    model = _tiny_blite()
+    model.train()
+    B, L_in = 2, 5
+    code_embed = torch.randn(B, 16)
+    input_ids = torch.randint(0, VOCAB_SIZE, (B, L_in))
+    input_mask = torch.zeros(B, L_in, dtype=torch.bool)
+
+    out = model.unroll(code_embed, input_ids, input_mask, n_steps=3)
+    out.sum().backward()
+
+    assert model.predictor.encoder.layers[0].linear1.weight.grad is not None
+    assert model.state_encoder.embed.weight.grad is not None
+
+
+def test_unroll_output_identical_regardless_of_recorded_state_snapshots():
+    """THE decisive leakage pin. Build two forward() calls sharing the exact
+    same code_embed/input but DIFFERENT state_ids (standing in for two
+    samples with the same code+input but different recorded traces): the
+    grounded head reachable through `forward` DOES vary with the trace --
+    that dependency is exactly the leakage this whole fix moves training
+    and eval away from, confirmed here so a future change that accidentally
+    makes forward's own binary_logit trace-independent (which would make
+    this test vacuous) is itself caught. `unroll`'s output, computed from
+    code_embed+input alone, must be identical regardless: its signature has
+    no channel through which a differing snapshot sequence could ever
+    reach it, so a mutant that smuggled state data into `unroll` is what
+    this test exists to kill.
+    """
+    model = _tiny_blite()
+    model.eval()
+    B, T, L_in, L_state = 2, 3, 5, 4
+    torch.manual_seed(5)
+    code_embed = torch.randn(B, 16)
+    input_ids = torch.randint(0, VOCAB_SIZE, (B, L_in))
+    input_mask = torch.zeros(B, L_in, dtype=torch.bool)
+
+    state_ids_a = torch.randint(0, VOCAB_SIZE, (B, T, L_state))
+    state_ids_b = torch.randint(0, VOCAB_SIZE, (B, T, L_state))  # "different recorded snapshots"
+    state_pad_mask = torch.zeros(B, T, L_state, dtype=torch.bool)
+    seq_mask = torch.ones(B, T + 2, dtype=torch.bool)
+
+    with torch.no_grad():
+        _, _, _, binary_logit_a, _ = model(
+            code_embed, input_ids, input_mask, state_ids_a, state_pad_mask, seq_mask
+        )
+        _, _, _, binary_logit_b, _ = model(
+            code_embed, input_ids, input_mask, state_ids_b, state_pad_mask, seq_mask
+        )
+        unroll_a = model.unroll(code_embed, input_ids, input_mask, n_steps=4)
+        unroll_b = model.unroll(code_embed, input_ids, input_mask, n_steps=4)
+
+    assert not torch.allclose(binary_logit_a, binary_logit_b)
+    assert torch.equal(unroll_a, unroll_b)
+
+
+def test_unroll_rejects_zero_steps():
+    model = _tiny_blite()
+    B, L_in = 1, 5
+    code_embed = torch.randn(B, 16)
+    input_ids = torch.randint(0, VOCAB_SIZE, (B, L_in))
+    input_mask = torch.zeros(B, L_in, dtype=torch.bool)
+    with pytest.raises(ValueError):
+        model.unroll(code_embed, input_ids, input_mask, n_steps=0)
 
 
 def test_grounded_head_shapes_and_gradient_flow():

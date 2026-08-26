@@ -37,7 +37,9 @@ import torch
 
 from crucible.latent import corpus
 from crucible.latent import train as train_module
-from crucible.latent.train import train_blite
+from crucible.latent.model import BLite
+from crucible.latent.state import VOCAB_SIZE
+from crucible.latent.train import score_split, train_blite
 
 # -- synthetic corpus construction --------------------------------------------
 
@@ -131,6 +133,7 @@ TINY_OVERRIDES = {
     "D_MODEL": 8,
     "STATE_ENC_D": 8,
     "STATE_ENC_LAYERS": 1,
+    "STATE_ENC_HEADS": 2,
     "PRED_LAYERS": 1,
     "PRED_HEADS": 2,
     "LAMBDA_ISO": 0.1,
@@ -216,6 +219,10 @@ def test_train_blite_runs_learns_and_writes_artifacts(tmp_path, monkeypatch):
     assert "state_dict" in checkpoint
     assert "config" in checkpoint
     assert checkpoint["config"]["D_MODEL"] == TINY_OVERRIDES["D_MODEL"]
+    # STATE_ENC_HEADS moved into config.py (final review MEDIUM) and must be
+    # part of the checkpoint's own config snapshot -- score_split needs it
+    # to reconstruct the exact architecture a checkpoint was trained with.
+    assert checkpoint["config"]["STATE_ENC_HEADS"] == TINY_OVERRIDES["STATE_ENC_HEADS"]
 
 
 # -- NaN/inf loss is an infra failure, not a training result -------------------
@@ -361,3 +368,87 @@ def test_train_blite_saves_fallback_checkpoint_when_max_steps_below_eval_every(t
     # probes.jsonl exists (created fresh at the start of the run) but is
     # empty -- no EVAL_EVERY boundary was ever crossed.
     assert (out_dir / "probes.jsonl").read_text() == ""
+
+
+# -- val path never touches the recorded trace (final review CRITICAL) --------
+
+
+def test_evaluate_val_path_never_calls_encode_state_sequence(tmp_path, monkeypatch):
+    """`_evaluate` (val AUROC + collapse probes) must be computable entirely
+    from `model.unroll` -- it must never call `encode_state_sequence`
+    (which is what would touch a sample's recorded trace). Monkeypatched to
+    explode if called at all; `_evaluate` completing without raising IS the
+    pin."""
+    corpus_dir = _build_corpus(tmp_path)
+    val_samples = train_module._load(corpus_dir, "val")
+    embedder = _make_code_embedder(TINY_OVERRIDES["D_MODEL"])
+    model = BLite(
+        VOCAB_SIZE,
+        d_model=TINY_OVERRIDES["D_MODEL"],
+        d_state=TINY_OVERRIDES["STATE_ENC_D"],
+        state_enc_layers=TINY_OVERRIDES["STATE_ENC_LAYERS"],
+        state_enc_heads=TINY_OVERRIDES["STATE_ENC_HEADS"],
+        pred_layers=TINY_OVERRIDES["PRED_LAYERS"],
+        pred_heads=TINY_OVERRIDES["PRED_HEADS"],
+        n_classes=TINY_OVERRIDES["N_OUTCOME_CLASSES"],
+    )
+
+    def _explode(*args, **kwargs):
+        raise AssertionError("encode_state_sequence must not be called on the val path")
+
+    monkeypatch.setattr(train_module, "encode_state_sequence", _explode)
+
+    probe = train_module._evaluate(
+        model, embedder, val_samples, torch.device("cpu"), TINY_OVERRIDES["BATCH"], TINY_OVERRIDES["D_MODEL"]
+    )
+    assert set(probe) == {"val_auroc", "latent_std_mean", "effective_rank"}
+    assert isinstance(probe["val_auroc"], float)
+
+
+# -- score_split: honest unroll-only scoring for the ops gate procedure -------
+
+
+def test_score_split_writes_probabilities_for_every_sample_in_split(tmp_path):
+    corpus_dir = _build_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    embedder = _make_code_embedder(TINY_OVERRIDES["D_MODEL"])
+
+    train_blite(
+        corpus_dir, out_dir, code_embedder=embedder, device="cpu",
+        config_overrides=TINY_OVERRIDES,
+    )
+
+    scores_path = tmp_path / "val_scores.json"
+    score_split(
+        out_dir / "best.pt", corpus_dir, "val", scores_path,
+        code_embedder=embedder, device="cpu",
+    )
+
+    assert scores_path.exists()
+    scores = json.loads(scores_path.read_text())
+
+    val_samples = train_module._load(corpus_dir, "val")
+    expected_keys = {f"{s.fn_id}:{s.args}" for s in val_samples}
+    assert set(scores) == expected_keys
+    assert len(scores) == len(val_samples)  # no duplicate-key collisions
+    for prob in scores.values():
+        assert isinstance(prob, float)
+        assert 0.0 <= prob <= 1.0
+
+
+def test_score_split_refuses_test_split_without_allow_test(tmp_path):
+    corpus_dir = _build_corpus(tmp_path)
+    out_dir = tmp_path / "out"
+    embedder = _make_code_embedder(TINY_OVERRIDES["D_MODEL"])
+
+    train_blite(
+        corpus_dir, out_dir, code_embedder=embedder, device="cpu",
+        config_overrides=TINY_OVERRIDES,
+    )
+
+    with pytest.raises(ValueError):
+        score_split(
+            out_dir / "best.pt", corpus_dir, "test", tmp_path / "test_scores.json",
+            code_embedder=embedder, device="cpu",
+        )
+    assert not (tmp_path / "test_scores.json").exists()

@@ -60,17 +60,17 @@ import re
 from pathlib import Path
 from typing import Callable
 
-from crucible.latent.config import MAX_AST_NODES, SKEW_LIMIT
+from crucible.latent.config import BALANCE_GUARD_MIN_SAMPLES, MAX_AST_NODES, SKEW_LIMIT
 from crucible.latent.harvest import HarvestError, Snapshot, harvest
 
 # Balance guard (spec §4): the corpus's binary outcome must not be skewed
-# past SKEW_LIMIT once it has enough samples to make "skew" a meaningful
-# statement. Below this many ACCEPTED samples, an early lucky/unlucky run of
-# one class would trip the guard on noise alone -- see generate_corpus.
-# Module-level (not config.py) since it is a mechanism knob of THIS
-# generator, not a corpus-wide constant other tasks read; tests monkeypatch
-# it directly to exercise the guard without generating 1000 real samples.
-BALANCE_GUARD_MIN_SAMPLES = 1000
+# past SKEW_LIMIT once it has enough samples (BALANCE_GUARD_MIN_SAMPLES) to
+# make "skew" a meaningful statement -- see generate_corpus. Both knobs now
+# live in config.py (final review MEDIUM); `BALANCE_GUARD_MIN_SAMPLES` is
+# imported into this module's own namespace, so
+# `monkeypatch.setattr(gen, "BALANCE_GUARD_MIN_SAMPLES", ...)` still works
+# exactly as before -- it patches THIS module's binding, which is what
+# `_balance_guard_rejects` reads.
 
 # Name-level deny-list (controller ruling, strengthens the brief's call-level
 # ban). Any bare reference (ast.Name, Load context) to one of these is a

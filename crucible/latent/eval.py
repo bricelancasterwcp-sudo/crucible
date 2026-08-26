@@ -521,13 +521,14 @@ def evaluate_gate(corpus_dir, blite_scores_path, ctrl_scores_path, out_path) -> 
     Order of operations, load-bearing for the ONE-READ discipline (and for
     shrinking the window in which the test split gets read at all):
 
-    1. `out_path` existence is checked FIRST, before anything else runs --
-       a second call against the same `out_path` raises `FileExistsError`
-       immediately, before `crucible.latent.corpus.load_split` is ever
-       called. This is what makes "reads the test split ONCE" true of the
-       function as a whole, not just of one call in isolation: there is no
-       way to reach a second `load_split(corpus_dir, "test")` through this
-       function, ever, for a given `out_path`.
+    1. `out_path` existence, OR its `<out_path>.lock` sentinel's existence,
+       is checked FIRST, before anything else runs -- a second call against
+       the same `out_path` raises `FileExistsError` immediately, before
+       `crucible.latent.corpus.load_split` is ever called. This is what
+       makes "reads the test split ONCE" true of the function as a whole,
+       not just of one call in isolation: there is no way to reach a
+       second `load_split(corpus_dir, "test")` through this function,
+       ever, for a given `out_path`.
     2. Both score files are loaded AND VALIDATED (`_load_scores`: valid
        JSON object, every value numeric, finite, in `[0, 1]`) BEFORE the
        test split is ever read. A malformed or garbage score file (bad
@@ -535,6 +536,16 @@ def evaluate_gate(corpus_dir, blite_scores_path, ctrl_scores_path, out_path) -> 
        at all for this invocation -- a caller who fixes a broken score
        file and retries with the same `out_path` only ever reads test on
        the eventual successful call, not once per broken attempt.
+    2b. The `<out_path>.lock` sentinel is written (empty file) IMMEDIATELY
+       before `load_split(corpus_dir, "test")` is called (final review
+       MEDIUM) -- the honest, permanent "test was read for this out_path"
+       marker. It is never removed, including on a successful run (once
+       written, `out_path` existing is a redundant second signal of the
+       same fact, not a replacement for it): if this call crashes AFTER
+       reading test but before writing `out_path` (a bug further down, an
+       OOM, a killed process), the sentinel alone still correctly refuses
+       any rerun against the same `out_path` -- the test split WAS read,
+       whether or not the run finished.
     3. `load_split(corpus_dir, "test")` -- the ONE call, assigned to
        `test_samples` and reused for every downstream computation (P1, P2,
        the static floor's `predict`, P3). No other `load_split(..., "test")`
@@ -566,11 +577,16 @@ def evaluate_gate(corpus_dir, blite_scores_path, ctrl_scores_path, out_path) -> 
     Writes the full report as JSON to `out_path` and returns it.
     """
     out_path = Path(out_path)
-    if out_path.exists():
+    lock_path = Path(str(out_path) + ".lock")
+    if out_path.exists() or lock_path.exists():
         raise FileExistsError(
-            f"{out_path} already exists -- evaluate_gate refuses to run twice "
-            "(the one-read rule: this function reads the test split exactly "
-            "once per out_path, and a rerun would read it again)"
+            f"{out_path} (or its lock sentinel {lock_path}) already exists -- "
+            "evaluate_gate refuses to run twice (the one-read rule: this "
+            "function reads the test split exactly once per out_path, and a "
+            "rerun would read it again). The lock sentinel is written BEFORE "
+            "the test split is read and is never removed, including if a "
+            "prior call crashed after reading test but before writing the "
+            "report -- the test split WAS read for this out_path either way."
         )
 
     corpus_dir = Path(corpus_dir)
@@ -580,6 +596,12 @@ def evaluate_gate(corpus_dir, blite_scores_path, ctrl_scores_path, out_path) -> 
     # out-of-range score file fails here without load_split being called.
     blite_scores_raw = _load_scores(blite_scores_path)
     ctrl_scores_raw = _load_scores(ctrl_scores_path)
+
+    # The honest "test was read" marker, written BEFORE the one load_split
+    # call below and never removed (final review MEDIUM, step 2b of this
+    # function's own docstring) -- a crash after this point still leaves
+    # proof that test was read for this out_path, refusing any rerun.
+    lock_path.write_text("")
 
     # The ONE call site of load_split(..., "test") in this function -- see
     # this function's own docstring for why that makes the whole module's

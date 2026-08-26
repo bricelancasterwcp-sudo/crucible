@@ -7,15 +7,15 @@ true: pure determinism, function-level grouping (no sample-level leakage
 across splits), the ±3pp fraction contract, and genuine seed-sensitivity (a
 mutant that drops `seed` from the hash must be caught here, not downstream).
 
-`build_manifest` is the ONLY place floor verdicts are computed; Task 4 (ops)
+`build_manifest` is the ONLY place floor verdicts are computed; Task 10 (ops)
 reads them off `manifest.json` and never recomputes them -- so this file also
 pins each floor's PASS/FAIL boundary independently (monkeypatched tighter),
-and pins the nondet_rate denominator: `nondet_rejected /
-(nondet_rejected + balance_rejected + accepted_samples)` -- the set of
-(function, input) pairs gen.py's `_harvest_and_write_samples` actually
-reached its determinism check for, per gen.py's own bucket ordering (harvest
-errors and truncated pairs never reach that check; see corpus.py's
-docstring).
+and pins the nondet_rate denominator (spec §12 amendment): `nondet_rejected /
+(nondet_rejected + truncated_rejected + balance_rejected + accepted_samples)`
+-- every (function, input) pair `harvest()` returned a real determinism
+verdict for, regardless of which bucket gen.py's `_harvest_and_write_samples`
+sorted it into; only `harvest_error` (no `HarvestResult` produced at all) is
+excluded. See corpus.py's module docstring for why.
 
 No subprocess, no real proposer, no real sensorium trace anywhere in this
 file -- synthetic corpora are built by writing `samples.jsonl` /
@@ -131,6 +131,38 @@ def test_assign_split_changes_with_seed():
     assert differ / n > 0.2
 
 
+def test_assign_split_golden_values_pin_the_sha256_big_endian_recipe():
+    """Fixed-value regression pin (round-1 review finding): the statistical
+    tests above (determinism, fractions, seed-sensitivity) do NOT constrain
+    which 8 bytes of the digest are read or in which byte order -- a mutant
+    that reads the same 8 bytes little-endian instead of big-endian passes
+    every one of them (it is still a deterministic, seed-mixed, uniform-ish
+    hash). This test pins `assign_split`'s exact recipe -- `sha256(f"{seed}:
+    {fn_id}")`, first 8 bytes, BIG-ENDIAN, `/ 2**64` -- against silent
+    byte-order or hash-function drift, by hardcoding the real output for
+    fixed (fn_id, seed) pairs, one per split bucket. Values computed ONCE
+    against the current implementation (verified against a hand-rolled
+    reference in this same recipe) and then frozen here; this recipe is the
+    one recorded in the LOCK record.
+
+    Each of the three fn_ids below was chosen specifically because its
+    big-endian split DIFFERS from what little-endian would produce for the
+    same bytes (verified live against a little-endian mutant of
+    `assign_split` -- see the task-3 fix report) -- so a byte-order
+    regression is guaranteed to flip at least one, not pass by coincidence:
+
+    - "golden-split-1", seed=0: sha256(...)[:8] = 2be44662413001d4,
+      u = 0.17145194910807507 -> "train" (little-endian would give "val")
+    - "golden-split-0", seed=0: sha256(...)[:8] = cfb3ab4987cc2379,
+      u = 0.8113352827565881  -> "val"   (little-endian would give "train")
+    - "golden-split-5", seed=0: sha256(...)[:8] = ff69fccd6dcbb5ab,
+      u = 0.9977109910521865  -> "test"  (little-endian would give "train")
+    """
+    assert corpus.assign_split("golden-split-1", 0) == "train"
+    assert corpus.assign_split("golden-split-0", 0) == "val"
+    assert corpus.assign_split("golden-split-5", 0) == "test"
+
+
 # -- Sample deserialization ----------------------------------------------------
 
 
@@ -228,13 +260,16 @@ def test_build_manifest_exact_counts_and_class_balance(tmp_path):
     assert on_disk == manifest
 
 
-def test_build_manifest_nondet_rate_uses_the_determinism_screened_denominator(tmp_path):
-    """nondet_rate = nondet_rejected / (nondet_rejected + balance_rejected +
-    accepted_samples) -- NOT divided by candidates, harvest_error, or
-    truncated_rejected, none of which ever reached the determinism check in
-    gen.py's `_harvest_and_write_samples` (harvest_error: harvest() raised,
-    no HarvestResult to check; truncated_rejected: `continue`d before the
-    determinism check runs)."""
+def test_build_manifest_nondet_rate_uses_the_determinism_verdict_denominator(tmp_path):
+    """spec §12 amendment: nondet_rate = nondet_rejected / (nondet_rejected +
+    truncated_rejected + balance_rejected + accepted_samples) -- every pair
+    harvest() returned a real determinism verdict for (harvest.harvest()
+    computes `deterministic` unconditionally, before truncation is even
+    considered), REGARDLESS of which bucket gen.py's
+    `_harvest_and_write_samples` sorted it into. `candidates` and
+    `harvest_error` must NOT appear: `candidates` is a function-level count,
+    and `harvest_error` means harvest() raised -- no HarvestResult, so no
+    verdict at all to count."""
     fn_id = "fn-nondet-rate"
     _write_corpus(
         tmp_path,
@@ -243,14 +278,14 @@ def test_build_manifest_nondet_rate_uses_the_determinism_screened_denominator(tm
         gen_stats={
             "candidates": 999,          # must NOT appear in the denominator
             "harvest_error": 50,        # must NOT appear in the denominator
-            "truncated_rejected": 50,   # must NOT appear in the denominator
+            "truncated_rejected": 3,    # MUST appear in the denominator (§12 amendment)
             "nondet_rejected": 2,
             "balance_rejected": 1,
             "accepted_samples": 5,
         },
     )
     manifest = corpus.build_manifest(tmp_path)
-    assert manifest["floors"]["nondet_rate"] == pytest.approx(2 / 8)
+    assert manifest["floors"]["nondet_rate"] == pytest.approx(2 / 11)
 
 
 def test_build_manifest_samples_sha256_matches_the_file(tmp_path):
@@ -307,7 +342,7 @@ def test_floor_functions_verdict_flips_under_a_tighter_monkeypatched_floor(tmp_p
 
 def test_nondet_kill_verdict_flips_under_a_tighter_monkeypatched_limit(tmp_path, monkeypatch):
     _tiny_corpus(tmp_path, nondet_rejected=2, balance_rejected=1, gen_accepted_samples=5)
-    # nondet_rate = 2 / (2 + 1 + 5) = 0.25
+    # nondet_rate = 2 / (2 + 0[truncated_rejected] + 1 + 5) = 0.25
 
     monkeypatch.setattr(corpus, "NONDET_REJECT_KILL", 0.5)
     assert corpus.build_manifest(tmp_path)["floors"]["nondet_kill"] == "PASS"

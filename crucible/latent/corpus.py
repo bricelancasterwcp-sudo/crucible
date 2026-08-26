@@ -14,24 +14,31 @@ tasks depend on:
   own inputs and gets evaluated on the rest).
 * `build_manifest`: counts, class balance, split sizes, and floor verdicts,
   written to `manifest.json` AND returned. Floor verdicts are computed HERE
-  ONLY -- Task 4 (ops) reads `"floor_functions"` / `"nondet_kill"` /
+  ONLY -- Task 10 (ops) reads `"floor_functions"` / `"nondet_kill"` /
   `"skew_ok"` off the manifest and must never recompute them ad hoc; if a
   floor's meaning changes, it changes in exactly one place.
 
-Honesty note on `nondet_rate`'s denominator (self-review requirement, worth
-stating plainly): it is `nondet_rejected / (nondet_rejected +
-balance_rejected + accepted_samples)` -- the (function, input) pairs that
-actually reached gen.py's determinism check. Reading
-`crucible.latent.gen._harvest_and_write_samples`'s own bucket ordering: a
-pair that raised `HarvestError`/`OSError` (`harvest_error`) never produced a
-`HarvestResult` to check at all, and a pair whose `result.truncated` was True
-(`truncated_rejected`) is `continue`d BEFORE `result.deterministic` is even
-read. So neither bucket was ever determinism-screened, and folding them into
-the denominator would dilute a real nondeterminism problem with pairs that
-say nothing about determinism either way. `candidates` / `parse_fail` /
-`validate_fail` are FUNCTION-level buckets (whole candidates rejected before
-any sample-level harvesting happens) and are excluded for the same reason at
-a different level.
+Honesty note on `nondet_rate`'s denominator, AMENDED by the controller ruling
+at spec §12 (pre-lock): it is `nondet_rejected / (nondet_rejected +
+truncated_rejected + balance_rejected + accepted_samples)` -- every
+(function, input) pair `harvest()` actually returned a determinism verdict
+for. Reading `crucible.latent.harvest.harvest`: `deterministic` is computed
+UNCONDITIONALLY, before `HarvestResult` is even constructed (the two runs'
+`outcome` and state-hash are compared regardless of either run's
+`truncated`) -- so a truncated sample still carries a real True/False
+determinism verdict, it is simply `continue`d into `truncated_rejected` by
+`crucible.latent.gen._harvest_and_write_samples`'s bucket-priority ordering
+(truncation is checked before determinism there) rather than ALSO being
+tallied under `nondet_rejected` -- each sample lands in exactly one bucket,
+per that module's own sample-level conservation invariant. Per the §12
+amendment, that verdict counts toward the denominator regardless of which
+bucket carries it. Only `harvest_error` is excluded: a pair where
+`harvest()` itself raised (`HarvestError`/`OSError`) never produced a
+`HarvestResult`, so there is no verdict, computed or otherwise, to count.
+`candidates` / `parse_fail` / `validate_fail` remain excluded as
+FUNCTION-level buckets (whole candidates rejected before any sample-level
+harvesting happens) -- a different level entirely, not a determinism verdict
+at all.
 """
 from __future__ import annotations
 
@@ -146,7 +153,7 @@ def build_manifest(corpus_dir: Path) -> dict:
     """Assemble `manifest.json` from `functions.jsonl`, `samples.jsonl`, and
     `gen_stats.json` under `corpus_dir`; write it and return the same dict.
 
-    Schema (this IS the pre-registered interface Task 4 reads):
+    Schema (this IS the pre-registered interface Task 10 reads):
     ```
     {
       "accepted_functions": int,
@@ -196,11 +203,14 @@ def build_manifest(corpus_dir: Path) -> dict:
 
     floor_functions_pass = accepted_functions >= FLOOR_FUNCTIONS
 
-    # Determinism-screened denominator -- see module docstring.
+    # Determinism-verdict denominator (spec §12 amendment) -- see module
+    # docstring: every bucket a harvested pair with a real determinism
+    # verdict can land in, EXCEPT harvest_error (no HarvestResult at all).
     nondet_rejected = gen_stats.get("nondet_rejected", 0)
+    truncated_rejected = gen_stats.get("truncated_rejected", 0)
     balance_rejected = gen_stats.get("balance_rejected", 0)
     gen_accepted_samples = gen_stats.get("accepted_samples", 0)
-    screened = nondet_rejected + balance_rejected + gen_accepted_samples
+    screened = nondet_rejected + truncated_rejected + balance_rejected + gen_accepted_samples
     nondet_rate = (nondet_rejected / screened) if screened else 0.0
     nondet_kill_pass = nondet_rate <= NONDET_REJECT_KILL
 

@@ -5,7 +5,7 @@
 # window the prereg's floors are judged against (6 h wall; T2 ledger: generate_corpus
 # trusts the caller's bound). Usage: gen_corpus_detached.sh <out-dir> [target-functions]
 set -u
-OUT="$1"; TARGET="${2:-}"
+OUT="$(realpath -m "$1")"; TARGET="${2:-}"   # ABSOLUTE: harvest+sensorium compose paths off it
 cd /home/brice/workspace/crucible
 if [ -e "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
   echo "REFUSED: out dir $OUT exists and is non-empty (one corpus; pick a fresh dir)" >&2

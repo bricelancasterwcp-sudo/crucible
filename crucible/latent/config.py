@@ -32,3 +32,29 @@ MAX_AST_NODES = 400
 # fraction exceeds this limit -- see crucible.latent.gen.generate_corpus.
 # chosen, prereg §4.
 SKEW_LIMIT = 0.80
+
+# Target number of ACCEPTED FUNCTIONS the corpus harvest (crucible.latent.gen
+# .generate_corpus) drives toward. chosen, prereg §4.
+TARGET_FUNCTIONS = 5000
+
+# Floor gate (prereg §4): crucible.latent.corpus.build_manifest stamps
+# "floor_functions": "PASS" when the corpus's accepted-function count is at
+# least this many, else "FAIL" -- Task 4 (ops) reads this verdict off the
+# manifest, it does not recompute it. chosen, prereg §4.
+FLOOR_FUNCTIONS = 3000
+
+# Floor gate (prereg §4) on the harvest's nondeterminism-rejection rate:
+# build_manifest stamps "nondet_kill": "FAIL" once the fraction of
+# determinism-screened (function, input) pairs that came back nondeterministic
+# exceeds this -- a harvest process too noisy to trust past this point.
+# chosen, prereg §4.
+NONDET_REJECT_KILL = 0.40
+
+# Seed mixed into assign_split's hash (crucible.latent.corpus) -- fixed so a
+# corpus's train/val/test partition is reproducible run over run. chosen,
+# prereg §4.
+SPLIT_SEED = 0
+
+# Train/val/test fractions for assign_split's function-level hash partition
+# (prereg §4). Must sum to 1.0. chosen, prereg §4.
+SPLIT_FRACTIONS = (0.8, 0.1, 0.1)

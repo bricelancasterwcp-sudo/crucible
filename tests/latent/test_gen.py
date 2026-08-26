@@ -15,7 +15,7 @@ import json
 import pytest
 
 from crucible.latent import gen
-from crucible.latent.harvest import HarvestResult, Snapshot
+from crucible.latent.harvest import HarvestError, HarvestResult, Snapshot
 from crucible.run.types import Candidate
 
 # --- the local FakeProposer (house pattern, tests/run/test_arm.py) -----------
@@ -193,6 +193,23 @@ def test_validate_does_not_reject_a_bare_store_of_a_banned_name():
     assert gen.validate(src) is None
 
 
+def test_validate_rejects_dunder_in_string_format_traversal():
+    # CONTROLLER RULING, round 2 (falsification finding 1): the reviewer's
+    # exact example. `str.format`'s PEP 3101 field-name mini-language walks
+    # `.__class__` out of the STRING's own text at runtime -- it never
+    # produces an ast.Attribute node, so the dunder-attribute rule above
+    # cannot see it. Closed by rejecting any string CONSTANT containing
+    # "__", regardless of what the code goes on to do with it.
+    src = 'def f(a):\n    return "{0.__class__}".format(a)\n'
+    assert gen.validate(src) == "dunder-in-string"
+
+
+def test_validate_accepts_a_string_without_dunder_substring():
+    # sanity companion to the rule above: an ordinary string is not rejected.
+    src = 'def f(a):\n    return "hello " + str(a)\n'
+    assert gen.validate(src) is None
+
+
 # --- binary_label ----------------------------------------------------------------
 
 
@@ -360,3 +377,89 @@ def test_balance_guard_does_not_fire_below_the_min_sample_threshold(tmp_path, mo
 
     assert stats["balance_rejected"] == 0
     assert stats["accepted_samples"] == 3
+
+
+# --- conservation under harvest errors (CONTROLLER RULING, round 2 finding 2) ------
+#
+# `HarvestError`/`OSError` from `harvest()` itself is an environment problem, not a
+# sample outcome -- it must be counted (`harvest_error`), not silently dropped, and
+# it must not abort the whole run. A TRULY unexpected exception (anything else) must
+# still not lose the accounting seen so far: gen_stats.json is written in a `finally`,
+# marked `complete=False`, before the exception is allowed to propagate.
+
+
+def test_generate_corpus_counts_harvest_errors_and_continues(tmp_path, monkeypatch):
+    outcomes = iter([
+        HarvestError("no sensorium console script found"),
+        _result(),
+        _result(),
+    ])
+
+    def stub_harvest(src, args, workdir):
+        item = next(outcomes)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    monkeypatch.setattr(gen, "harvest", stub_harvest)
+    proposer = FakeProposer([CLEAN_TEXT])
+    stats = gen.generate_corpus(proposer, target_functions=1, out_dir=tmp_path, seed=0)
+
+    assert stats["harvest_error"] == 1
+    assert stats["accepted_samples"] == 2       # the other 2 of 3 inputs still harvested
+    assert stats["accepted_functions"] == 1     # the function is accepted regardless
+    assert stats["complete"] is True
+    on_disk = json.loads((tmp_path / "gen_stats.json").read_text())
+    assert on_disk == stats
+
+
+def test_generate_corpus_sample_level_conservation_includes_harvest_error(tmp_path, monkeypatch):
+    """Every (function, input) pair harvested lands in exactly one bucket: accepted,
+    truncated, nondet, balance, or harvest_error -- no pair vanishes."""
+    outcomes = iter([
+        HarvestError("boom"),
+        _result(truncated=True),
+        _result(deterministic=False),
+        _result(),
+    ])
+
+    def stub_harvest(src, args, workdir):
+        item = next(outcomes)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    monkeypatch.setattr(gen, "harvest", stub_harvest)
+    text = f"{CLEAN_SRC}INPUTS: [(1, 2), (3, 4), (5, 6), (7, 8)]\n"
+    proposer = FakeProposer([text])
+    stats = gen.generate_corpus(proposer, target_functions=1, out_dir=tmp_path, seed=0)
+
+    sample_total = (
+        stats["accepted_samples"] + stats["nondet_rejected"]
+        + stats["truncated_rejected"] + stats["balance_rejected"] + stats["harvest_error"]
+    )
+    assert sample_total == 4
+    assert stats["harvest_error"] == 1
+
+
+def test_generate_corpus_writes_partial_stats_with_complete_false_on_unhandled_error(tmp_path, monkeypatch):
+    """A genuinely unexpected exception (not HarvestError/OSError) is NOT swallowed --
+    it must still propagate -- but gen_stats.json is written first, in a `finally`,
+    with complete=False and the counts accumulated up to the crash. Exercised directly
+    against the real write path (no monkeypatched writer needed): raising a plain
+    ValueError from the harvest stub is not caught by the (HarvestError, OSError)
+    except clause, so it propagates out of generate_corpus for real."""
+    def stub_harvest(src, args, workdir):
+        raise ValueError("unexpected bug, not HarvestError/OSError")
+
+    monkeypatch.setattr(gen, "harvest", stub_harvest)
+    proposer = FakeProposer([CLEAN_TEXT])
+
+    with pytest.raises(ValueError):
+        gen.generate_corpus(proposer, target_functions=1, out_dir=tmp_path, seed=0)
+
+    on_disk = json.loads((tmp_path / "gen_stats.json").read_text())
+    assert on_disk["complete"] is False
+    assert on_disk["accepted_functions"] == 0
+    assert on_disk["candidates"] == 1   # the one candidate in flight when it crashed
+    assert on_disk["harvest_error"] == 0

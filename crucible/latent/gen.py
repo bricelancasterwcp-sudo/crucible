@@ -10,23 +10,46 @@ the sample twice and reports determinism/truncation). Every rejection at
 every stage is COUNTED, never silently dropped -- this module's whole job is
 an honest corpus, not a big one.
 
-Containment (read before trusting anything downstream of this module):
-`crucible.latent.harvest` does NOT sandbox filesystem writes -- a sample body
-can still `open()`/`shutil.rmtree`/etc a real file on this box, unbounded,
-for as long as `EXEC_TIMEOUT_S` allows (see harvest.py's own "Containment"
-note). `validate()` in this module is the actual containment for the corpus:
-it rejects Import/ImportFrom, Global/Nonlocal, any `__`-attribute access,
-oversized ASTs, and -- per the controller ruling that STRENGTHENS the
-brief -- any bare NAME-level Load of a builtin from a small deny-list
-(open/exec/eval/compile/__import__/globals/vars/getattr/setattr/delattr/
-input/breakpoint), not merely a *call* to one of them. The name-level ban
-closes the aliasing hole a call-only check would miss: `g = open; g(path,
-"w")` never contains an `ast.Call` node whose func is literally `open`, but
-it does contain a Load of the name `open`, which is banned regardless of
-what the code goes on to do with the reference. Every sample this module
-accepts has already been screened this way before it ever reaches
-`harvest()`; the threat model is "our own generator's output, occasionally
-buggy," not an adversarial sample (same threat model harvest.py documents).
+Containment (read before trusting anything downstream of this module, and
+read precisely -- this paragraph states what is actually held, not an
+aspiration): `crucible.latent.harvest` does NOT sandbox filesystem writes --
+a sample body can still `open()`/`shutil.rmtree`/etc a real file on this
+box, unbounded, for as long as `EXEC_TIMEOUT_S` allows (see harvest.py's own
+"Containment" note). `validate()` in this module is the actual containment
+for the corpus, and it holds exactly these lines, no more:
+
+- Import/ImportFrom, Global/Nonlocal, and an oversized AST are rejected
+  outright.
+- Any `.__something` ATTRIBUTE access is rejected (`dunder-attribute`) --
+  closes the `().__class__.__bases__[0].__subclasses__()` sandbox-escape
+  family reached via real `ast.Attribute` nodes.
+- Any bare NAME-level Load of a builtin from a small deny-list (open, exec,
+  eval, compile, __import__, globals, vars, getattr, setattr, delattr,
+  input, breakpoint) is rejected (`banned-builtin:<name>`), per the
+  controller ruling that STRENGTHENS the brief's call-level check to close
+  the aliasing hole: `g = open; g(path, "w")` never contains an `ast.Call`
+  node whose func is literally `open`, but it does contain a Load of the
+  name `open`.
+- Any STRING CONSTANT containing the substring `"__"` is rejected
+  (`dunder-in-string`) -- a second controller ruling, added after a live
+  falsification: `"{0.__class__}".format(a)` reaches a dunder attribute via
+  `str.format`'s PEP 3101 field-name mini-language, which is parsed out of
+  the string's own text at RUNTIME, never producing an `ast.Attribute` node
+  at all -- so the attribute-level rule above cannot see it. This
+  string-contents check is a coarse heuristic (it will also reject an
+  innocent string that merely happens to contain `"__"`), accepted
+  deliberately as the cheap fix for a hole that is otherwise invisible to
+  AST attribute walking.
+
+Residual, stated plainly rather than implied: this is a STATIC check over
+the literal source text. A sample that builds a dunder name at RUNTIME
+(string concatenation, `chr()` arithmetic, reading `"_" + "_class" + "_"`
+from a loop, etc.) is out of scope for what `validate()` can see and is not
+covered by either dunder rule above. This is accepted because the threat
+model documented throughout this module and harvest.py is "our own
+generator's output, occasionally buggy," not an adversarial sample actively
+trying to evade a known static check -- if the corpus ever has to ingest
+untrusted/adversarial code, this validator is not sufficient on its own.
 """
 from __future__ import annotations
 
@@ -38,7 +61,7 @@ from pathlib import Path
 from typing import Callable
 
 from crucible.latent.config import MAX_AST_NODES, SKEW_LIMIT
-from crucible.latent.harvest import Snapshot, harvest
+from crucible.latent.harvest import HarvestError, Snapshot, harvest
 
 # Balance guard (spec §4): the corpus's binary outcome must not be skewed
 # past SKEW_LIMIT once it has enough samples to make "skew" a meaningful
@@ -143,6 +166,9 @@ def validate(function_src: str) -> str | None:
     - `banned-builtin:<name>`: any bare Load of a name in the containment
       deny-list -- see the module docstring for why this is NAME-level, not
       call-level.
+    - `dunder-in-string`: any string constant containing `"__"` -- closes
+      the `str.format` field-name traversal hole (`"{0.__class__}".format
+      (a)`), see the module docstring's containment paragraph.
     """
     try:
         tree = ast.parse(function_src)
@@ -166,6 +192,9 @@ def validate(function_src: str) -> str | None:
         if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
                 and node.id in _BANNED_BUILTIN_NAMES):
             return f"banned-builtin:{node.id}"
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "__" in node.value):
+            return "dunder-in-string"
     return None
 
 
@@ -219,14 +248,24 @@ def generate_corpus(
       accepted_functions == candidates`).
     - SAMPLE level: every (accepted function, input) pair harvested is
       exactly one of `truncated_rejected`, `nondet_rejected`,
-      `balance_rejected`, or an accepted sample. A function is accepted
-      (written to `functions.jsonl`) independently of how many of its own
-      samples survive this stage -- **the balance guard rejects SAMPLES,
-      never the function they belong to**.
+      `balance_rejected`, `harvest_error`, or an accepted sample. A function
+      is accepted (written to `functions.jsonl`) independently of how many
+      of its own samples survive this stage -- **the balance guard rejects
+      SAMPLES, never the function they belong to**.
+
+    `harvest_error` counts a `HarvestError`/`OSError` raised BY `harvest()`
+    itself (e.g. environment problems -- no `sensorium` console script,
+    a disk write failure) for one (function, input) pair; the pair is
+    skipped and generation continues. Any OTHER exception is not swallowed:
+    it propagates out of this function, but `gen_stats.json` is still
+    written first (in a `finally`) with `"complete": False` and whatever
+    counts were accumulated up to that point -- a mid-run crash loses no
+    accounting for the candidates already processed, even though it does
+    abort the run.
 
     Writes `samples.jsonl` (one JSON line per accepted sample), `functions
     .jsonl` (one JSON line per accepted function), and `gen_stats.json`
-    (this function's return value, verbatim).
+    (this function's return value, verbatim, plus `"complete"`).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -241,43 +280,47 @@ def generate_corpus(
         "nondet_rejected": 0,
         "truncated_rejected": 0,
         "balance_rejected": 0,
+        "harvest_error": 0,
         "accepted_functions": 0,
         "accepted_samples": 0,
+        "complete": False,
     }
     class_counts = {0: 0, 1: 0}
     call_index = 0
 
     samples_path = out_dir / "samples.jsonl"
     functions_path = out_dir / "functions.jsonl"
-    with samples_path.open("w") as samples_f, functions_path.open("w") as functions_f:
-        while stats["accepted_functions"] < target_functions:
-            call_index += 1
-            candidates = proposer.generate(GEN_PROMPT, n=8, seed=seed + call_index)
-            for candidate in candidates:
-                stats["candidates"] += 1
-                parsed = parse_candidate(candidate.text)
-                if parsed is None:
-                    stats["parse_fail"] += 1
-                    continue
-                function_src, args_literals = parsed
-                reason = validate(function_src)
-                if reason is not None:
-                    stats["validate_fail"][reason] = stats["validate_fail"].get(reason, 0) + 1
-                    continue
+    try:
+        with samples_path.open("w") as samples_f, functions_path.open("w") as functions_f:
+            while stats["accepted_functions"] < target_functions:
+                call_index += 1
+                candidates = proposer.generate(GEN_PROMPT, n=8, seed=seed + call_index)
+                for candidate in candidates:
+                    stats["candidates"] += 1
+                    parsed = parse_candidate(candidate.text)
+                    if parsed is None:
+                        stats["parse_fail"] += 1
+                        continue
+                    function_src, args_literals = parsed
+                    reason = validate(function_src)
+                    if reason is not None:
+                        stats["validate_fail"][reason] = stats["validate_fail"].get(reason, 0) + 1
+                        continue
 
-                _harvest_and_write_samples(
-                    function_src, args_literals, scratch, samples_f, stats, class_counts,
-                )
-                fn_id = _fn_id(function_src)
-                functions_f.write(json.dumps({"fn_id": fn_id, "function_src": function_src}) + "\n")
-                stats["accepted_functions"] += 1
-                log(f"accepted function {stats['accepted_functions']}/{target_functions} "
-                    f"(fn_id={fn_id})")
+                    _harvest_and_write_samples(
+                        function_src, args_literals, scratch, samples_f, stats, class_counts,
+                    )
+                    fn_id = _fn_id(function_src)
+                    functions_f.write(json.dumps({"fn_id": fn_id, "function_src": function_src}) + "\n")
+                    stats["accepted_functions"] += 1
+                    log(f"accepted function {stats['accepted_functions']}/{target_functions} "
+                        f"(fn_id={fn_id})")
 
-                if stats["accepted_functions"] >= target_functions:
-                    break
-
-    (out_dir / "gen_stats.json").write_text(json.dumps(stats, indent=2))
+                    if stats["accepted_functions"] >= target_functions:
+                        break
+        stats["complete"] = True
+    finally:
+        (out_dir / "gen_stats.json").write_text(json.dumps(stats, indent=2))
     return stats
 
 
@@ -286,10 +329,20 @@ def _harvest_and_write_samples(
     samples_f, stats: dict, class_counts: dict[int, int],
 ) -> None:
     """Harvest every (function, input) pair for one accepted function,
-    filter+count each, and write the survivors to `samples_f`."""
+    filter+count each, and write the survivors to `samples_f`.
+
+    `HarvestError`/`OSError` from `harvest()` itself (environment problems,
+    not a sample-execution outcome -- see harvest.py's `HarvestError`
+    docstring) are caught here and counted in `stats["harvest_error"]`; the
+    pair is skipped, the function's remaining inputs are still attempted.
+    """
     fn_id = _fn_id(function_src)
     for args_literal in args_literals:
-        result = harvest(function_src, args_literal, scratch)
+        try:
+            result = harvest(function_src, args_literal, scratch)
+        except (HarvestError, OSError):
+            stats["harvest_error"] += 1
+            continue
 
         if result.truncated:
             stats["truncated_rejected"] += 1

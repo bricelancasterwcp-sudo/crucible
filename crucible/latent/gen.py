@@ -90,6 +90,12 @@ _BANNED_BUILTIN_NAMES = frozenset({
 # config.py) and directly monkeypatchable by tests.
 GEN_STATS_FLUSH_INTERVAL = 25
 
+# Same live-visibility knob as GEN_STATS_FLUSH_INTERVAL, but for the minority-
+# input second pass's own minority_stats.json (spec S12 pre-lock amendment,
+# see generate_minority_inputs) -- kept as its own name/value so the two
+# passes' flush cadences can diverge and be monkeypatched independently.
+MINORITY_STATS_FLUSH_INTERVAL = 50
+
 GEN_PROMPT = (
     "Write one short, self-contained Python function for a code-execution "
     "dataset.\n\n"
@@ -108,6 +114,39 @@ GEN_PROMPT = (
     "        return a - b\n"
     "    return b - a\n"
     "INPUTS: [(1, 2), (5, 5), (-3, 4), (10, -10), (0, 0)]\n"
+)
+
+# Minority-input second pass (spec S12 pre-lock amendment -- see
+# generate_minority_inputs). The proposer's SELF-PROPOSED inputs run ~92%
+# clean-return, which starves the pre-registered 80/20 balance guard of
+# exception/timeout samples once accepted_samples is large; this prompt asks
+# the SAME proposer for adversarial inputs to an ALREADY-ACCEPTED function
+# instead of a new function -- the function source is appended verbatim after
+# this prompt's own text (`MINORITY_PROMPT + function_src`), so all
+# instructions live before the code, not interleaved with a template
+# placeholder. Same `INPUTS: [...]` reply contract as GEN_PROMPT: a reply is
+# parsed by `_extract_inputs_list` (the same bracket/quote-aware extraction
+# `parse_candidate` uses), which does NOT require any text -- function source
+# or otherwise -- to precede the marker, since the function is already known
+# here and a terse reply that skips repeating it must not be penalized as a
+# parse failure.
+MINORITY_PROMPT = (
+    "Below is a Python function from a code-execution dataset. Its normal "
+    "example inputs already exist elsewhere in this dataset -- do not "
+    "repeat them.\n\n"
+    "Find 3 to 5 NEW argument tuples that make this function CRASH (raise "
+    "an exception) or exercise a genuine edge case: empty containers, "
+    "zero, huge integers, negative numbers where a positive one is "
+    "expected, or mismatched-but-plausible types for the same parameters. "
+    "Keep the SAME number of arguments the function actually takes -- do "
+    "not change arity unless the function itself accepts a variable "
+    "number of arguments (e.g. *args).\n\n"
+    "Give ONLY the argument tuples, as a Python list literal, on their own "
+    "line:\n"
+    "INPUTS: [(<args for call 1>), (<args for call 2>), ...]\n\n"
+    "Example, for `def f(a, b): return a / b`:\n"
+    "INPUTS: [(1, 0), (0, 0), (10**18, 1), (-1, -1), (1.5, 0)]\n\n"
+    "Function:\n"
 )
 
 
@@ -161,6 +200,36 @@ def parse_candidate(text: str) -> tuple[str, list[str]] | None:
     if not function_src.strip():
         return None
 
+    normalized = _extract_inputs_list(body, marker)
+    if normalized is None:
+        return None
+    return function_src, [repr(item) for item in normalized]
+
+
+def _extract_inputs_list(body: str, marker: re.Match[str] | None = None) -> list[tuple] | None:
+    """The bracket/quote-aware `INPUTS` literal extraction shared by
+    `parse_candidate` and `generate_minority_inputs` -- factored out
+    (spec S12 pre-lock amendment) so the minority pass can reuse the exact
+    same robust extraction on a reply that carries ONLY the `INPUTS: [...]`
+    line, with no function source (or anything else) before the marker --
+    `parse_candidate` itself additionally REQUIRES non-blank text before the
+    marker (that text becomes `function_src`), a constraint that has nothing
+    to do with locating or parsing the literal itself, so it stays in
+    `parse_candidate` rather than moving down into this function.
+
+    `marker` may be passed in by a caller (`parse_candidate`) that already
+    located the `INPUTS` marker via `_INPUTS_MARKER_RE`, avoiding a second
+    regex search over the same text; a bare caller omits it and this
+    function searches fresh. Returns the NORMALIZED list of argument tuples
+    (a bare non-tuple entry wrapped as a 1-tuple -- see `parse_candidate`'s
+    docstring on why), or `None` on any of: no marker, no `[` immediately
+    after it, an unterminated/unparseable literal, or an empty list.
+    """
+    if marker is None:
+        marker = _INPUTS_MARKER_RE.search(body)
+        if marker is None:
+            return None
+
     bracket_start = marker.end()
     if bracket_start >= len(body) or body[bracket_start] != "[":
         return None
@@ -175,8 +244,7 @@ def parse_candidate(text: str) -> tuple[str, list[str]] | None:
     if not isinstance(raw_inputs, list) or not raw_inputs:
         return None
 
-    normalized = [item if isinstance(item, tuple) else (item,) for item in raw_inputs]
-    return function_src, [repr(item) for item in normalized]
+    return [item if isinstance(item, tuple) else (item,) for item in raw_inputs]
 
 
 def _matching_bracket_end(text: str, open_index: int) -> int | None:
@@ -549,4 +617,276 @@ def _write_gen_stats(path: Path, stats: dict) -> None:
     functions) and the unconditional final write in `generate_corpus`'s
     `finally` block, so there is exactly one place that decides HOW the
     stats dict is serialized."""
+    _dump_stats_json(path, stats)
+
+
+def _dump_stats_json(path: Path, stats: dict) -> None:
+    """The actual serialization both `_write_gen_stats` and
+    `_write_minority_stats` delegate to -- kept as one shared body (DRY: the
+    two passes must serialize identically) while `_write_gen_stats` and
+    `_write_minority_stats` stay separate, independently-monkeypatchable
+    NAMES, each scoped to its own stats file and its own test suite."""
     path.write_text(json.dumps(stats, indent=2))
+
+
+# -- minority-input second pass (spec S12 pre-lock amendment) -----------------
+#
+# Context recorded by the controller: the 1.5B's SELF-proposed inputs
+# (generate_corpus, above) run ~92% clean-return, so the pre-registered 80/20
+# balance guard (_balance_guard_rejects) has been rejecting nearly every new
+# majority-class sample once BALANCE_GUARD_MIN_SAMPLES is reached -- the
+# corpus is minority-starved, not undersized. This pass does not touch the
+# guard, the endpoints, or the model: it asks the SAME proposer, for each
+# function the FIRST pass already accepted, to propose BREAKING inputs
+# instead of a new function -- enriching exception/timeout samples for
+# functions already in the corpus, one generate() call per function.
+
+
+def _scan_existing_corpus_state(samples_path: Path) -> tuple[dict[int, int], dict[str, set[str]]]:
+    """Scan `samples.jsonl` ONCE, before this pass writes anything, for the
+    two things it needs to seed itself correctly against whatever the corpus
+    already holds:
+
+    - `class_counts`: the REAL current binary-outcome balance (via
+      `binary_label`), read off every sample already on disk -- so
+      `_balance_guard_rejects` evaluates this pass's candidates against the
+      corpus as it ACTUALLY stands (first pass's samples included), never
+      against an empty-corpus assumption. This is the one property that
+      makes calling this a genuine SECOND pass rather than a fresh guard
+      reset: a corpus already sitting at the 80/20 skew limit must reject a
+      majority-class candidate on this pass's very first sample, not after
+      accumulating BALANCE_GUARD_MIN_SAMPLES of its own from zero.
+    - `args_by_fn`: every `(fn_id -> {args_literal, ...})` already written to
+      `samples.jsonl`, folded into this pass's per-function duplicate-input
+      check ALONGSIDE `functions.jsonl`'s original `args_literals` (see
+      `generate_minority_inputs`). This closes a crash-and-retry gap the
+      launcher's one-pass refusal (keyed off `minority_stats.json`'s
+      existence) cannot cover on its own: if a PRIOR minority-pass attempt
+      appended some samples before crashing, before `minority_stats.json`
+      ever got written, a second attempt over the same `corpus_dir` must not
+      re-harvest and duplicate those already-written samples.
+
+    Returns `({0: 0, 1: 0}, {})` if `samples.jsonl` does not exist yet.
+    """
+    class_counts = {0: 0, 1: 0}
+    args_by_fn: dict[str, set[str]] = {}
+    if not samples_path.exists():
+        return class_counts, args_by_fn
+    with samples_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            class_counts[binary_label(row["outcome"])] += 1
+            args_by_fn.setdefault(row["fn_id"], set()).add(row["args"])
+    return class_counts, args_by_fn
+
+
+def generate_minority_inputs(
+    proposer, corpus_dir: Path, *, seed: int, log: Callable[[str], None] = print,
+) -> dict:
+    """Second pass over an ALREADY-GENERATED corpus (spec S12 pre-lock
+    amendment): for every function `generate_corpus` already accepted (read
+    from `functions.jsonl`, in file order), ask `proposer` for BREAKING
+    inputs to that exact function instead of a new function, harvest every
+    genuinely new one, and append the survivors to the SAME `samples.jsonl`
+    the first pass wrote. Data generation only -- no threshold, endpoint, or
+    model change; `corpus_dir`'s `functions.jsonl` and `gen_stats.json` are
+    never opened for writing by this function.
+
+    One `proposer.generate()` call PER FUNCTION, `n=1`, temperature left at
+    the proposer's own default: `call_seed = seed + index`, `index` the
+    function's position in `functions.jsonl` starting at 0 -- the same
+    `seed + call_index` contract `generate_corpus` uses, applied here per
+    FUNCTION rather than per generate() batch. The prompt sent is
+    `MINORITY_PROMPT + function_src` (see `MINORITY_PROMPT`'s own docstring
+    on why the function is appended rather than templated in). The reply is
+    parsed with `_extract_inputs_list` -- NOT `parse_candidate` -- since a
+    minority reply need not repeat the function source at all.
+
+    A reply that fails to parse counts `parse_fail` for that FUNCTION (like
+    `generate_corpus`'s `parse_fail`, this is a per-candidate-text bucket,
+    not a per-input one) and moves on to the next function. Every input in a
+    reply that DOES parse lands in exactly one of these buckets (conservation
+    invariant, mutation-tested):
+
+    - `invalid_literal`: `repr(item)` does not itself round-trip back through
+      `ast.literal_eval` -- e.g. the proposer legitimately answering this
+      pass's own "huge integers" prompt with `1e400` (a valid literal that
+      overflows to `float('inf')` at parse time) produces `repr(inf) ==
+      "inf"`, a bare NAME that `ast.literal_eval` rejects. `harvest()`
+      decodes `args_literal` with `ast.literal_eval` at runtime (see
+      `harvest.py`'s `_write_runner_script`), so an input that cannot survive
+      that round trip can never actually be run -- caught here, before a
+      harvest is even attempted, rather than surfacing as an opaque
+      `harvest_error` later.
+    - `duplicate_input`: `repr(item)` is already in this function's
+      `args_literals` (from `functions.jsonl`) OR already in `samples.jsonl`
+      for this `fn_id` (from `_scan_existing_corpus_state` -- see its
+      docstring on the crash-and-retry case this also covers) OR was already
+      ACCEPTED earlier in this same reply (a proposer that repeats itself
+      within one list must not write the same sample twice either). No
+      duplicate sample is ever written.
+    - `harvest_error` / `truncated_rejected` / `nondet_rejected` /
+      `balance_rejected` / an accepted sample: identical meaning and
+      identical bucket-priority ordering to `generate_corpus`'s own
+      `_harvest_and_write_samples` (see `_harvest_and_write_minority_samples`,
+      which mirrors it). The balance guard (`_balance_guard_rejects`) is the
+      SAME function `generate_corpus` uses, evaluated against `class_counts`
+      seeded from the corpus's REAL current balance (see
+      `_scan_existing_corpus_state`) -- this pass never resets the guard to
+      zero, and never touches `config.SKEW_LIMIT` / `config.
+      BALANCE_GUARD_MIN_SAMPLES` itself.
+    - `accepted_minority` is incremented alongside `accepted_samples`
+      whenever the accepted sample's `binary_label` is `0` (`outcome !=
+      "return"`) -- this pass's entire purpose, made countable.
+
+    Every accepted sample is appended to `samples.jsonl` in the exact same
+    JSON-line shape `generate_corpus` writes (opened in APPEND mode, never
+    truncated -- this pass can only ever grow the corpus, never shrink or
+    rewrite it) and flushed immediately, same discipline as `generate_corpus`.
+    `minority_stats.json` (this function's return value, verbatim, plus
+    `"complete"`) is written to `corpus_dir` -- its OWN file, distinct from
+    `gen_stats.json`, so the two passes' provenance stays distinguishable --
+    flushed early every `MINORITY_STATS_FLUSH_INTERVAL` functions in addition
+    to the unconditional final write in a `finally` block (mirrors
+    `generate_corpus`'s live-visibility discipline exactly: a crash mid-run
+    still leaves `complete: False` and the real counts accumulated so far,
+    never an absent or stale stats file).
+    """
+    corpus_dir = Path(corpus_dir)
+    scratch = corpus_dir / "_minority_harvest_scratch"
+    functions_path = corpus_dir / "functions.jsonl"
+    samples_path = corpus_dir / "samples.jsonl"
+    minority_stats_path = corpus_dir / "minority_stats.json"
+
+    functions = [
+        json.loads(line) for line in functions_path.read_text().splitlines() if line.strip()
+    ]
+
+    stats = {
+        "seed": seed,
+        "functions_total": len(functions),
+        "functions_processed": 0,
+        "generate_calls": 0,
+        "parse_fail": 0,
+        "invalid_literal": 0,
+        "duplicate_input": 0,
+        "harvest_error": 0,
+        "nondet_rejected": 0,
+        "truncated_rejected": 0,
+        "balance_rejected": 0,
+        "accepted_samples": 0,
+        "accepted_minority": 0,
+        "complete": False,
+    }
+    class_counts, args_by_fn = _scan_existing_corpus_state(samples_path)
+
+    try:
+        with samples_path.open("a") as samples_f:
+            for index, fn in enumerate(functions):
+                function_src = fn["function_src"]
+                fn_id = fn["fn_id"]
+                existing_literals = set(fn.get("args_literals", ()))
+                existing_literals |= args_by_fn.get(fn_id, set())
+
+                call_seed = seed + index
+                stats["generate_calls"] += 1
+                candidates = proposer.generate(MINORITY_PROMPT + function_src, n=1, seed=call_seed)
+                reply = candidates[0].text
+                normalized = _extract_inputs_list(_unfence(reply))
+                stats["functions_processed"] += 1
+
+                if normalized is None:
+                    stats["parse_fail"] += 1
+                else:
+                    _harvest_and_write_minority_samples(
+                        fn_id, function_src, normalized, existing_literals,
+                        scratch, samples_f, stats, class_counts,
+                    )
+
+                log(f"minority pass {stats['functions_processed']}/{len(functions)} "
+                    f"(fn_id={fn_id})")
+
+                if stats["functions_processed"] % MINORITY_STATS_FLUSH_INTERVAL == 0:
+                    _write_minority_stats(minority_stats_path, stats)
+        stats["complete"] = True
+    finally:
+        _write_minority_stats(minority_stats_path, stats)
+    return stats
+
+
+def _harvest_and_write_minority_samples(
+    fn_id: str, function_src: str, inputs: list[tuple], existing_literals: set[str],
+    scratch: Path, samples_f, stats: dict, class_counts: dict[int, int],
+) -> None:
+    """Harvest every NEW candidate input for one already-accepted function,
+    bucket each into `stats`, and append survivors to `samples_f`. Mirrors
+    `_harvest_and_write_samples`'s bucket-priority ordering (harvest_error ->
+    truncated -> nondet -> balance -> accepted) with two checks ahead of it
+    that have no equivalent in the first pass, because the first pass never
+    sees a candidate input twice: `invalid_literal` and `duplicate_input`
+    (both explained on `generate_minority_inputs`'s own docstring) are
+    resolved BEFORE `harvest()` is ever called -- no point spending a harvest
+    on an input already in the corpus or one that cannot even round-trip
+    through `ast.literal_eval`.
+
+    `existing_literals` is MUTATED in place: an input accepted earlier in
+    this same call is immediately visible to the rest of this function's
+    inputs, so a proposer that repeats itself within one reply cannot cause
+    the same sample to be written twice.
+    """
+    for item in inputs:
+        literal = repr(item)
+        try:
+            ast.literal_eval(literal)
+        except (SyntaxError, ValueError):
+            stats["invalid_literal"] += 1
+            continue
+        if literal in existing_literals:
+            stats["duplicate_input"] += 1
+            continue
+
+        try:
+            result = harvest(function_src, literal, scratch)
+        except (HarvestError, OSError):
+            stats["harvest_error"] += 1
+            continue
+
+        if result.truncated:
+            stats["truncated_rejected"] += 1
+            continue
+        if not result.deterministic:
+            stats["nondet_rejected"] += 1
+            continue
+
+        label = binary_label(result.outcome)
+        if _balance_guard_rejects(label, class_counts):
+            stats["balance_rejected"] += 1
+            continue
+
+        class_counts[label] += 1
+        existing_literals.add(literal)
+        stats["accepted_samples"] += 1
+        if label == 0:
+            stats["accepted_minority"] += 1
+        samples_f.write(json.dumps({
+            "fn_id": fn_id,
+            "function_src": function_src,
+            "args": literal,
+            "outcome": result.outcome,
+            "return_repr": result.return_repr,
+            "snapshots": [_snapshot_to_json(s) for s in result.snapshots],
+        }) + "\n")
+        samples_f.flush()
+
+
+def _write_minority_stats(path: Path, stats: dict) -> None:
+    """The single minority_stats.json write path -- mirrors `_write_gen_stats`
+    exactly (delegates to the same `_dump_stats_json`), kept as its OWN name
+    so the two passes' periodic-flush test doubles
+    (`monkeypatch.setattr(gen, "_write_gen_stats"/"_write_minority_stats",
+    ...)`) can be swapped independently without one pass's spy intercepting
+    the other pass's writes."""
+    _dump_stats_json(path, stats)

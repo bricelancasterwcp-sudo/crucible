@@ -10,6 +10,7 @@ scripted `.generate(prompt, *, n, seed, ...)` returning objects with
 """
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -93,14 +94,68 @@ def test_parse_candidate_none_when_inputs_is_empty():
     assert gen.parse_candidate(text) is None
 
 
-def test_parse_candidate_none_when_inputs_entries_are_not_tuples():
+def test_parse_candidate_normalizes_non_tuple_entries_to_1_tuples():
+    # ROUND-3 controller ruling: a non-tuple entry is a legitimate single-arg
+    # call, not a rejection -- (5)/1/2/3 are bare literals, wrapped as 1-tuples.
     text = f"{CLEAN_SRC}INPUTS: [1, 2, 3]\n"
-    assert gen.parse_candidate(text) is None
+    parsed = gen.parse_candidate(text)
+    assert parsed is not None
+    _function_src, args_literals = parsed
+    assert args_literals == ["(1,)", "(2,)", "(3,)"]
 
 
 def test_parse_candidate_none_when_function_body_is_blank():
     text = "INPUTS: [(1,)]\n"
     assert gen.parse_candidate(text) is None
+
+
+# --- ROUND-3 controller ruling: robust INPUTS extraction (live-fire finding) -----
+#
+# Most real model candidates wrote `INPUTS = [...]` (assignment, not a labeled
+# `INPUTS:` line) -- the original regex-only extractor parse-failed nearly all of
+# them. Fixed by separating "find the marker" (`INPUTS` + `:` or `=`) from "find
+# the literal" (bracket/quote-aware scanning, not a greedy regex) -- see
+# parse_candidate's docstring.
+
+
+def test_parse_candidate_accepts_assignment_form():
+    text = f"{CLEAN_SRC}INPUTS = [(1, 2), (3, 4), (5, 6)]\n"
+    parsed = gen.parse_candidate(text)
+    assert parsed is not None
+    function_src, args_literals = parsed
+    assert function_src == CLEAN_SRC
+    assert args_literals == ["(1, 2)", "(3, 4)", "(5, 6)"]
+
+
+def test_parse_candidate_tolerates_trailing_text_after_the_closing_bracket():
+    # A trailing period/prose right after the list literal, on the same line,
+    # must not cause a rejection -- only the bracketed literal itself is ever
+    # evaluated; everything after it is simply never inspected.
+    text = f"{CLEAN_SRC}INPUTS: [(1, 2), (3, 4), (5, 6)]. These are example calls.\n"
+    parsed = gen.parse_candidate(text)
+    assert parsed is not None
+    _function_src, args_literals = parsed
+    assert args_literals == ["(1, 2)", "(3, 4)", "(5, 6)"]
+
+
+def test_parse_candidate_normalizes_a_single_parenthesized_value():
+    # (5) is Python GROUPING, not a 1-tuple: ast.literal_eval("(5)") == 5 (an
+    # int). A single-arg call is legitimate -- normalized to a 1-tuple, not
+    # rejected, exactly like the bare-literal case above.
+    text = "def f(a):\n    return a\nINPUTS: [(5), (6), (7)]\n"
+    parsed = gen.parse_candidate(text)
+    assert parsed is not None
+    _function_src, args_literals = parsed
+    assert args_literals == ["(5,)", "(6,)", "(7,)"]
+
+
+def test_parse_candidate_handles_assignment_form_inside_a_fence():
+    text = f"```python\n{CLEAN_SRC}INPUTS = [(1, 2), (3, 4), (5, 6)]\n```\n"
+    parsed = gen.parse_candidate(text)
+    assert parsed is not None
+    function_src, args_literals = parsed
+    assert function_src == CLEAN_SRC
+    assert args_literals == ["(1, 2)", "(3, 4)", "(5, 6)"]
 
 
 # --- validate: one rule per test (mutation pins) --------------------------------
@@ -533,3 +588,93 @@ def test_generate_corpus_derives_a_fresh_seed_per_call(tmp_path, monkeypatch):
     gen.generate_corpus(proposer, target_functions=3, out_dir=tmp_path, seed=100)
 
     assert seen_seeds == [100, 101, 102]
+
+
+# --- audit trail + live flushing (CONTROLLER RULING, round 3) ----------------------
+#
+# Live-fire round 2: 71 functions parsed and validated but produced 0 kept samples,
+# with no way to audit why -- functions.jsonl recorded only {fn_id, function_src}.
+# Fixed by carrying the normalized args_literals and a samples_kept count on every
+# function record, plus periodic gen_stats.json flushes and per-line file flushing
+# so an unattended long run's progress (or lack of it) is visible on disk, not only
+# in the final in-memory return value.
+
+
+def test_generate_corpus_writes_audit_fields_on_function_record(tmp_path, monkeypatch):
+    """A function accepted with some inputs kept and some rejected: the audit
+    record must carry the FULL normalized args_literals list (not just the kept
+    ones) and the correct samples_kept count -- this is exactly what would have
+    made the live-fire "71 functions, 0 kept samples" mystery visible on disk."""
+    outcomes = iter([
+        _result(),                     # kept
+        _result(truncated=True),       # rejected -> NOT kept
+        _result(),                     # kept
+    ])
+    monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: next(outcomes))
+    proposer = FakeProposer([CLEAN_TEXT])   # 3 inputs: (1, 2), (3, 4), (5, 6)
+
+    gen.generate_corpus(proposer, target_functions=1, out_dir=tmp_path, seed=0)
+
+    functions = [json.loads(line) for line in (tmp_path / "functions.jsonl").read_text().splitlines()]
+    assert len(functions) == 1
+    record = functions[0]
+    assert record["args_literals"] == ["(1, 2)", "(3, 4)", "(5, 6)"]
+    assert record["samples_kept"] == 2   # 2 of 3 kept; 1 truncated -- now auditable
+
+
+def test_generate_corpus_flushes_gen_stats_periodically(tmp_path, monkeypatch):
+    """With the flush interval monkeypatched to 2, gen_stats.json must be written
+    to disk TWICE during the run (at accepted_functions == 2 and == 4) in addition
+    to the unconditional final write -- and the periodic snapshots must show the
+    PARTIAL counts as of that moment, not the completed run's final counts."""
+    monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: _result())
+    monkeypatch.setattr(gen, "GEN_STATS_FLUSH_INTERVAL", 2)
+    texts = [f"def f(a):\n    return a + {i}\nINPUTS: [(1,)]\n" for i in range(5)]
+    proposer = FakeProposer(texts)   # 5 distinct functions -> exactly 5 calls, 1 each
+
+    calls: list[dict] = []
+    real_write = gen._write_gen_stats
+
+    def spy_write(path, stats):
+        calls.append(copy.deepcopy(stats))   # snapshot NOW, not a live reference
+        real_write(path, stats)
+
+    monkeypatch.setattr(gen, "_write_gen_stats", spy_write)
+
+    final_stats = gen.generate_corpus(proposer, target_functions=5, out_dir=tmp_path, seed=0)
+
+    assert len(calls) == 3   # periodic @2, periodic @4, unconditional final
+    assert calls[0]["accepted_functions"] == 2
+    assert calls[0]["flushed_at_functions"] == 2
+    assert calls[0]["complete"] is False        # mid-run: NOT yet the final write
+    assert calls[1]["accepted_functions"] == 4
+    assert calls[1]["flushed_at_functions"] == 4
+    assert calls[2]["accepted_functions"] == 5  # the final write
+    assert calls[2]["complete"] is True
+
+    on_disk = json.loads((tmp_path / "gen_stats.json").read_text())
+    assert on_disk == final_stats
+    # target_functions=5 is not a multiple of the interval (2) -- the LAST
+    # periodic checkpoint stays at 4, distinct from the final accepted_functions.
+    assert final_stats["flushed_at_functions"] == 4
+
+
+def test_generate_corpus_flushes_each_line_without_waiting_for_close(tmp_path, monkeypatch):
+    """Both output files must be flushed to disk after EVERY line, not only when
+    their handles close -- proven by reading them from a second file handle WHILE
+    generate_corpus's own `with` block is still open (via the `log` hook, which
+    fires right after functions_f's write+flush for the run's one accepted
+    function). If flushing were missing, these reads would see 0 bytes."""
+    monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: _result())
+    proposer = FakeProposer([CLEAN_TEXT])
+    seen_mid_run: dict[str, int] = {}
+
+    def log_hook(_msg: str) -> None:
+        seen_mid_run["functions_bytes"] = (tmp_path / "functions.jsonl").stat().st_size
+        seen_mid_run["samples_bytes"] = (tmp_path / "samples.jsonl").stat().st_size
+
+    gen.generate_corpus(proposer, target_functions=1, out_dir=tmp_path, seed=0, log=log_hook)
+
+    assert seen_mid_run  # the hook really fired
+    assert seen_mid_run["functions_bytes"] > 0
+    assert seen_mid_run["samples_bytes"] > 0

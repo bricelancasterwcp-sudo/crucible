@@ -81,6 +81,15 @@ _BANNED_BUILTIN_NAMES = frozenset({
     "getattr", "setattr", "delattr", "input", "breakpoint",
 })
 
+# Live-visibility knob (controller ruling, round-3 live-fire fix): every
+# this many ACCEPTED functions, generate_corpus flushes gen_stats.json to
+# disk early (in addition to the unconditional write when the run ends) --
+# an unattended multi-hour run that stalls or crashes silently should not
+# leave a 0-byte/absent stats file with no way to tell how far it got. An
+# ops/UX knob, not a prereg-cited number -- kept local to this module (not
+# config.py) and directly monkeypatchable by tests.
+GEN_STATS_FLUSH_INTERVAL = 25
+
 GEN_PROMPT = (
     "Write one short, self-contained Python function for a code-execution "
     "dataset.\n\n"
@@ -103,9 +112,20 @@ GEN_PROMPT = (
 
 
 # -- candidate parsing --------------------------------------------------------
+#
+# Round-3 controller ruling (live-fire finding): the original regex-only
+# extractor (`^INPUTS:\s*(\[.*\])\s*$`) rejected most real model output --
+# `INPUTS = [...]` (assignment, not a labeled line) parse-failed outright,
+# and any trailing prose/punctuation after the closing bracket on the same
+# line ALSO parse-failed it (the `\s*$` anchor demanded nothing else on the
+# line). Both are fixed below by separating "find the marker" from "find the
+# literal": the marker regex only locates `INPUTS` followed by `:` or `=`;
+# the literal itself is then extracted by bracket/quote-aware scanning
+# (`_matching_bracket_end`), not a greedy regex, so trailing text after the
+# closing bracket is simply never looked at, on any line.
 
-_FENCE_RE = re.compile(r"```(?:python)?\n(.*?)```", re.DOTALL)
-_INPUTS_RE = re.compile(r"^INPUTS:\s*(\[.*\])\s*$", re.MULTILINE)
+_FENCE_RE = re.compile(r"```[a-zA-Z0-9_+-]*[ \t]*\r?\n?(.*?)```", re.DOTALL)
+_INPUTS_MARKER_RE = re.compile(r"^INPUTS\s*[:=]\s*", re.MULTILINE)
 
 
 def parse_candidate(text: str) -> tuple[str, list[str]] | None:
@@ -114,33 +134,87 @@ def parse_candidate(text: str) -> tuple[str, list[str]] | None:
 
     This is intentionally a LOOSE extraction step -- it does not judge
     whether `function_src` is a well-formed, safe function (that is
-    `validate`'s job, run separately by the caller). It fails closed (`None`)
-    on: no `INPUTS:` line at all, an unparseable or empty inputs list, or an
-    inputs list whose entries are not tuples. `args_literals` are `repr()`s
-    of each input tuple -- ready to pass straight to `harvest`'s
-    `args_literal` parameter, which itself decodes them with
-    `ast.literal_eval`.
+    `validate`'s job, run separately by the caller). Accepts EITHER
+    `INPUTS:` or `INPUTS =` (optional whitespace around the `:`/`=`), with
+    optional markdown code fences around the whole candidate (stripped
+    first, see `_unfence`). Fails closed (`None`) on: no `INPUTS` marker at
+    all, no `[` immediately following it, an unparseable literal, or an
+    empty list -- ANYTHING after the literal's closing bracket (a trailing
+    period, more prose, anything) is simply never inspected, so it cannot
+    cause a rejection.
+
+    Normalizes each entry of the parsed list: an entry that is not already
+    a `tuple` (a bare literal like `5`, or `(5)` -- which Python itself
+    evaluates as the int `5`, NOT a 1-tuple, since a single parenthesized
+    value with no trailing comma is just grouping) is wrapped as a 1-tuple.
+    A single-argument call is a legitimate call shape; this only papers
+    over the model's punctuation, it does not change what gets called.
+    `args_literals` are `repr()`s of the NORMALIZED tuples -- ready to pass
+    straight to `harvest`'s `args_literal` parameter, which itself decodes
+    them with `ast.literal_eval`.
     """
     body = _unfence(text)
-    match = _INPUTS_RE.search(body)
-    if match is None:
+    marker = _INPUTS_MARKER_RE.search(body)
+    if marker is None:
         return None
-    function_src = body[: match.start()].rstrip() + "\n"
+    function_src = body[: marker.start()].rstrip() + "\n"
     if not function_src.strip():
         return None
+
+    bracket_start = marker.end()
+    if bracket_start >= len(body) or body[bracket_start] != "[":
+        return None
+    bracket_end = _matching_bracket_end(body, bracket_start)
+    if bracket_end is None:
+        return None
+
     try:
-        inputs = ast.literal_eval(match.group(1))
+        raw_inputs = ast.literal_eval(body[bracket_start:bracket_end])
     except (SyntaxError, ValueError):
         return None
-    if not isinstance(inputs, list) or not inputs:
+    if not isinstance(raw_inputs, list) or not raw_inputs:
         return None
-    if not all(isinstance(item, tuple) for item in inputs):
-        return None
-    return function_src, [repr(item) for item in inputs]
+
+    normalized = [item if isinstance(item, tuple) else (item,) for item in raw_inputs]
+    return function_src, [repr(item) for item in normalized]
+
+
+def _matching_bracket_end(text: str, open_index: int) -> int | None:
+    """Index just PAST the bracket that closes `text[open_index]` (one of
+    `([{`), tracking nesting depth across all three bracket kinds together
+    (sufficient here -- a malformed mismatch like `[1, 2)` still balances to
+    depth 0 at the same place a matched one would, and `ast.literal_eval`
+    is the real correctness check downstream). Skips characters inside
+    single/double-quoted string literals (respecting `\\` escapes) so a
+    bracket character inside a string entry does not corrupt the count.
+    `None` if the text ends before the bracket closes.
+    """
+    depth = 0
+    quote: str | None = None
+    i = open_index
+    while i < len(text):
+        ch = text[i]
+        if quote is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
 
 
 def _unfence(text: str) -> str:
-    """Strip a single ```python fenced block if the completion has one."""
+    """Strip a single ``` fenced block (with or without a language tag) if
+    the completion has one."""
     match = _FENCE_RE.search(text)
     return match.group(1) if match else text
 
@@ -285,9 +359,29 @@ def generate_corpus(
     own. `stalled` is `False` whenever the target was reached (or the run
     crashed -- see `complete` above) before the guard tripped.
 
+    Live visibility (round-3 live-fire fix): `gen_stats.json` is flushed to
+    disk early, in addition to the final write, every
+    `GEN_STATS_FLUSH_INTERVAL` accepted functions -- `gen_stats["
+    flushed_at_functions"]` records the `accepted_functions` count as of
+    that last periodic checkpoint (`0` if the run ended before the first
+    one). Every `samples.jsonl`/`functions.jsonl` line is also flushed to
+    disk immediately after it is written (not buffered until the file
+    closes) -- an unattended run that stalls or is killed leaves real,
+    readable partial output, not a 0-byte file.
+
+    Each `functions.jsonl` record now also carries `args_literals` (the
+    NORMALIZED argument-tuple literals `parse_candidate` extracted for this
+    function -- see its docstring on normalization) and `samples_kept` (how
+    many of those inputs actually survived harvesting into `samples.jsonl`
+    for this function) -- an audit trail for the case a function is
+    accepted but yields zero kept samples (every input timed out, was
+    nondeterministic, etc.), which was previously invisible.
+
     Writes `samples.jsonl` (one JSON line per accepted sample), `functions
-    .jsonl` (one JSON line per accepted function), and `gen_stats.json`
-    (this function's return value, verbatim, plus `"complete"`/`"stalled"`).
+    .jsonl` (one JSON line per accepted function, written AFTER that
+    function's samples are processed so `samples_kept` is known), and
+    `gen_stats.json` (this function's return value, verbatim, plus
+    `"complete"`/`"stalled"`/`"flushed_at_functions"`).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -308,6 +402,7 @@ def generate_corpus(
         "accepted_samples": 0,
         "complete": False,
         "stalled": False,
+        "flushed_at_functions": 0,
     }
     class_counts = {0: 0, 1: 0}
     accepted_fn_ids: set[str] = set()
@@ -316,6 +411,7 @@ def generate_corpus(
 
     samples_path = out_dir / "samples.jsonl"
     functions_path = out_dir / "functions.jsonl"
+    gen_stats_path = out_dir / "gen_stats.json"
     try:
         with samples_path.open("w") as samples_f, functions_path.open("w") as functions_f:
             while stats["accepted_functions"] < target_functions:
@@ -339,14 +435,24 @@ def generate_corpus(
                         stats["duplicate_rejected"] += 1
                         continue
 
-                    _harvest_and_write_samples(
+                    samples_kept = _harvest_and_write_samples(
                         function_src, args_literals, scratch, samples_f, stats, class_counts,
                     )
                     accepted_fn_ids.add(fn_id)
-                    functions_f.write(json.dumps({"fn_id": fn_id, "function_src": function_src}) + "\n")
+                    functions_f.write(json.dumps({
+                        "fn_id": fn_id,
+                        "function_src": function_src,
+                        "args_literals": args_literals,
+                        "samples_kept": samples_kept,
+                    }) + "\n")
+                    functions_f.flush()
                     stats["accepted_functions"] += 1
                     log(f"accepted function {stats['accepted_functions']}/{target_functions} "
-                        f"(fn_id={fn_id})")
+                        f"(fn_id={fn_id}, samples_kept={samples_kept})")
+
+                    if stats["accepted_functions"] % GEN_STATS_FLUSH_INTERVAL == 0:
+                        stats["flushed_at_functions"] = stats["accepted_functions"]
+                        _write_gen_stats(gen_stats_path, stats)
 
                     if stats["accepted_functions"] >= target_functions:
                         break
@@ -360,16 +466,21 @@ def generate_corpus(
                     break
         stats["complete"] = True
     finally:
-        (out_dir / "gen_stats.json").write_text(json.dumps(stats, indent=2))
+        _write_gen_stats(gen_stats_path, stats)
     return stats
 
 
 def _harvest_and_write_samples(
     function_src: str, args_literals: list[str], scratch: Path,
     samples_f, stats: dict, class_counts: dict[int, int],
-) -> None:
+) -> int:
     """Harvest every (function, input) pair for one accepted function,
-    filter+count each, and write the survivors to `samples_f`.
+    filter+count each, and write the survivors to `samples_f`. Returns the
+    number of samples actually KEPT (written) for this function -- the
+    caller records this as `functions.jsonl`'s `samples_kept` audit field,
+    since a function can be accepted (its SOURCE passed `validate()`) while
+    still contributing zero kept samples (every input timed out, was
+    nondeterministic, etc.) -- previously invisible without this count.
 
     `HarvestError`/`OSError` from `harvest()` itself (environment problems,
     not a sample-execution outcome -- see harvest.py's `HarvestError`
@@ -377,6 +488,7 @@ def _harvest_and_write_samples(
     pair is skipped, the function's remaining inputs are still attempted.
     """
     fn_id = _fn_id(function_src)
+    kept = 0
     for args_literal in args_literals:
         try:
             result = harvest(function_src, args_literal, scratch)
@@ -398,6 +510,7 @@ def _harvest_and_write_samples(
 
         class_counts[label] += 1
         stats["accepted_samples"] += 1
+        kept += 1
         samples_f.write(json.dumps({
             "fn_id": fn_id,
             "function_src": function_src,
@@ -406,6 +519,8 @@ def _harvest_and_write_samples(
             "return_repr": result.return_repr,
             "snapshots": [_snapshot_to_json(s) for s in result.snapshots],
         }) + "\n")
+        samples_f.flush()
+    return kept
 
 
 def _balance_guard_rejects(label: int, class_counts: dict[int, int]) -> bool:
@@ -426,3 +541,12 @@ def _balance_guard_rejects(label: int, class_counts: dict[int, int]) -> bool:
 
 def _snapshot_to_json(snapshot: Snapshot) -> dict:
     return {"line": snapshot.line, "locals": [list(row) for row in snapshot.locals]}
+
+
+def _write_gen_stats(path: Path, stats: dict) -> None:
+    """The single gen_stats.json write path -- used both for the periodic
+    live-visibility flush (every `GEN_STATS_FLUSH_INTERVAL` accepted
+    functions) and the unconditional final write in `generate_corpus`'s
+    `finally` block, so there is exactly one place that decides HOW the
+    stats dict is serialized."""
+    path.write_text(json.dumps(stats, indent=2))

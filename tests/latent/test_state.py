@@ -55,6 +55,27 @@ def test_encode_snapshot_truncates_value_repr_to_24_bytes():
     assert value_bytes == [ord("x")] * 24
 
 
+def test_encode_snapshot_truncates_value_repr_by_codepoint_not_by_byte():
+    """All-ASCII fixtures can't distinguish the correct `s[:24].encode()`
+    (truncate the STRING to 24 codepoints, then utf-8 encode) from a
+    `s.encode()[:24]` mutant (encode first, then take the first 24 BYTES) --
+    on ASCII, one char is one byte, so both forms produce exactly 24 bytes.
+    Multi-byte characters break that tie: a 24-CODEPOINT slice of 2/3-byte
+    characters encodes to well over 24 bytes, where a 24-BYTE slice of the
+    full encoding is always exactly 24 bytes by construction. The two
+    outputs differ in length here, not just content, so this fixture kills
+    the mutant regardless of where any byte boundary happens to fall.
+    """
+    multibyte_value = "θ≈π" * 20  # 60 codepoints; each char is 2-3 utf-8 bytes
+    s = Snapshot(line=0, locals=(("v", "str", multibyte_value),))
+    tokens = encode_snapshot(s)
+    val_index = tokens.index(VAL)
+    value_bytes = tokens[val_index + 1:]
+    expected = list(multibyte_value[:24].encode("utf-8"))
+    assert value_bytes == expected
+    assert len(value_bytes) > 24  # codepoint-slice of multi-byte chars exceeds 24 bytes
+
+
 def test_encode_snapshot_caps_at_128_tokens():
     locals_ = tuple((f"n{i}", "int", "0") for i in range(50))
     s = Snapshot(line=1, locals=locals_)
@@ -89,6 +110,21 @@ def test_encode_input_caps_literal_at_96_chars():
     tokens = encode_input(literal)
     assert tokens[0] == BOS and tokens[-1] == EOS
     assert len(tokens) - 2 == 96
+
+
+def test_encode_input_caps_by_codepoint_not_by_byte():
+    """Same rationale as the value_repr codepoint-vs-byte test above, for
+    `encode_input`'s 96-char cap: an all-ASCII fixture can't distinguish
+    `literal[:96].encode()` (correct) from `literal.encode()[:96]` (mutant),
+    since both give 96 bytes for 96 ASCII chars. A multi-byte fixture
+    breaks that tie by length alone.
+    """
+    multibyte_literal = "λμν" * 40  # 120 codepoints; each char is 2 utf-8 bytes
+    tokens = encode_input(multibyte_literal)
+    assert tokens[0] == BOS and tokens[-1] == EOS
+    expected = list(multibyte_literal[:96].encode("utf-8"))
+    assert tokens[1:-1] == expected
+    assert len(expected) > 96  # codepoint-slice of multi-byte chars exceeds 96 bytes
 
 
 def test_encode_state_sequence_slices_to_max_snapshots():

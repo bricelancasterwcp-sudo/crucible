@@ -56,6 +56,17 @@ BALANCE_GUARD_MIN_SAMPLES = 1000
 # .generate_corpus) drives toward. chosen, prereg §4.
 TARGET_FUNCTIONS = 5000
 
+# Stall guard (controller ruling, round-2 live-fire fix -- an engineering
+# safety valve, not a prereg-numbered value): crucible.latent.gen
+# .generate_corpus stops early and stamps `gen_stats["stalled"] = True` once
+# this many CONSECUTIVE `proposer.generate()` calls each yield zero NEW
+# accepted functions (every candidate in the call was a parse failure, a
+# validate failure, or a duplicate of an already-accepted function). Protects
+# against a degenerate/low-diversity proposer looping forever without making
+# progress -- the live-fire run this fixes cycled the same handful of
+# functions indefinitely with no dedup and no way out. chosen.
+STALL_CALLS = 50
+
 # Floor gate (prereg §4): crucible.latent.corpus.build_manifest stamps
 # "floor_functions": "PASS" when the corpus's accepted-function count is at
 # least this many, else "FAIL" -- Task 4 (ops) reads this verdict off the

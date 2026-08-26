@@ -293,7 +293,8 @@ def test_generate_corpus_counts_parse_and_validate_failures(tmp_path, monkeypatc
 
 
 def test_generate_corpus_stats_conserve_candidates_processed(tmp_path, monkeypatch):
-    """accepted_functions + every validate_fail bucket + parse_fail == candidates."""
+    """accepted_functions + duplicate_rejected + every validate_fail bucket + parse_fail
+    == candidates."""
     monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: _result())
     texts = [
         "garbage, no inputs line",                              # parse-fail
@@ -307,6 +308,7 @@ def test_generate_corpus_stats_conserve_candidates_processed(tmp_path, monkeypat
     conserved = (
         stats["parse_fail"]
         + sum(stats["validate_fail"].values())
+        + stats["duplicate_rejected"]
         + stats["accepted_functions"]
     )
     assert conserved == stats["candidates"]
@@ -463,3 +465,71 @@ def test_generate_corpus_writes_partial_stats_with_complete_false_on_unhandled_e
     assert on_disk["accepted_functions"] == 0
     assert on_disk["candidates"] == 1   # the one candidate in flight when it crashed
     assert on_disk["harvest_error"] == 0
+
+
+# --- fn_id dedup + per-call seed diversity + stall guard (CONTROLLER RULING, round 3) --
+#
+# Live-fire on the first real corpus run cycled the SAME handful of functions forever:
+# (1) no fn_id dedup let an already-accepted function be re-accepted and re-counted
+# toward target_functions every time the (low-diversity) proposer repeated itself, and
+# (2) nothing stopped that loop once it could never make further progress. Fixed
+# together: dedup (new `duplicate_rejected` bucket) + a per-call seed
+# (`seed + call_index`, `call_index` 0 on the FIRST call) + a stall guard
+# (`config.STALL_CALLS` consecutive no-new-function calls -> stop, `stalled: True`).
+
+
+@pytest.mark.timeout(5)
+def test_generate_corpus_dedups_repeated_functions_and_terminates_via_stall_guard(tmp_path, monkeypatch):
+    """The SAME function (same source, hence same fn_id) returned every candidate,
+    every call: accepted exactly ONCE, every repeat counted in duplicate_rejected --
+    NOT re-accepted toward target_functions. With target_functions=5 unreachable (only
+    one unique function ever exists), the stall guard (monkeypatched to trip after 2
+    consecutive unproductive calls) must stop the run rather than looping forever --
+    @pytest.mark.timeout(5) is a hard backstop in case the guard itself regresses."""
+    monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: _result())
+    monkeypatch.setattr(gen, "STALL_CALLS", 2)
+    proposer = FakeProposer([CLEAN_TEXT])   # every candidate, every call, byte-identical
+
+    stats = gen.generate_corpus(proposer, target_functions=5, out_dir=tmp_path, seed=0)
+
+    assert stats["accepted_functions"] == 1        # only ONE unique function ever existed
+    assert stats["duplicate_rejected"] == 23        # 3 calls * 8 candidates - 1 accepted
+    assert stats["candidates"] == 24
+    assert stats["stalled"] is True                 # could never reach target=5 -> guard tripped
+    assert stats["complete"] is True                # a deliberate stop, not a crash
+    conserved = (
+        stats["parse_fail"] + sum(stats["validate_fail"].values())
+        + stats["duplicate_rejected"] + stats["accepted_functions"]
+    )
+    assert conserved == stats["candidates"]
+
+    functions = (tmp_path / "functions.jsonl").read_text().splitlines()
+    assert len(functions) == 1                      # written ONCE, not 5 times
+
+
+def test_generate_corpus_derives_a_fresh_seed_per_call(tmp_path, monkeypatch):
+    """`call_seed = seed + call_index`, `call_index` starting at 0 on the FIRST call:
+    deterministic diversity reproducible from the base seed, per the controller
+    ruling's exact contract -- NOT the same seed resampled forever."""
+    monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: _result())
+    seen_seeds: list[int] = []
+
+    class SeedSpyProposer:
+        model = "spy"
+
+        def __init__(self) -> None:
+            self.call_no = 0
+
+        def generate(self, prompt, *, n, seed, max_tokens=1024, temperature=0.7):
+            seen_seeds.append(seed)
+            self.call_no += 1
+            # A distinct function EVERY CALL (but identical WITHIN a call) so each
+            # call contributes exactly one new accepted function -- dedup does not
+            # interfere with observing one seed per call.
+            text = f"def f(a):\n    return a + {self.call_no}\nINPUTS: [(1,)]\n"
+            return [Candidate(text, None, 1.0) for _ in range(n)]
+
+    proposer = SeedSpyProposer()
+    gen.generate_corpus(proposer, target_functions=3, out_dir=tmp_path, seed=100)
+
+    assert seen_seeds == [100, 101, 102]

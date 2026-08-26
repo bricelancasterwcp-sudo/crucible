@@ -60,7 +60,7 @@ import re
 from pathlib import Path
 from typing import Callable
 
-from crucible.latent.config import BALANCE_GUARD_MIN_SAMPLES, MAX_AST_NODES, SKEW_LIMIT
+from crucible.latent.config import BALANCE_GUARD_MIN_SAMPLES, MAX_AST_NODES, SKEW_LIMIT, STALL_CALLS
 from crucible.latent.harvest import HarvestError, Snapshot, harvest
 
 # Balance guard (spec §4): the corpus's binary outcome must not be skewed
@@ -243,9 +243,15 @@ def generate_corpus(
     Two independent accounting levels, each internally conserved:
 
     - FUNCTION level: every candidate text pulled from the proposer is
-      exactly one of `parse_fail`, one `validate_fail` reason, or an
-      accepted function (`parse_fail + sum(validate_fail.values()) +
-      accepted_functions == candidates`).
+      exactly one of `parse_fail`, one `validate_fail` reason,
+      `duplicate_rejected`, or an accepted function
+      (`parse_fail + sum(validate_fail.values()) + duplicate_rejected +
+      accepted_functions == candidates`). `duplicate_rejected` counts a
+      candidate whose `fn_id` (sha256/16 of its source) has ALREADY been
+      accepted earlier in this run -- a low-diversity proposer repeating
+      itself does not inflate `accepted_functions` with the same function
+      counted twice; the earlier live-fire bug this fixes cycled the same
+      handful of functions forever with no dedup at all.
     - SAMPLE level: every (accepted function, input) pair harvested is
       exactly one of `truncated_rejected`, `nondet_rejected`,
       `balance_rejected`, `harvest_error`, or an accepted sample. A function
@@ -263,9 +269,25 @@ def generate_corpus(
     accounting for the candidates already processed, even though it does
     abort the run.
 
+    Each `proposer.generate()` call gets its OWN seed, deterministically
+    derived from the base `seed` and a per-call counter:
+    `call_seed = seed + call_index`, where `call_index` is `0` for the
+    FIRST call and increments by one every call after
+    (`seed+0, seed+1, seed+2, ...`) -- reproducible from the base seed alone,
+    and gives a real-server proposer (temperature > 0) a fresh sampling seed
+    every batch instead of resampling the same one repeatedly.
+
+    Stall guard: if `config.STALL_CALLS` CONSECUTIVE `generate()` calls each
+    accept zero NEW functions (every candidate in the call was a parse
+    failure, a validate failure, or a duplicate), the loop stops early and
+    `gen_stats["stalled"]` is `True` -- protects against a degenerate/
+    low-diversity proposer that can never reach `target_functions` on its
+    own. `stalled` is `False` whenever the target was reached (or the run
+    crashed -- see `complete` above) before the guard tripped.
+
     Writes `samples.jsonl` (one JSON line per accepted sample), `functions
     .jsonl` (one JSON line per accepted function), and `gen_stats.json`
-    (this function's return value, verbatim, plus `"complete"`).
+    (this function's return value, verbatim, plus `"complete"`/`"stalled"`).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -277,6 +299,7 @@ def generate_corpus(
         "candidates": 0,
         "parse_fail": 0,
         "validate_fail": {},
+        "duplicate_rejected": 0,
         "nondet_rejected": 0,
         "truncated_rejected": 0,
         "balance_rejected": 0,
@@ -284,17 +307,22 @@ def generate_corpus(
         "accepted_functions": 0,
         "accepted_samples": 0,
         "complete": False,
+        "stalled": False,
     }
     class_counts = {0: 0, 1: 0}
+    accepted_fn_ids: set[str] = set()
     call_index = 0
+    consecutive_stalls = 0
 
     samples_path = out_dir / "samples.jsonl"
     functions_path = out_dir / "functions.jsonl"
     try:
         with samples_path.open("w") as samples_f, functions_path.open("w") as functions_f:
             while stats["accepted_functions"] < target_functions:
+                call_seed = seed + call_index
                 call_index += 1
-                candidates = proposer.generate(GEN_PROMPT, n=8, seed=seed + call_index)
+                accepted_before_call = stats["accepted_functions"]
+                candidates = proposer.generate(GEN_PROMPT, n=8, seed=call_seed)
                 for candidate in candidates:
                     stats["candidates"] += 1
                     parsed = parse_candidate(candidate.text)
@@ -306,11 +334,15 @@ def generate_corpus(
                     if reason is not None:
                         stats["validate_fail"][reason] = stats["validate_fail"].get(reason, 0) + 1
                         continue
+                    fn_id = _fn_id(function_src)
+                    if fn_id in accepted_fn_ids:
+                        stats["duplicate_rejected"] += 1
+                        continue
 
                     _harvest_and_write_samples(
                         function_src, args_literals, scratch, samples_f, stats, class_counts,
                     )
-                    fn_id = _fn_id(function_src)
+                    accepted_fn_ids.add(fn_id)
                     functions_f.write(json.dumps({"fn_id": fn_id, "function_src": function_src}) + "\n")
                     stats["accepted_functions"] += 1
                     log(f"accepted function {stats['accepted_functions']}/{target_functions} "
@@ -318,6 +350,14 @@ def generate_corpus(
 
                     if stats["accepted_functions"] >= target_functions:
                         break
+
+                if stats["accepted_functions"] == accepted_before_call:
+                    consecutive_stalls += 1
+                else:
+                    consecutive_stalls = 0
+                if consecutive_stalls >= STALL_CALLS:
+                    stats["stalled"] = True
+                    break
         stats["complete"] = True
     finally:
         (out_dir / "gen_stats.json").write_text(json.dumps(stats, indent=2))

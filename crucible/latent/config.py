@@ -52,6 +52,28 @@ SKEW_LIMIT = 0.80
 # guard without generating 1000 real samples. chosen, prereg §4.
 BALANCE_GUARD_MIN_SAMPLES = 1000
 
+# Deterministic minority-enrichment battery (spec §12 amendment, controller
+# ruling round 2): the LLM-proposed minority pass (crucible.latent.gen.
+# generate_minority_inputs) live-fire-failed -- 93% parse_fail and 0
+# accepted_minority after 200/5000 functions, evidence preserved at
+# runs/blite-corpus/minority_stats.llm-attempt.json -- so it is replaced by a
+# FIXED, no-proposer battery of adversarial argument values, applied
+# per-function by crucible.latent.gen_battery.generate_battery_inputs. Values
+# chosen to probe the classic small-function break points: zero, a negative
+# where positive is assumed, a value large enough to overflow naive
+# arithmetic, None, an empty string/list/dict, a non-empty string, a
+# non-empty list, and a bool (which is also an int subclass -- a cheap
+# mismatched-but-plausible-type probe against any code that assumes `int`).
+# chosen, prereg §12 amendment.
+BATTERY_VALUES = (0, -1, 10**9, None, "", "x", [], [0], {}, True)
+
+# Hard cap on how many (post-dedup) battery-derived candidate inputs are
+# actually harvested per function -- bounds this pass's wall-clock cost per
+# function regardless of arity (a function with several positional
+# parameters generates one heterogeneous probe per (position, probe-value)
+# pair on top of the homogeneous ones). chosen, prereg §12 amendment.
+BATTERY_MAX_PER_FN = 12
+
 # Target number of ACCEPTED FUNCTIONS the corpus harvest (crucible.latent.gen
 # .generate_corpus) drives toward. chosen, prereg §4.
 TARGET_FUNCTIONS = 5000

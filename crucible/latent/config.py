@@ -128,3 +128,29 @@ PATIENCE = 5
 # from, so the same seed reproduces the exact same sequence of batches.
 # chosen, prereg §5.2.
 TRAIN_SEED = 0
+
+# ---- token-space CONTROL arm fine-tune harness (crucible.latent.control), chosen, prereg §3 ----
+
+# AdamW learning rate for fine-tuning the token-space control model
+# (microsoft/codeexecutor + a classification head, ops-wired) -- much
+# smaller than B-lite's LR (config.LR = 3e-4) because this arm fine-tunes an
+# already-pretrained language model rather than training B-lite's much
+# smaller purpose-built modules from a random init. chosen, prereg §3.
+CTRL_LR = 2e-5
+
+# Hard cap on training epochs for one train_control() run. The control arm
+# trains per-EPOCH (one full pass over the train split per iteration),
+# unlike B-lite's per-STEP loop (config.MAX_STEPS) -- a labeled fine-tune
+# corpus this size is naturally epoch-shaped. The loop stops here even if
+# early stopping (config.PATIENCE, shared with train.py -- see
+# crucible.latent.control.train_control's own docstring) never triggers.
+# chosen, prereg §3.
+CTRL_MAX_EPOCHS = 5
+
+# Hard cap, in TOKENS, on one rendered control input
+# (crucible.latent.control.render_control_input's output, after
+# tokenization) fed to the model. Truncation happens at TOKENIZATION time,
+# in crucible.latent.control's own batching code -- never inside
+# render_control_input itself, which is a pure, untruncated string
+# concatenation with no knowledge of tokens. chosen, prereg §3.
+CTRL_MAXLEN = 512

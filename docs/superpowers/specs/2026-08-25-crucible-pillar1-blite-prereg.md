@@ -131,6 +131,25 @@ rule) for both arms; SE method (DeLong, paired); library versions.
 
 Pre-lock: edit with date + old value, mark the line. Post-lock: §6–§8 immutable.
 
+- **2026-08-26 (pre-lock):** §4's minority-class enrichment is a **deterministic
+  adversarial battery**, not an LLM pass. An LLM breaking-inputs pass was attempted and
+  abandoned on evidence (93% format non-compliance, zero true minority in 200 functions;
+  stats preserved at `minority_stats.llm-attempt.json`). The battery: for each accepted
+  function, same-arity tuples over `BATTERY_VALUES = (0, -1, 10**9, None, "", "x", [],
+  [0], {}, True)` plus positional heterogeneous probes for arity ≥ 2, capped at
+  `BATTERY_MAX_PER_FN = 12` post-dedup candidates (both chosen), through the identical
+  harvest → determinism → balance-guard path. Fully deterministic; no model in the loop.
+- **2026-08-26 (pre-lock):** a harvest replay defect (shared scratch dir + unchecked
+  subprocess exit → every call after the first replayed the first result) corrupted the
+  initial sample pass — all 1,000 rows byte-identical. Fixed (per-call unique run dirs +
+  exit-code policy), corrupt file archived as `samples.jsonl.replay-corrupt`, and every
+  sample in the final corpus comes from the post-fix **reharvest** of the recorded
+  (function, input) pairs (`reharvest_stats.json` is the sample-provenance source the
+  §8 kill criterion reads). Functions were never affected (accepted on AST validation).
+- **2026-08-26 (pre-lock):** §10's "everything local" ops line amended: the two arms
+  TRAIN AND SCORE on a single rented RunPod GPU instance (same environment for both —
+  the fairness requirement; environment recorded in LOCK-BLITE). Corpus generation,
+  harvesting, and the gate evaluation remain local.
 - **2026-08-26 (pre-lock):** §8's determinism kill criterion ("> 40% of generated
   samples") made precise: the denominator is every harvested sample that produced a
   determinism verdict — nondet-rejected + truncation-rejected + balance-rejected +

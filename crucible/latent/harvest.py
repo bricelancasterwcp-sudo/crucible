@@ -43,6 +43,25 @@ match `--focus module:qualname`, and only when something actually changed
 since the frame's previous LINE event -- see `_build_snapshots` for how the
 full per-line locals state is folded back out of those deltas.
 
+Isolation across calls (round-3 CRITICAL fix, found by another
+implementer's real-harvest smoke and confirmed against production data --
+`runs/blite-corpus/samples.jsonl`'s 1000 rows were all byte-identical
+copies of the corpus's first successful harvest): every call gets its OWN
+subdirectory of the caller's `workdir` (`workdir/call-<uuid4 hex>`), used
+for the script, `SENSORIUM_DIR`, the subprocess cwd, and the trace read --
+so callers may keep passing ONE shared scratch directory across thousands
+of calls (the real usage in `crucible.latent.gen`'s corpus-generation
+passes) without their sensorium run-ids (fixed constants, "run-a"/"run-b")
+ever colliding. Independently, `_execute_once` checks the subprocess's exit
+code and raises `HarvestError` rather than falling through to a store read
+on anything outside {0, 1} (0 = clean target return, 1 = the target's own
+uncaught exception -- `sensorium run` reports that via the same exit code,
+so this is NOT a bare "nonzero" check, which would misfire on every
+legitimate exception-outcome sample) -- belt-and-suspenders: even if a
+future refactor ever reintroduces a shared run-id by some other path, a
+refused/failed `sensorium run` can no longer be silently read as a stale
+prior result.
+
 Containment (read before trusting this as a sandbox): the recorded
 subprocess is NOT filesystem-sandboxed. `_preexec_rlimit` caps RLIMIT_AS
 (virtual memory) only, and there is no RLIMIT_FSIZE cap here the way
@@ -74,6 +93,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from sensorium.store.reader import Trace
 
@@ -134,30 +154,47 @@ def harvest(function_src: str, args_literal: str, workdir: Path) -> HarvestResul
     repo already passed an absolute path (pytest's `tmp_path`), which is why
     this went unnoticed until a live corpus run passed a path relative to
     its own launch directory.
+
+    Every call additionally gets its OWN subdirectory of `workdir`
+    (`call-<uuid4 hex>`; round-3 CRITICAL fix, see the module docstring) --
+    a plain `uuid4` is infrastructure, not measurement, so no determinism
+    property of this module depends on it. `workdir` itself may therefore be
+    shared safely across thousands of `harvest()` calls (the real usage:
+    `crucible.latent.gen`'s corpus-generation passes call this against one
+    scratch directory for an entire multi-hour run) without their fixed
+    "run-a"/"run-b" sensorium run-ids ever colliding. The per-call
+    subdirectory is removed again once this call returns (`finally`,
+    best-effort) -- cleanup beyond the fix itself, added because a
+    multi-hour run sharing one `workdir` would otherwise accumulate one
+    subdirectory (script + sensorium store) per call forever.
     """
     workdir = Path(workdir).resolve()
-    workdir.mkdir(parents=True, exist_ok=True)
-    fname = _function_name(function_src)
-    script_path = _write_runner_script(function_src, fname, args_literal, workdir)
-    focus = f"{script_path.stem}:{fname}"
-    sensorium_dir = workdir / ".sensorium"
+    call_dir = workdir / f"call-{uuid4().hex}"
+    call_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        fname = _function_name(function_src)
+        script_path = _write_runner_script(function_src, fname, args_literal, call_dir)
+        focus = f"{script_path.stem}:{fname}"
+        sensorium_dir = call_dir / ".sensorium"
 
-    run_a = _execute_once(script_path, focus, workdir, sensorium_dir, _RUN_ID_A, fname)
-    run_b = _execute_once(script_path, focus, workdir, sensorium_dir, _RUN_ID_B, fname)
+        run_a = _execute_once(script_path, focus, call_dir, sensorium_dir, _RUN_ID_A, fname)
+        run_b = _execute_once(script_path, focus, call_dir, sensorium_dir, _RUN_ID_B, fname)
 
-    outcome_a, return_repr_a, snapshots_a, truncated_a = run_a
-    outcome_b, return_repr_b, snapshots_b, _truncated_b = run_b
-    deterministic = (
-        outcome_a == outcome_b
-        and _state_hash(return_repr_a, snapshots_a) == _state_hash(return_repr_b, snapshots_b)
-    )
-    return HarvestResult(
-        outcome=outcome_a,
-        return_repr=return_repr_a,
-        snapshots=snapshots_a,
-        truncated=truncated_a,
-        deterministic=deterministic,
-    )
+        outcome_a, return_repr_a, snapshots_a, truncated_a = run_a
+        outcome_b, return_repr_b, snapshots_b, _truncated_b = run_b
+        deterministic = (
+            outcome_a == outcome_b
+            and _state_hash(return_repr_a, snapshots_a) == _state_hash(return_repr_b, snapshots_b)
+        )
+        return HarvestResult(
+            outcome=outcome_a,
+            return_repr=return_repr_a,
+            snapshots=snapshots_a,
+            truncated=truncated_a,
+            deterministic=deterministic,
+        )
+    finally:
+        shutil.rmtree(call_dir, ignore_errors=True)
 
 
 # -- sample script construction ---------------------------------------------
@@ -224,7 +261,7 @@ def _execute_once(script_path: Path, focus: str, workdir: Path, sensorium_dir: P
     cmd = [_sensorium_exe(), "run", "--focus", focus, "--run-id", run_id,
            "--", str(script_path)]
     try:
-        subprocess.run(
+        proc = subprocess.run(
             cmd, cwd=str(workdir), env=env, preexec_fn=_preexec_rlimit,
             timeout=EXEC_TIMEOUT_S, capture_output=True, text=True,
         )
@@ -238,6 +275,28 @@ def _execute_once(script_path: Path, focus: str, workdir: Path, sensorium_dir: P
         # the timeout itself rather than an empty snapshot sequence dressed
         # up as a measurement.
         return "timeout", None, (), True
+
+    # Round-3 CRITICAL fix: a refused/failed `sensorium run` must never fall
+    # through to a store read. 0 is a clean target return and 1 is the
+    # TARGET's own uncaught exception -- `sensorium run` reports that via
+    # its own exit code too (`boot.run_target`'s `except BaseException:
+    # exit_status = 1`, verified live), so both are legitimate and the
+    # store is read normally for either. Anything else -- 2
+    # (`boot.TargetError`: an invalid run id, an unresolvable target, OR a
+    # run-id COLLISION when a trace already exists at this path -- the
+    # exact bug that silently replayed call 1's result for every call
+    # after it, pre-fix), a negative returncode (killed by signal), or any
+    # other value -- means `sensorium run` itself refused or crashed before
+    # producing a trustworthy trace, and `trace_path.exists()` below cannot
+    # tell a fresh trace from a stale one left by a PRIOR call that used
+    # this same path. `stderr[-200:]` names the failure without risking an
+    # unbounded message (sensorium's own error lines are short, but a crash
+    # inside the interpreter itself is not bounded by anything sensorium
+    # controls).
+    if proc.returncode not in (0, 1):
+        tail = (proc.stderr or "")[-200:]
+        raise HarvestError(
+            f"sensorium run exited {proc.returncode} for run_id={run_id!r}: {tail}")
 
     trace_path = sensorium_dir / "traces" / f"{run_id}.db"
     if not trace_path.exists():

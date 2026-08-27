@@ -14,7 +14,9 @@ import shutil
 import sys
 from pathlib import Path
 
-from crucible.latent.harvest import HarvestResult, Snapshot, harvest
+import pytest
+
+from crucible.latent.harvest import HarvestError, HarvestResult, Snapshot, harvest
 
 
 def test_sensorium_importable():
@@ -208,3 +210,68 @@ def test_harvest_relative_workdir_does_not_double_nest_the_store(tmp_path):
         os.chdir(old_cwd)
     assert r.outcome == "return" and r.return_repr == "1"
     assert r.snapshots
+
+
+def test_harvest_shared_workdir_two_calls_do_not_replay_each_other(tmp_path):
+    """THE production bug pin (round-3 CRITICAL, found by another
+    implementer's real-harvest smoke and confirmed against production
+    data): two `harvest()` calls sharing ONE workdir -- the real
+    corpus-generation usage pattern, thousands of calls against one scratch
+    dir -- must not silently replay each other's result.
+
+    Pre-fix mechanism: `_execute_once` used FIXED run-id constants
+    ("run-a"/"run-b") and every call shared one `SENSORIUM_DIR` derived
+    straight from the caller's `workdir`. The second call's `sensorium run`
+    refused to record (sensorium's own guard: a run id whose trace file
+    already exists raises `TargetError`, exit code 2) -- but `_execute_once`
+    never checked the subprocess's exit code, found the STALE trace file
+    from call 1 already sitting at `trace_path`, and happily read it,
+    returning call 1's outcome/return value for every call afterward.
+
+    Confirmed against production data: every one of `runs/blite-corpus/
+    samples.jsonl`'s 1000 rows shared the exact same outcome/return_repr/
+    snapshot, traced back to the corpus's first successful harvest call.
+    This test shares `tmp_path` (NOT a fresh one per call) deliberately --
+    that is the shape that broke; every OTHER test in this file passes a
+    fresh workdir per `harvest()` call and could never have caught this.
+    """
+    r1 = harvest("def f():\n    return 1\n", "()", tmp_path)
+    r2 = harvest("def f():\n    return 2\n", "()", tmp_path)
+    assert r1.outcome == "return" and r1.return_repr == "1"
+    assert r2.outcome == "return" and r2.return_repr == "2"
+    assert r1.return_repr != r2.return_repr
+
+
+def test_harvest_nonzero_exit_raises_and_names_the_failure(tmp_path):
+    """Fix #2, independent of fix #1: exercises the EXACT run-id-collision
+    shape fix #1 (unique per-call subdirectories) now prevents `harvest()`
+    from ever hitting -- but directly against `_execute_once`, so this pins
+    fix #2 (the exit-code check) on its own, even if a future refactor ever
+    reintroduces a shared run-id by some other path.
+
+    First call succeeds and creates a REAL trace at
+    `sensorium_dir/traces/run-a.db`. The second call, same `run_id`, same
+    `sensorium_dir`, triggers sensorium's OWN real run-id-collision refusal
+    (`boot.run_target`'s `TargetError`: "run id ... already has a trace
+    at ..."; verified live -- EXIT=2, not caught by the pre-existing "no
+    trace produced" check from round 1, since a trace file genuinely exists
+    at that path, just a STALE one). Must raise `HarvestError` naming the
+    failure, never silently re-read the stale trace from call 1 -- which is
+    exactly what the pre-fix code did (0 is a clean target return, 1 is the
+    TARGET's own uncaught exception -- `sensorium run` reports that via the
+    same exit code, verified live: EXIT=1 for a genuine, correctly-recorded
+    `IndexError` -- so the check is "not in {0, 1}", not "nonzero", or
+    every legitimate exception-outcome sample would wrongly raise here too).
+    """
+    from crucible.latent.harvest import _execute_once, _write_runner_script
+
+    fname = "f"
+    script_path = _write_runner_script("def f():\n    return 1\n", fname, "()", tmp_path)
+    focus = f"{script_path.stem}:{fname}"
+    sensorium_dir = tmp_path / ".sensorium"
+
+    first = _execute_once(script_path, focus, tmp_path, sensorium_dir, "run-a", fname)
+    assert first[0] == "return" and first[1] == "1"   # sanity: the real first call worked
+
+    with pytest.raises(HarvestError, match="run-a"):
+        _execute_once(script_path, focus, tmp_path, sensorium_dir, "run-a", fname)

@@ -23,6 +23,19 @@ if [ -e "$OUT/battery_stats.json" ]; then
   echo "REFUSED: $OUT/battery_stats.json already exists (one battery pass only; pick a fresh corpus or move the old stats file aside)" >&2
   exit 3
 fi
+# Ordering guard (round-3 CRITICAL fix follow-up, controller ruling): a
+# samples.jsonl.replay-corrupt marker means a reharvest was STARTED against
+# this corpus at some point -- samples.jsonl right now is that reharvest's
+# own (possibly still-incomplete) output. Refuse unless a COMPLETE
+# reharvest_stats.json confirms it actually finished. Mirrors
+# crucible.latent.gen_battery._refuse_if_reharvest_incomplete exactly, so
+# either guard catches this even if the other is ever bypassed.
+if [ -e "$OUT/samples.jsonl.replay-corrupt" ]; then
+  if [ ! -f "$OUT/reharvest_stats.json" ] || ! grep -q '"complete":[[:space:]]*true' "$OUT/reharvest_stats.json"; then
+    echo "REFUSED: $OUT/samples.jsonl.replay-corrupt exists but no COMPLETE reharvest_stats.json -- run reharvest first (crucible.latent.reharvest.reharvest_samples)" >&2
+    exit 3
+  fi
+fi
 mkdir -p runs/tmp
 setsid nohup bash -c '
   start=$(date +%s)

@@ -308,6 +308,43 @@ def test_reharvest_periodic_and_final_stats_flush(tmp_path, monkeypatch):
     assert final_on_disk == stats
 
 
+def test_reharvest_sort_rewrite_is_atomic_and_gates_complete(tmp_path, monkeypatch):
+    """Round-3 follow-up fix: the completion sort-rewrite writes a temp
+    file and swaps it in via `os.replace` -- so a failure DURING that
+    replace (disk full, permissions, killed mid-rename) must leave
+    `samples.jsonl` exactly as harvesting wrote it (never a half-written
+    reordering) and `complete` False in `reharvest_stats.json` (never
+    marked True until AFTER the rewrite actually succeeds).
+    """
+    literals = [f"({i},)" for i in range(5)]
+    fn = _fn_record("def f(a):\n    return a\n", literals)
+    _write_jsonl(tmp_path / "functions.jsonl", [fn])
+    monkeypatch.setattr(reharvest, "harvest",
+                        lambda src, args, workdir: _result(outcome="return", return_repr=args))
+
+    pre_rewrite_bytes_holder = {}
+
+    def failing_replace(src_path, dst_path):
+        # Capture what samples.jsonl looked like the instant BEFORE the
+        # (about to fail) replace -- this is what must still be on disk
+        # afterward.
+        pre_rewrite_bytes_holder["bytes"] = dst_path.read_bytes()
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(reharvest.os, "replace", failing_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        reharvest.reharvest_samples(tmp_path, jobs=1)
+
+    assert (tmp_path / "samples.jsonl").read_bytes() == pre_rewrite_bytes_holder["bytes"]
+    rows = _read_samples(tmp_path / "samples.jsonl")
+    assert len(rows) == 5   # every accepted sample is still there, just unsorted
+
+    stats_on_disk = json.loads((tmp_path / "reharvest_stats.json").read_text())
+    assert stats_on_disk["complete"] is False
+    assert stats_on_disk["accepted_samples"] == 5
+
+
 def test_reharvest_partial_stats_preserved_on_crash(tmp_path, monkeypatch):
     """An unexpected bug (NOT `HarvestError`/`OSError`) must propagate --
     never be silently swallowed as just another `harvest_error` -- and must

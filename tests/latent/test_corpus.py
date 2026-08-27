@@ -317,6 +317,140 @@ def test_build_manifest_samples_sha256_matches_the_file(tmp_path):
     assert manifest["samples_sha256"] == expected
 
 
+# -- build_manifest: stats-source reconciliation (round-3 fix follow-up) -------
+
+
+def _write_stats_json(path, **overrides) -> dict:
+    """A complete, well-formed stats dict (the four §12 sample-level
+    buckets, `complete: True`) with any field overridden -- used for
+    reharvest_stats.json / battery_stats.json fixtures below."""
+    stats = {
+        "nondet_rejected": 0,
+        "truncated_rejected": 0,
+        "balance_rejected": 0,
+        "accepted_samples": 0,
+        "complete": True,
+    }
+    stats.update(overrides)
+    path.write_text(json.dumps(stats))
+    return stats
+
+
+def test_build_manifest_gen_stats_only_path_is_unchanged(tmp_path):
+    """Regression: a corpus that was never reharvested must compute
+    exactly what it always did, off gen_stats.json alone, and name that
+    source explicitly."""
+    fn_id = "fn-gen-only"
+    _write_corpus(
+        tmp_path,
+        functions=[{"fn_id": fn_id, "function_src": "def f():\n    return 1\n"}],
+        samples=[_sample_row(fn_id)],
+        gen_stats={"nondet_rejected": 2, "truncated_rejected": 3, "balance_rejected": 1,
+                  "accepted_samples": 5},
+    )
+    manifest = corpus.build_manifest(tmp_path)
+    assert manifest["stats_sources"] == ["gen_stats.json"]
+    assert manifest["floors"]["nondet_rate"] == pytest.approx(2 / 11)
+
+
+def test_build_manifest_prefers_reharvest_stats_over_gen_stats(tmp_path):
+    """When reharvest_stats.json exists it is THE sample-provenance source
+    -- gen_stats.json's own (pre-reharvest, possibly replay-corrupted)
+    bucket counts must be ignored entirely, not blended or averaged."""
+    fn_id = "fn-reharvest-pref"
+    _write_corpus(
+        tmp_path,
+        functions=[{"fn_id": fn_id, "function_src": "def f():\n    return 1\n"}],
+        samples=[_sample_row(fn_id)],
+        # Deliberately wrong/unused numbers -- must NOT reach nondet_rate.
+        gen_stats={"nondet_rejected": 999, "truncated_rejected": 999,
+                  "balance_rejected": 999, "accepted_samples": 999},
+    )
+    _write_stats_json(tmp_path / "reharvest_stats.json",
+                      nondet_rejected=2, truncated_rejected=3,
+                      balance_rejected=1, accepted_samples=5)
+
+    manifest = corpus.build_manifest(tmp_path)
+
+    assert manifest["stats_sources"] == ["reharvest_stats.json"]
+    assert manifest["floors"]["nondet_rate"] == pytest.approx(2 / 11)
+
+
+def test_build_manifest_raises_when_reharvest_stats_incomplete(tmp_path):
+    """An in-progress or crashed reharvest's partial counts must never be
+    read as if the run had finished -- hard-fail, never a silent fallback
+    to gen_stats.json (which could itself be replay-corrupted)."""
+    fn_id = "fn-reharvest-incomplete"
+    _write_corpus(
+        tmp_path,
+        functions=[{"fn_id": fn_id, "function_src": "def f():\n    return 1\n"}],
+        samples=[_sample_row(fn_id)],
+    )
+    _write_stats_json(tmp_path / "reharvest_stats.json", complete=False)
+
+    with pytest.raises(RuntimeError, match="complete"):
+        corpus.build_manifest(tmp_path)
+
+
+def test_build_manifest_raises_when_battery_stats_incomplete(tmp_path):
+    """Same hard-fail rule extends to battery_stats.json when it ALSO
+    exists alongside a complete reharvest_stats.json."""
+    fn_id = "fn-battery-incomplete"
+    _write_corpus(
+        tmp_path,
+        functions=[{"fn_id": fn_id, "function_src": "def f():\n    return 1\n"}],
+        samples=[_sample_row(fn_id)],
+    )
+    _write_stats_json(tmp_path / "reharvest_stats.json")
+    _write_stats_json(tmp_path / "battery_stats.json", complete=False)
+
+    with pytest.raises(RuntimeError, match="complete"):
+        corpus.build_manifest(tmp_path)
+
+
+def test_build_manifest_combines_reharvest_and_battery_denominator_exactly(tmp_path):
+    """battery_stats.json's buckets ADD into the same §12 denominator as
+    reharvest_stats.json's -- its accepted rows live in the same current
+    samples.jsonl, and its own harvest() calls are always post-fix."""
+    fn_id = "fn-combined"
+    _write_corpus(
+        tmp_path,
+        functions=[{"fn_id": fn_id, "function_src": "def f():\n    return 1\n"}],
+        samples=[_sample_row(fn_id)],
+    )
+    _write_stats_json(tmp_path / "reharvest_stats.json",
+                      nondet_rejected=2, truncated_rejected=3,
+                      balance_rejected=1, accepted_samples=5)
+    _write_stats_json(tmp_path / "battery_stats.json",
+                      nondet_rejected=1, truncated_rejected=0,
+                      balance_rejected=2, accepted_samples=3)
+
+    manifest = corpus.build_manifest(tmp_path)
+
+    # nondet: 2+1=3, truncated: 3+0=3, balance: 1+2=3, accepted: 5+3=8
+    # screened = 3+3+3+8 = 17, nondet_rate = 3/17
+    assert manifest["stats_sources"] == ["reharvest_stats.json", "battery_stats.json"]
+    assert manifest["floors"]["nondet_rate"] == pytest.approx(3 / 17)
+
+
+def test_build_manifest_raises_keyerror_on_missing_reharvest_stats_bucket(tmp_path):
+    """Same fail-loud contract as gen_stats.json extends to
+    reharvest_stats.json: a missing required bucket must never silently
+    read as 0."""
+    fn_id = "fn-reharvest-missing-bucket"
+    _write_corpus(
+        tmp_path,
+        functions=[{"fn_id": fn_id, "function_src": "def f():\n    return 1\n"}],
+        samples=[_sample_row(fn_id)],
+    )
+    (tmp_path / "reharvest_stats.json").write_text(json.dumps({
+        "nondet_rejected": 0, "balance_rejected": 0, "accepted_samples": 1,
+        "complete": True,
+    }))   # missing "truncated_rejected"
+    with pytest.raises(KeyError):
+        corpus.build_manifest(tmp_path)
+
+
 # -- build_manifest: floor verdicts, one mutation pin per floor ----------------
 
 

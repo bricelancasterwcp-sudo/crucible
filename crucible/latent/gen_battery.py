@@ -94,6 +94,47 @@ def _battery_candidates(arity: int) -> list[tuple]:
     return homogeneous + heterogeneous
 
 
+# -- ordering guard (round-3 CRITICAL fix follow-up, controller ruling) -------
+
+
+def _refuse_if_reharvest_incomplete(corpus_dir: Path) -> None:
+    """Refuse to enrich a corpus that is mid-repair.
+
+    If `samples.jsonl.replay-corrupt` exists, a `crucible.latent.reharvest.
+    reharvest_samples` run was STARTED against this `corpus_dir` at some
+    point -- `samples.jsonl` right now is THAT reharvest's own (possibly
+    still-incomplete) output, not the archived pre-fix data, since
+    `reharvest_samples` archives-then-truncates in that order. Enriching on
+    top of an interrupted or still-running reharvest's `samples.jsonl`
+    means building on a file that reharvest may still truncate and rewrite
+    out from under this pass, or that never finished being measured in the
+    first place.
+
+    Refuses UNLESS a COMPLETE `reharvest_stats.json` also exists (`complete
+    == True`), confirming that reharvest actually finished. Deliberately
+    narrow: a `corpus_dir` that was NEVER reharvested at all (no
+    `.replay-corrupt` file) is NOT refused here, even though its
+    `samples.jsonl` could in principle still be pre-round-3-fix-corrupted --
+    detecting that would need dating or version-stamping the corpus, which
+    this guard does not attempt; it only closes the specific "reharvest in
+    progress or abandoned partway" ordering hazard.
+    """
+    corrupt_marker = corpus_dir / "samples.jsonl.replay-corrupt"
+    if not corrupt_marker.exists():
+        return
+    reharvest_stats_path = corpus_dir / "reharvest_stats.json"
+    if reharvest_stats_path.exists():
+        stats = json.loads(reharvest_stats_path.read_text())
+        if stats.get("complete"):
+            return
+    raise RuntimeError(
+        f"{corpus_dir} has samples.jsonl.replay-corrupt but no COMPLETE "
+        "reharvest_stats.json -- run reharvest first "
+        "(crucible.latent.reharvest.reharvest_samples) before enriching "
+        "this corpus further"
+    )
+
+
 # -- battery pass -------------------------------------------------------------
 
 
@@ -167,6 +208,7 @@ def generate_battery_inputs(
     writing.
     """
     corpus_dir = Path(corpus_dir)
+    _refuse_if_reharvest_incomplete(corpus_dir)
     scratch = corpus_dir / "_battery_harvest_scratch"
     functions_path = corpus_dir / "functions.jsonl"
     samples_path = corpus_dir / "samples.jsonl"

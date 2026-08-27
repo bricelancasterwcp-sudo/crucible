@@ -39,6 +39,7 @@ defeating the point of `jobs > 1`.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -152,8 +153,15 @@ def reharvest_samples(
                 if i % REHARVEST_STATS_FLUSH_INTERVAL == 0:
                     with lock:
                         _write_reharvest_stats(stats_path, stats)
-        stats["complete"] = True
+        # Sort-rewrite FIRST, mark complete only AFTER it succeeds (round-3
+        # follow-up fix): if the rewrite itself is interrupted partway
+        # through, `complete` must still read False and `samples.jsonl`
+        # must still hold its intact PRE-rewrite content -- never a
+        # half-written reordering of it. See `_rewrite_samples_sorted`'s
+        # own docstring for how the temp-file-then-`os.replace` swap makes
+        # that true even if the process is killed mid-rewrite.
         _rewrite_samples_sorted(samples_path)
+        stats["complete"] = True
     finally:
         _write_reharvest_stats(stats_path, stats)
     return stats
@@ -237,11 +245,25 @@ def _rewrite_samples_sorted(samples_path: Path) -> None:
     set itself.
 
     Runs ONLY on the success path (see `reharvest_samples`'s `try` block,
-    called right after `stats["complete"] = True`): a partial file left by
-    a crashed run is kept in whatever order it was written, which is more
-    useful for resuming or debugging than a silently-reordered partial
-    result.
+    called BEFORE `stats["complete"] = True` is ever set -- not after): a
+    partial file left by a crashed run is kept in whatever order it was
+    written, which is more useful for resuming or debugging than a
+    silently-reordered partial result.
+
+    ATOMIC (round-3 follow-up fix): writes the sorted content to a temp
+    file in the SAME directory, then `os.replace(tmp, samples_path)` --
+    `os.replace` is a single filesystem rename, atomic on POSIX, so a
+    reader (or a process killed mid-rewrite) only ever sees either the
+    complete pre-rewrite file or the complete post-rewrite file, never a
+    half-written one. This is also why `reharvest_samples` marks `complete`
+    True only AFTER this function returns: if `os.replace` itself raises
+    (disk full, permissions, killed before the rename lands), the ORIGINAL
+    `samples_path` is untouched -- still exactly what harvesting wrote --
+    and the exception propagates up to `reharvest_samples`'s `finally`,
+    which writes `reharvest_stats.json` with `complete` still False.
     """
     lines = [ln for ln in samples_path.read_text().splitlines() if ln.strip()]
     lines.sort()
-    samples_path.write_text("".join(ln + "\n" for ln in lines))
+    tmp_path = samples_path.with_name(samples_path.name + ".sort-tmp")
+    tmp_path.write_text("".join(ln + "\n" for ln in lines))
+    os.replace(tmp_path, samples_path)

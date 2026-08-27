@@ -146,6 +146,100 @@ def load_split(corpus_dir: Path, split: str) -> list[Sample]:
     ]
 
 
+# -- sample-provenance stats reconciliation (round-3 CRITICAL fix follow-up) -----
+
+_SAMPLE_LEVEL_BUCKETS = (
+    "nondet_rejected", "truncated_rejected", "balance_rejected", "accepted_samples",
+)
+
+
+def _stat_or_raise(stats: dict, source_name: str, key: str) -> int:
+    """`stats[key]`, or a clear `KeyError` naming BOTH the missing bucket
+    and which stats file it was expected in -- NEVER `.get(key, 0)` (final
+    review MEDIUM, extended to every stats source this function reads): a
+    malformed or truncated stats file missing a required bucket must not
+    silently read as zero, which could flip `nondet_kill` (or
+    `floor_functions`, transitively, via a misleadingly-empty `nondet_rate`
+    denominator) to a false PASS. A malformed stats file must fail loud,
+    never read as a clean corpus."""
+    try:
+        return stats[key]
+    except KeyError as exc:
+        raise KeyError(
+            f"{source_name} is missing required bucket {key!r} -- a "
+            "malformed stats file must not silently read as 0 and risk a "
+            "false floor PASS"
+        ) from exc
+
+
+def _load_stats_if_complete(path: Path) -> dict:
+    """One stats JSON file, hard-failing if it exists but `complete` is not
+    true. An in-progress or crashed pass's partial bucket counts are not a
+    trustworthy sample-provenance source -- reading them as if the run had
+    finished could silently understate (or overstate) the corpus's real
+    determinism/truncation rate. Never a silent fallback to a different
+    source: the caller decided THIS file is the source of record, and an
+    incomplete file at that path is a hard error, not a cue to look
+    elsewhere."""
+    stats = json.loads(path.read_text())
+    if not stats.get("complete"):
+        raise RuntimeError(
+            f"{path} exists but its complete field is not true -- refusing "
+            "to use an incomplete pass as a sample-provenance source"
+        )
+    return stats
+
+
+def _sample_stats_and_sources(corpus_dir: Path) -> tuple[dict[str, int], list[str]]:
+    """The four §12 sample-level buckets (`_SAMPLE_LEVEL_BUCKETS`) this
+    corpus's floors are computed from, and which file(s) they came from
+    (`manifest["stats_sources"]` -- names the lens for anyone reading the
+    manifest later, since the answer depends on which stats file(s) exist).
+
+    `reharvest_stats.json`, when present, IS the sample-provenance source
+    (round-3 CRITICAL fix: `harvest()`'s pre-fix scratch-dir-reuse bug meant
+    every call after the first one sharing a scratch directory silently
+    replayed that first call's result, so `gen_stats.json`'s OWN bucket
+    counts from before a reharvest describe a run that was never a real
+    measurement). Hard-fails (via `_load_stats_if_complete`) if it exists
+    but is not `complete`.
+
+    `battery_stats.json`, when it ALSO exists alongside `reharvest_stats
+    .json`, contributes its own buckets into the SAME sums -- its accepted
+    rows live in the CURRENT `samples.jsonl` too, and its own `harvest()`
+    calls are always post-fix (`generate_battery_inputs` only ever runs
+    against an already-generated corpus), so there is no reason to exclude
+    them. Also hard-fails if present but incomplete.
+
+    Falls back to `gen_stats.json` ONLY when `reharvest_stats.json` does
+    not exist at all -- the ORIGINAL, single-source behavior, byte-for-byte
+    unchanged for a corpus that was never reharvested (regression-tested).
+    `battery_stats.json` is NEVER combined into this fallback path: mixing
+    a still-fixed-only battery pass into a `gen_stats.json` whose OWN
+    `generate_corpus` samples may still be replay-corrupted would
+    understate, not correct, the problem.
+    """
+    reharvest_path = corpus_dir / "reharvest_stats.json"
+    if not reharvest_path.exists():
+        gen_stats = json.loads((corpus_dir / "gen_stats.json").read_text())
+        totals = {
+            key: _stat_or_raise(gen_stats, "gen_stats.json", key)
+            for key in _SAMPLE_LEVEL_BUCKETS
+        }
+        return totals, ["gen_stats.json"]
+
+    sources = [("reharvest_stats.json", _load_stats_if_complete(reharvest_path))]
+    battery_path = corpus_dir / "battery_stats.json"
+    if battery_path.exists():
+        sources.append(("battery_stats.json", _load_stats_if_complete(battery_path)))
+
+    totals = {key: 0 for key in _SAMPLE_LEVEL_BUCKETS}
+    for name, stats in sources:
+        for key in _SAMPLE_LEVEL_BUCKETS:
+            totals[key] += _stat_or_raise(stats, name, key)
+    return totals, [name for name, _stats in sources]
+
+
 # -- build_manifest ---------------------------------------------------------------
 
 
@@ -168,40 +262,43 @@ def build_manifest(corpus_dir: Path) -> dict:
         "balance": float,                   # majority binary class fraction
         "skew_ok": bool,                    # balance <= SKEW_LIMIT
       },
+      "stats_sources": [str, ...],
       "samples_sha256": str,
     }
     ```
     `accepted_functions`/`accepted_samples` are counted from the files
-    actually on disk (ground truth), not trusted from `gen_stats.json`'s
-    self-reported totals -- `gen_stats.json` is used ONLY for the
-    `nondet_rejected`/`balance_rejected` buckets, which exist nowhere else
-    (rejected samples are never written to `samples.jsonl`).
+    actually on disk (ground truth), not trusted from any stats file's
+    self-reported totals -- stats files are used ONLY for the
+    `nondet_rejected`/`truncated_rejected`/`balance_rejected` buckets, which
+    exist nowhere else (rejected samples are never written to
+    `samples.jsonl`).
+
+    Stats-source reconciliation (round-3 CRITICAL fix follow-up): a corpus
+    whose `harvest()` calls predate the round-3 fix has a `samples.jsonl`
+    that may be entirely replay-corrupted -- `gen_stats.json`'s OWN bucket
+    counts, from before a reharvest, describe that same corrupted run. If
+    `reharvest_stats.json` exists in `corpus_dir`, it is THE
+    sample-provenance source for the four §12 buckets, not `gen_stats.json`
+    -- see `_sample_stats_and_sources` for the exact rule (hard-fails if it
+    exists but is not `complete`; adds `battery_stats.json`'s buckets into
+    the same sums when that ALSO exists, since its rows live in the current
+    `samples.jsonl` and its own `harvest()` calls are never pre-fix).
+    `gen_stats.json` remains the source ONLY when no `reharvest_stats.json`
+    exists at all. `manifest["stats_sources"]` names exactly which file(s)
+    the four buckets came from, so a manifest reader never has to guess
+    which lens produced `nondet_rate`. Function-level floors
+    (`floor_functions`) are unaffected either way -- they are already
+    counted directly from `functions.jsonl`, never from any stats file.
     """
     corpus_dir = Path(corpus_dir)
     samples_path = corpus_dir / "samples.jsonl"
     functions = _read_jsonl(corpus_dir / "functions.jsonl")
     samples = _read_jsonl(samples_path)
-    gen_stats = json.loads((corpus_dir / "gen_stats.json").read_text())
 
     accepted_functions = len(functions)
     accepted_samples = len(samples)
 
-    def _required_stat(key: str) -> int:
-        """`gen_stats[key]`, or a clear `KeyError` naming the missing
-        bucket -- NEVER `.get(key, 0)` (final review MEDIUM): a malformed
-        or truncated `gen_stats.json` missing a required bucket must not
-        silently read as zero, which could flip `nondet_kill` (or
-        `floor_functions`, transitively, via a misleadingly-empty
-        `nondet_rate` denominator) to a false PASS. A malformed stats file
-        must fail loud, never read as a clean corpus."""
-        try:
-            return gen_stats[key]
-        except KeyError as exc:
-            raise KeyError(
-                f"gen_stats.json is missing required bucket {key!r} -- "
-                "a malformed stats file must not silently read as 0 and "
-                "risk a false floor PASS"
-            ) from exc
+    sample_stats, stats_sources = _sample_stats_and_sources(corpus_dir)
 
     binary_counts = {"0": 0, "1": 0}
     multiclass_counts: dict[str, int] = {}
@@ -223,10 +320,10 @@ def build_manifest(corpus_dir: Path) -> dict:
     # Determinism-verdict denominator (spec §12 amendment) -- see module
     # docstring: every bucket a harvested pair with a real determinism
     # verdict can land in, EXCEPT harvest_error (no HarvestResult at all).
-    nondet_rejected = _required_stat("nondet_rejected")
-    truncated_rejected = _required_stat("truncated_rejected")
-    balance_rejected = _required_stat("balance_rejected")
-    gen_accepted_samples = _required_stat("accepted_samples")
+    nondet_rejected = sample_stats["nondet_rejected"]
+    truncated_rejected = sample_stats["truncated_rejected"]
+    balance_rejected = sample_stats["balance_rejected"]
+    gen_accepted_samples = sample_stats["accepted_samples"]
     screened = nondet_rejected + truncated_rejected + balance_rejected + gen_accepted_samples
     nondet_rate = (nondet_rejected / screened) if screened else 0.0
     nondet_kill_pass = nondet_rate <= NONDET_REJECT_KILL
@@ -254,6 +351,7 @@ def build_manifest(corpus_dir: Path) -> dict:
             "balance": balance,
             "skew_ok": skew_ok,
         },
+        "stats_sources": stats_sources,
         "samples_sha256": hashlib.sha256(samples_path.read_bytes()).hexdigest(),
     }
 

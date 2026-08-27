@@ -15,6 +15,8 @@ from __future__ import annotations
 import copy
 import json
 
+import pytest
+
 from crucible.latent import config, gen, gen_battery
 from crucible.latent.harvest import HarvestError
 from tests.latent.test_gen import _result
@@ -373,3 +375,57 @@ def test_generate_battery_inputs_dedups_against_samples_jsonl_from_a_prior_parti
 
     assert "(0,)" not in harvest_calls
     assert stats["duplicate_input"] == 1
+
+
+# --- ordering guard: refuse a corpus mid-repair (round-3 fix follow-up) -----
+
+
+def test_generate_battery_inputs_refuses_when_replay_corrupt_marker_has_no_reharvest_stats(tmp_path, monkeypatch):
+    """samples.jsonl.replay-corrupt existing with NO reharvest_stats.json
+    at all means a reharvest never even reached its final stats write --
+    refuse rather than enrich a corpus that may still be mid-repair."""
+    fn = _fn_record(ARITY_1_SRC, [])
+    _write_jsonl(tmp_path / "functions.jsonl", [fn])
+    (tmp_path / "samples.jsonl.replay-corrupt").write_text("")
+    monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: _result(outcome="return"))
+
+    with pytest.raises(RuntimeError, match="run reharvest first"):
+        gen_battery.generate_battery_inputs(tmp_path, seed=0)
+
+
+def test_generate_battery_inputs_refuses_when_reharvest_stats_present_but_incomplete(tmp_path, monkeypatch):
+    fn = _fn_record(ARITY_1_SRC, [])
+    _write_jsonl(tmp_path / "functions.jsonl", [fn])
+    (tmp_path / "samples.jsonl.replay-corrupt").write_text("")
+    (tmp_path / "reharvest_stats.json").write_text(json.dumps({"complete": False}))
+    monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: _result(outcome="return"))
+
+    with pytest.raises(RuntimeError, match="run reharvest first"):
+        gen_battery.generate_battery_inputs(tmp_path, seed=0)
+
+
+def test_generate_battery_inputs_runs_when_reharvest_is_complete(tmp_path, monkeypatch):
+    """The guard is scoped to the ordering hazard only -- once reharvest
+    genuinely finished, battery must run normally on top of it."""
+    fn = _fn_record(ARITY_1_SRC, [])
+    _write_jsonl(tmp_path / "functions.jsonl", [fn])
+    (tmp_path / "samples.jsonl.replay-corrupt").write_text("")
+    (tmp_path / "reharvest_stats.json").write_text(json.dumps({"complete": True}))
+    monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: _result(outcome="return"))
+
+    stats = gen_battery.generate_battery_inputs(tmp_path, seed=0)
+
+    assert stats["complete"] is True
+
+
+def test_generate_battery_inputs_runs_when_no_replay_corrupt_marker_at_all(tmp_path, monkeypatch):
+    """A corpus that was NEVER reharvested (no .replay-corrupt file at all)
+    is explicitly NOT refused by this guard -- deliberately narrow scope,
+    see _refuse_if_reharvest_incomplete's own docstring."""
+    fn = _fn_record(ARITY_1_SRC, [])
+    _write_jsonl(tmp_path / "functions.jsonl", [fn])
+    monkeypatch.setattr(gen, "harvest", lambda src, args, workdir: _result(outcome="return"))
+
+    stats = gen_battery.generate_battery_inputs(tmp_path, seed=0)
+
+    assert stats["complete"] is True

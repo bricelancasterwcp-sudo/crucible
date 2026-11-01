@@ -1,13 +1,13 @@
-# Crucible Phase-C pre-registration — symptom-conditioned retrieval + learned silence
+# Crucible Phase-C pre-registration: symptom-conditioned retrieval + learned silence
 
 **Date authored:** 2026-08-25. **Status:** DRAFT until tagged `prereg-lock-c`; after the
 tag, §5–§7 are frozen and only the §11 amendment protocol may touch them.
 
-## 1. Provenance — what licenses this phase
+## 1. Provenance: what licenses this phase
 
 Phase-B returned **GO_B** ([GATE-B.md](../../findings/GATE-B.md)): the explicit store is
 model-agnostic on repeats (+12.5 pp on the 14B, +13.5 pp on the 1.5B). Its locked §6
-names Phase-C: retrieval *policy* — symptom-conditioned retrieval and learned silence —
+names Phase-C: retrieval *policy* (symptom-conditioned retrieval and learned silence),
 pre-registered before any number is read. The open frontier is uniform across every
 result of this program: **memory does nothing for units it has never seen** (B2 novel
 exactly = control at 14B; E5 −6 pp at 1.5B), and the exact-only probe showed silence
@@ -17,7 +17,7 @@ directionally beats family-wide noise. Brice approved this design 2026-08-25
 ## 2. Question
 
 Class-keyed retrieval transfers nothing across units. Can retrieval keyed on the
-**failure itself** — the symptom text and the shape of prior fixes — carry repair
+**failure itself** (the symptom text and the shape of prior fixes) carry repair
 knowledge to units the store has never seen, and can a pre-set silence threshold keep it
 from spraying noise where it has nothing? The gated population is exactly where
 class-exact memory is empty: **phase-1 ∪ novel tasks (n = 250)**, on the strong model.
@@ -27,11 +27,11 @@ class-exact memory is empty: **phase-1 ∪ novel tasks (n = 250)**, on the stron
 | Arm | Model / serving | Hooks | Retrieval mode | Role |
 |---|---|---|---|---|
 | **B_symmem** | 14B (AWQ-served), chat, seed 0, k=8, w=4 | MemHooks (no value model, no calibrator, no sleep) | `"symptom"` | **gating** |
-| B_mem *(frozen, GATE-B)* | identical serving identity | MemHooks | `"full"` | control — **never re-run** |
+| B_mem *(frozen, GATE-B)* | identical serving identity | MemHooks | `"full"` | control (**never re-run**) |
 | A_symmem | 1.5B, chat, seed 0 | FullHooks (value v1 + calibrator ON, sleep OFF) | `"symptom"` | exploratory |
 | A_mem_nosleep *(frozen, ABLATIONS-A)* | identical serving identity | FullHooks | `"full"` | exploratory comparator |
 
-Each new arm differs from its frozen comparator by **retrieval policy alone** — same
+Each new arm differs from its frozen comparator by **retrieval policy alone**: same
 hooks class, same value/calibrator configuration, same serving identity (pinned by test,
 as in Phases A/B).
 
@@ -46,7 +46,7 @@ B_mem pool (phase-1∪novel, measured-only) = (156+34)/250 = **0.7600**; B_mem s
 2. **`crucible/memory/symmatch.py`** (new): a deterministic lexical relevance scorer and
    the v2 retrieval policy. Policy, in order:
    a. **Exact-class fast path unchanged**: a live exact-class lesson (and the class-exact
-      exemplar) retrieves exactly as mode `"full"` does today — the proven repeat
+      exemplar) retrieves exactly as mode `"full"` does today: the proven repeat
       machinery is byte-untouched.
    b. Otherwise: score **all live lessons cross-unit** by lexical overlap between the
       query (current unit source + rendered symptom text) and the lesson (its
@@ -55,17 +55,17 @@ B_mem pool (phase-1∪novel, measured-only) = (156+34)/250 = **0.7600**; B_mem s
       test NAMES are excluded from both sides (they are meaningless across units).
       Top-2 lessons with score ≥ **τ**; the class-exact-only exemplar rule is unchanged
       (strangers get no exemplar).
-   c. Below τ: **silence** — `RetrievedBlock(None, ())`, never `""`.
+   c. Below τ: **silence**: `RetrievedBlock(None, ())`, never `""`.
 3. **Retrieval-mode vocabulary grows `"symptom"`** (shared by FullHooks and MemHooks;
    `FULL_FAMILY` gains `A_symmem: ("symptom", False)`, the MemHooks CLI gate maps
    `B_symmem → "symptom"`). In symptom mode `before_task` runs ONE extra **uncharged**
-   driver-side symptom execution (`run(unit, unit.module_src, None)` — deterministic,
+   driver-side symptom execution (`run(unit, unit.module_src, None)`, deterministic,
    byte-identical to the free symptom run the search itself performs; never in
    `executions_charged`; counted in a disclosed hooks counter reported in the findings).
    No record-schema change.
 4. **τ is fixed pre-lock by a pre-registered rule**: over the Phase-A/B memory databases
    (`runs/gate-a-full`, `runs/abl-mem-nosleep`, `runs/abl-mem-exactonly`,
-   `runs/gate-b2-mem` — disclosed calibration data, none of it Phase-C data),
+   `runs/gate-b2-mem`; disclosed calibration data, none of it Phase-C data),
    τ = **P95 of the unrelated-pair score distribution**. Pairs are formed WITHIN each
    database (a run's own episodes × its own live lessons) and pooled across the four:
    *unrelated* = episode and lesson from a different unit AND different family;
@@ -77,7 +77,7 @@ B_mem pool (phase-1∪novel, measured-only) = (156+34)/250 = **0.7600**; B_mem s
 
 ## 5. Endpoints (frozen at lock)
 
-**The instrument is `build_lens` plus one derived pool rate** — pool = mean
+**The instrument is `build_lens` plus one derived pool rate**: pool = mean
 `hidden_pass` over measured phase-1∪novel records (the same measured-only discipline;
 recomputed from records, not from the two lens fields, so mixed-infra cases stay honest).
 
@@ -88,13 +88,13 @@ recomputed from records, not from the two lens fields, so mixed-infra cases stay
 - **C1 (gating, the only gating endpoint):**
   pool(B_symmem) ≥ pool(B_mem frozen) + Δ_min(pool) = 0.7600 + 0.0764 = **0.8364**.
   *Saturation clause (E3b lesson):* if 0.7600 + Δ_min > 1 the bar is unsatisfiable and
-  C1 is not exercisable — cannot occur at these values, stated anyway.
+  C1 is not exercisable (cannot occur at these values, stated anyway).
 - **Repeat guard (confound detector, NOT an endpoint):** |succ_second(B_symmem) −
   0.9050| ≤ 0.0586. Attribution stated honestly: seconds whose class was SOLVED at
   phase 1 take the byte-unchanged exact-class path (≈78% of seconds, per B_mem's
   phase-1 rate); seconds whose first attempt failed take the new symptom path where
   B_mem used family fallback. A violated guard therefore triggers **CONFOUNDED plus a
-  mandatory diagnosis** — split the seconds by solved-at-phase-1 (derivable from the
+  mandatory diagnosis**: split the seconds by solved-at-phase-1 (derivable from the
   run's own records) and report both subset rates; a drift on the exact subset is
   instrument/serving, a drift confined to the failed-first subset is a policy effect
   and is reported as such alongside the CONFOUNDED verdict.
@@ -106,7 +106,7 @@ recomputed from records, not from the two lens fields, so mixed-infra cases stay
   so); C5 wall vs B_mem's 2459 s; the uncharged-symptom-run counter (must equal task
   count in symptom mode).
 - **Exploratory (A_symmem vs frozen A_mem_nosleep, reading guide pre-stated):** pool
-  0.4200 comparator; novel 0.4000/0.4400/0.5000 (nosleep / exactonly / noMem) — does
+  0.4200 comparator; novel 0.4000/0.4400/0.5000 (nosleep / exactonly / noMem): does
   symptom-matching beat both family-noise and silence? Descriptive only, never gates.
 
 ## 6. Verdict rule (frozen at lock)
@@ -127,7 +127,7 @@ recomputed from records, not from the two lens fields, so mixed-infra cases stay
 
 - **Ranker-sanity gate (pre-lock, on calibration data):** if the median related-pair
   score (episode × lesson from the same class) does not exceed τ, the ranker cannot
-  separate signal from cross-family noise — STOP before locking; redesign or abandon
+  separate signal from cross-family noise: STOP before locking; redesign or abandon
   Phase-C with a report. Recorded in LOCK-C either way.
 - Smoke fails twice on symptom-plumbing or window grounds → stop, redesign before lock.
 - Serving conditions for the frozen comparators cannot be reproduced → stop; amend
@@ -163,6 +163,6 @@ Post-lock, §5–§7 are immutable.
 
 - **2026-08-25 (pre-lock):** §4.4's related-pair rule refined: pairs where the lesson
   was minted FROM the episode itself (`lesson.cited_episode_id == episode.item_id`) are
-  EXCLUDED from the related distribution — a self-citation pair scores its own text and
+  EXCLUDED from the related distribution: a self-citation pair scores its own text and
   would inflate the related median, weakening the §7 sanity gate. Old wording: "related =
   same class" with no exclusion. The exclusion makes the gate strictly harder to pass.

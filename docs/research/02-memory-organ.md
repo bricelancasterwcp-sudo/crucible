@@ -1,4 +1,4 @@
-# Pillar 2 — The Memory Organ: open-source component survey
+# Pillar 2: The Memory Organ: open-source component survey
 
 Survey date: 2026-08-23. All license/star/push facts below were read from the GitHub API
 or from a fetched `LICENSE` file during this survey; see the Evidence log. Nothing here is
@@ -6,15 +6,15 @@ quoted from memory.
 
 ## Summary
 
-Typed episodic/semantic/procedural separation is a solved, adoptable problem — MIRIX and MemOS
+Typed episodic/semantic/procedural separation is a solved, adoptable problem: MIRIX and MemOS
 both ship it, and MemOS's record metadata already carries `confidence`, `source` locators,
 `status`, and a versioned `history`. Bi-temporal fact validity with provenance back to raw
 episodes is solved by Graphiti (`valid_at`/`invalid_at`/`expired_at`/`episodes`). Consolidation
 episodic→weights is **not** solved by anything mature: MemOS's `parametric/lora.py` is an explicit
 placeholder that writes the literal bytes `b"Placeholder"`, and its `dream/` consolidation module
 is beta and disabled by default. The single closest thing to the crucible thesis is `cls-ledger`
-(MIT, 5 stars, 1.5k LOC) — fact cards with supersedence distilled into a LoRA with
-provenance-based unlearning — but it is MLX/Apple-only and unreviewed. We adopt schemas, port
+(MIT, 5 stars, 1.5k LOC): fact cards with supersedence distilled into a LoRA with
+provenance-based unlearning, but it is MLX/Apple-only and unreviewed. We adopt schemas, port
 the consolidation blueprint, and build the verification coupling ourselves.
 
 ## Candidate table
@@ -33,7 +33,7 @@ the consolidation blueprint, and build the verification coupling ourselves.
 | Voyager | github.com/MineDojo/Voyager | MIT (api) | 7154 | 2024-04-03 | Skill library: add skill only after critic verifies success | REFERENCE-ONLY |
 | Agent Workflow Memory | github.com/zorazrw/agent-workflow-memory | Apache-2.0 (api) | 460 | 2025-12-22 | Induce reusable workflows from successful trajectories only | REFERENCE-ONLY |
 | Stitch | github.com/mlb2251/stitch | MIT (api) | 99 | 2025-09-10 | Fast compression-based abstraction learning (Rust + py bindings) | PORT-PIECES |
-| DreamCoder | github.com/ellisk42/ec | MIT (api) | 555 | 2023-07-01 | Wake/sleep library learning — the original consolidation-of-programs loop | REFERENCE-ONLY |
+| DreamCoder | github.com/ellisk42/ec | MIT (api) | 555 | 2023-07-01 | Wake/sleep library learning: the original consolidation-of-programs loop | REFERENCE-ONLY |
 | prov | github.com/trungdong/prov | MIT (api) | 138 | 2026-08-21 | W3C PROV-DM in Python; PROV-O/JSON/XML export | ADOPT (optional) |
 | pyactr | github.com/jakdot/pyactr | **GPL-3.0** (api) | 183 | 2026-08-19 | ACT-R base-level activation/decay equations | REFERENCE-ONLY (copyleft) |
 
@@ -42,18 +42,18 @@ root** → reference-only by our rule; the `spec/` SKILL.md frontmatter format i
 `gabegrand/lilo` (MIT stated in README only, API reports `null`); `SoarGroup/Soar` (BSD, verified
 from `LICENSE.md`); `cmekik/pyClarion` (MIT, 68 stars); `langchain-ai/langmem` (MIT, 1621);
 `joonspk-research/generative_agents` (Apache-2.0, 21970, recency×importance×relevance scoring);
-`zhongwanjun/MemoryBank-SiliconFriend` (MIT, but last push 2023-05-24 — stale);
+`zhongwanjun/MemoryBank-SiliconFriend` (MIT, but last push 2023-05-24, stale);
 `agiresearch/AIOS` (**LICENSE file is 1 byte / empty** → treat as unlicensed).
 Searching "evidence ledger" / "falsification" surfaced almost entirely 0-star vibe repos
-(`crodorg/falsify` MIT 0 stars, `Treibs/kp-build` MIT 0 stars) — nothing adoptable.
+(`crodorg/falsify` MIT 0 stars, `Treibs/kp-build` MIT 0 stars). Nothing adoptable.
 
-## Top picks — detail
+## Top picks: detail
 
-### 1. MemOS (`MemTensor/MemOS`) — port the record schema
+### 1. MemOS (`MemTensor/MemOS`): port the record schema
 
 Data model (`src/memos/memories/textual/item.py`):
 - `SourceMessage`: `type` (chat/doc/web/file/system), `role`, `content` (minimal reproducible
-  snippet), `chat_time`, `message_id`, `doc_path`, `file_info` — i.e. a locator that points
+  snippet), `chat_time`, `message_id`, `doc_path`, `file_info`, i.e. a locator that points
   back at the origin, not just a string.
 - `TextualMemoryMetadata`: `confidence: float`, `source: Literal[...]`, `status: activated |
   resolving | archived | deleted`, `version: int`, `history: list[ArchivedTextualMemory]`,
@@ -68,21 +68,21 @@ the ledger-vs-lesson and event-vs-state distinctions we want, and `history` give
 for free. Change: `confidence` must become a function of verification (tests passed) rather than
 an LLM's self-report, and we add `last_verified_at` + `falsified_by`, which do not exist.
 
-Gotchas — important: **`memories/parametric/lora.py` is a stub.** Its header says "This file
+Gotchas (important): **`memories/parametric/lora.py` is a stub.** Its header says "This file
 currently serves as a placeholder… Please do not use this as a functional module yet", and
 `dump()` writes `b"Placeholder"`. `ParametricMemoryItem` is `{id, memory: Any, metadata: dict}`.
 So MemOS's headline "parametric memory" gives us nothing executable. The `dream/` module is
 real code but is beta, disabled by default (`MEMOS_ENABLED_PLUGINS=dream`), LLM-driven, and
-produces "insights" and a "diary" — it consolidates text into more text, not into weights.
+produces "insights" and a "diary". It consolidates text into more text, not into weights.
 Also a large repo with graph DBs, vector DBs, schedulers, and an API server; we want the
 schema files, not the platform.
 
-### 2. Graphiti (`getzep/graphiti`) — port the temporal fact model
+### 2. Graphiti (`getzep/graphiti`): port the temporal fact model
 
 Data model (`graphiti_core/edges.py`):
 - `Edge`: `uuid`, `group_id` (partition), `source_node_uuid`, `target_node_uuid`, `created_at`.
-- `EntityEdge(Edge)`: `name`, `fact: str`, `fact_embedding`, `episodes: list[str]` (**provenance
-  — the raw episodes that produced this fact**), `expired_at` (when the system learned it was
+- `EntityEdge(Edge)`: `name`, `fact: str`, `fact_embedding`, `episodes: list[str]` (**provenance:
+  the raw episodes that produced this fact**), `expired_at` (when the system learned it was
   no longer true), `valid_at` / `invalid_at` (when it was true in the world), `reference_time`,
   `attributes: dict`.
 - Separate `EpisodicEdge`, `CommunityEdge`, `HasEpisodeEdge`, `NextEpisodeEdge` types.
@@ -92,7 +92,7 @@ and it is the best answer in the survey to "when did we learn this stopped being
 
 Reuse: the four-timestamp pattern and `episodes: list[str]` backlink. Change: there is **no
 confidence field** anywhere on the edge, and invalidation is decided by an LLM judging
-contradiction between facts — for crucible, falsification must be a re-run of the test, so we
+contradiction between facts. For crucible, falsification must be a re-run of the test, so we
 replace the invalidation trigger entirely while keeping the fields.
 
 Gotchas: `neo4j>=5.26.0` and `openai>=1.91.0` are **unconditional** dependencies in
@@ -100,9 +100,9 @@ Gotchas: `neo4j>=5.26.0` and `openai>=1.91.0` are **unconditional** dependencies
 extra is marked "the upstream Kuzu project is unmaintained; this extra will be removed", leaving
 `falkordblite` (py≥3.12) as the only no-server path. Ingestion is LLM-call-heavy per episode.
 
-### 3. MIRIX (`Mirix-AI/MIRIX`) — port the typed table split
+### 3. MIRIX (`Mirix-AI/MIRIX`): port the typed table split
 
-Data model (`mirix/orm/`), one SQLAlchemy table per memory type — the cleanest separation found:
+Data model (`mirix/orm/`), one SQLAlchemy table per memory type (the cleanest separation found):
 - `episodic_memory`: `occurred_at`, `actor`, `event_type` (user_message/inference/…), `summary`,
   `details`, `last_modify {timestamp, operation}`, `filter_tags`.
 - `semantic_memory`: `name`, `summary`, `details`, **`source`** (origin reference), `created_at`.
@@ -119,12 +119,12 @@ record with provenance, two separate confidence axes, an evidence pointer, a con
 lifecycle, and forward lineage into the skills it changed.
 
 Reuse: the table split and `skill_experience` verbatim. Change: `procedural_memory` stores
-`instructions` as a **string of prose**, not an executable program, and carries no pass-rate —
-for crucible a skill must be a runnable artifact with a scored execution history, so we replace
+`instructions` as a **string of prose**, not an executable program, and carries no pass-rate.
+For crucible a skill must be a runnable artifact with a scored execution history, so we replace
 that column set. Gotchas: Postgres-native (BM25 full-text, `init.sql`), Docker-compose deployment
 with a dashboard, and the quick-start is wired to Gemini for both LLM and embeddings.
 
-### 4. cls-ledger (`caiovicentino/cls-ledger`) — port the consolidation blueprint
+### 4. cls-ledger (`caiovicentino/cls-ledger`): port the consolidation blueprint
 
 The only repo found that implements verified-selective episodic→parametric consolidation.
 1466 LOC total, readable end to end.
@@ -137,20 +137,20 @@ older statements by superseding the *new* card instead. `current_cards()` = non-
 
 `system.py` states the design directly: hippocampus = episodic store, cortex = LoRA written by
 distillation of *selected* cards, ledger = maps every training example back to cards and
-episodes. Three stated properties: (1) state-level not episode-level — only current values are
-consolidated; (2) churn-gated selection — facts observed to change often stay episodic
-("freshness in weights is a losing game"); (3) reversibility — drop an entity's cards and
+episodes. Three stated properties: (1) state-level not episode-level: only current values are
+consolidated; (2) churn-gated selection: facts observed to change often stay episodic
+("freshness in weights is a losing game"); (3) reversibility: drop an entity's cards and
 re-distill. `slots.py` implements one LoRA per entity fused by rank concatenation, so deleting a
 slot is a re-fusion rather than a retrain (O(fusion), not O(training)).
 
 Reuse: the selection policy, the card→training-example→ledger mapping, and the slot-fusion idea.
-Change: `slots.py` is built on **MLX** (`import mlx.core as mx`) — Apple Silicon only — so on the
+Change: `slots.py` is built on **MLX** (`import mlx.core as mx`), Apple Silicon only, so on the
 RTX 5080 it must be reimplemented against PEFT/torch. Its notion of "verified" is supersedence
 and churn, not test execution; we substitute test outcomes. Gotchas: 5 stars, no reviews, no
 CI visible, research artifact tied to its own `agentlife` benchmark harness; treat as a design
 document with working reference code, not a dependency.
 
-### 5. cognee (`topoteretes/cognee`) — one idea worth taking
+### 5. cognee (`topoteretes/cognee`): one idea worth taking
 
 `DataPoint` (`cognee/infrastructure/engine/models/DataPoint.py`) documents a trap we would
 otherwise hit: a random default UUID means a node "has NO stable identity, so such a node never
@@ -168,13 +168,13 @@ halves of pillar 2 that the open-source field does worst, and they were designed
 stance this survey was asked to enforce. Witness is the licensing discipline: an append-only
 ledger of what was actually retrieved (files opened, commands run, timestamps, hashes) against
 which every sentence must be licensed, with the model allowed to *request* a read while the
-witness records whether the read happened — and it explicitly rejects "cloud 'memory layer' that
+witness records whether the read happened, and it explicitly rejects "cloud 'memory layer' that
 embeds old chats and retrieves a vibe", which is the same rejection driving crucible's design
 stance. Sensorium is the episodic recorder for precisely crucible's domain: it wraps one Python
 run, streams every call/return/exception with captured values into a SQLite trace, and answers
 only as a deterministic function of that trace, marking truncations and labelling a rerun that
 turned out to be a different execution. Since a crucible episode *is* a Python test run against a
-mutation-injected bug, sensorium is the natural episodic-ledger instrument — it already produces
+mutation-injected bug, sensorium is the natural episodic-ledger instrument. It already produces
 the raw trace that a lesson would be derived from, with the honesty properties (never answer from
 data you do not have) that the semantic store's `confidence` field needs in order to mean
 anything. The gap between them and pillar 2 is the layer above: neither derives typed semantic
@@ -183,33 +183,33 @@ weights. Practically: sensorium supplies the ledger, witness supplies the claim�
 licensing rule, and crucible builds lesson-derivation, skill scoring, and consolidation on top.
 Neither was modified.
 
-## Gaps — what we build from scratch
+## Gaps: what we build from scratch
 
 The prior was: provenance-aware semantic store, falsification checks, verified-only consolidation
 trigger. Partly refuted, partly confirmed.
 
-- **Provenance-aware semantic store — REFUTED (port, don't build).** MemOS's
+- **Provenance-aware semantic store: REFUTED (port, don't build).** MemOS's
   `TextualMemoryMetadata` (confidence, source, sources[] locators, status, version, history[])
   plus Graphiti's four-timestamp `EntityEdge` with `episodes: list[str]` together cover this.
   Missing fields we add: `last_verified_at`, `falsified_by`, and a `verification_method`.
-- **Falsification checks — CONFIRMED, build.** Every system found decides invalidation by asking
+- **Falsification checks: CONFIRMED, build.** Every system found decides invalidation by asking
   an LLM whether two text facts contradict (Graphiti, mem0, MemOS `update_type=conflict`). None
   re-executes anything to test a claim. Crucible's falsification is a test run, and the scheduler
   that decides *when* a claim is stale enough to re-verify does not exist anywhere in this survey.
-- **Verified-only consolidation trigger — CONFIRMED, build, with a blueprint.** cls-ledger is the
+- **Verified-only consolidation trigger: CONFIRMED, build, with a blueprint.** cls-ledger is the
   only implementation and it is MLX-only, 5 stars, and gates on supersedence/churn rather than
   verification. MemOS's LoRA path is a placeholder. We port cls-ledger's selection policy and
   ledger→training-example mapping onto PEFT/torch and swap the gate to "episode's tests passed".
-- **Procedural memory as scored executable skills — CONFIRMED, build.** MIRIX stores skills as
+- **Procedural memory as scored executable skills: CONFIRMED, build.** MIRIX stores skills as
   prose `instructions` with no success rate; Voyager stores executable code but retrieves it by
   OpenAI embedding similarity and keeps no per-skill score history; AWM induces workflows from
   successful trajectories but as text. A skill library where each entry is a runnable program with
   an execution/pass-rate record does not exist off the shelf.
-- **Local-model-only operation — build/adapt.** Graphiti hard-depends on `openai`, MIRIX's
+- **Local-model-only operation: build/adapt.** Graphiti hard-depends on `openai`, MIRIX's
   quick-start is Gemini-wired, Voyager hardcodes `ChatOpenAI`/`OpenAIEmbeddings`, A-MEM defaults
   to `gpt-4o-mini`. Every adopted component needs its LLM/embedding calls rerouted to the frozen
   local proposer or removed.
-- **Decay/activation math — reference, then implement.** pyactr has the ACT-R base-level equations
+- **Decay/activation math: reference, then implement.** pyactr has the ACT-R base-level equations
   but is **GPL-3.0**, so we read it and implement independently; Soar (BSD) and pyClarion (MIT)
   are safe to read for the declarative/procedural split.
 
@@ -282,7 +282,7 @@ gh api repos/letta-ai/letta/contents/LICENSE | base64 -d       => Apache License
 curl raw letta-ai/letta-code/main/LICENSE                      => Apache License 2.0
 ```
 
-Searches (`gh search repos <terms> --sort stars --limit N`) — note: quoting multi-word queries
+Searches (`gh search repos <terms> --sort stars --limit N`). Note: quoting multi-word queries
 makes gh send them as an exact phrase and return nothing; unquoted short terms work:
 
 ```

@@ -1,4 +1,4 @@
-# crucible — Phase A pre-registration and design
+# crucible: Phase A pre-registration and design
 
 **Status:** DRAFT → becomes LOCKED at git tag `prereg-lock-a` (see §12). Written 2026-08-23 after the five open-component surveys (`docs/research/01..05`). Approved in chat by Brice 2026-08-23 (arms, endpoints, verdict rule, the three chosen numbers, the four survey amendments).
 
@@ -21,10 +21,10 @@ Pillar 1 (a non-token latent "intuition" predictor) is **not** tested in Phase A
 | Decision | Ruling |
 |---|---|
 | Compute | This box (RTX 5080 16 GB, 29 GB RAM) + short cloud rentals only for training that won't fit. Phase A is expected to need zero rental. |
-| Domain | Code repair of mutation-injected bugs in Python — verification is free and exact. |
+| Domain | Code repair of mutation-injected bugs in Python: verification is free and exact. |
 | Approach | **Option A**: loop first, borrowed intuition. Frozen small open LLM as proposer; build pillars 2+3+5 around it; bigger frozen model as baseline. |
 | Licensing | Apache-2.0 / MIT / BSD adoptable. Copyleft (GPL/AGPL/LGPL) never enters the tree. CC-BY-NC / research-only / custom / no-license = reference-only. Every adopted artifact's license is verified by command and recorded in `THIRD_PARTY.md`. |
-| Chosen numbers | M = 50 (sleep interval, tasks) [amended pre-lock — see A2], K = 8 (test executions per task), abstention enrichment ≥ 2×. All three are **chosen, not derived** — they are fixed here so they cannot drift, and they are not tuned after any number is seen. |
+| Chosen numbers | M = 50 (sleep interval, tasks) [amended pre-lock; see A2], K = 8 (test executions per task), abstention enrichment ≥ 2×. All three are **chosen, not derived**: they are fixed here so they cannot drift, and they are not tuned after any number is seen. |
 
 ## 2. Arms
 
@@ -37,7 +37,7 @@ All arms see the **identical task sequence** (same seeds, same order), the same 
 | **B_search** | big (Qwen3.5-9B) | no | no | yes | fair "small+memory vs big" comparison |
 | **B_naive** | big | no | no | best-of-K, no tree | "how LLMs operate today"; secondary, cheap |
 
-**Exploratory (non-gating), run only if GPU-time allows after the gating arms:** A_mem−sleep (explicit memory, no LoRA) and A_sleep−mem (LoRA, no explicit store) — separates the store from the weights.
+**Exploratory (non-gating), run only if GPU-time allows after the gating arms:** A_mem−sleep (explicit memory, no LoRA) and A_sleep−mem (LoRA, no explicit store). These separate the store from the weights.
 
 **Declared asymmetry:** A_full spends extra GPU time in sleep (LoRA training between tasks). This is the thesis (learning in the loop), not a confound; it is **reported** as GPU-minutes per arm, and it never counts against the per-task verification budget.
 
@@ -47,17 +47,17 @@ All arms see the **identical task sequence** (same seeds, same order), the same 
 
 ## 3. Sampler and serving (pinned)
 
-- Temperature 0.7, top_p 0.95, max_new_tokens **2048** [amended pre-lock — see A1], **thinking mode OFF** for all arms. Seed = hash(run_id, task_key, node_id, k) — deterministic and recorded.
+- Temperature 0.7, top_p 0.95, max_new_tokens **2048** [amended pre-lock; see A1], **thinking mode OFF** for all arms. Seed = hash(run_id, task_key, node_id, k), deterministic and recorded.
 - One inference server process per arm-run; served model identity (path + digest) asserted by the driver before the first task and re-asserted after every sleep reload. Mismatch = infrastructure failure, run aborts.
 - vLLM is the intended server (n-best, logprobs, `/v1/load_lora_adapter` hot-swap). **llama.cpp `llama-server` is the committed fallback** (already on this box; `POST /lora-adapters` hot-swap; `n_probs`). Which one is used is recorded in the lens (§7). The sm_120 install is timeboxed to one working day in Slice 1; on expiry, fall back.
 
-**Amendments (pre-lock; §12 protocol — date + old value):**
-- **A1 (2026-08-23): `max_new_tokens` 1024 → 2048.** The S4.7 landing pre-check (run on the real 450-task stream before any arm) found the 1024 cap was the *dominant* codec-landing failure: the full-module-rewrite codec (§4.4) asks the model to re-emit the module **and** reproduce the whole visible test harness in one block, which routinely exceeds 1024 tokens, truncating the completion with its fence still open (rejected as `no-fence`). At the pinned 1024, Qwen3.5-2B landed 0.767 and Qwen2.5-Coder-1.5B-Instruct 0.80 — both below the 0.95 gate; raising the 1.5B to 2048 lifted landing to 0.92. This is the §4.7-sanctioned "codec fix, before any arm runs." Old value 1024. Evidence: `docs/findings/S2-ceiling-pilot.md`. Single source: `crucible.proposer.client.MAX_NEW_TOKENS`.
-- Sleep is an explicit **stop-serve → train → evaluate adapter → reload** cycle (serving and training cannot co-reside on 14.5 GB usable VRAM) [amended pre-lock — see A3].
-- **A2 (2026-08-24): sleep cadence — task-interval M = 50 → verified-episode threshold N = 16.** The approved S3 spec (R-S3-3, `docs/superpowers/specs/2026-08-24-crucible-s3-memory-design.md`) triggers sleep when 16 NEW verified episodes have accumulated since the last accepted adapter, checked between tasks — training-set growth, not task count, is what makes retraining worthwhile; a fixed task interval would fire empty or near-empty sleeps on hard stretches. Training is cumulative from the BASE model over ALL verified episodes each sleep (full-rehearsal equivalent; no separate rehearsal buffer). Old value: M = 50 tasks. N = 16 is chosen-not-derived, fixed here, not tuned after any number is seen (the ops smoke used threshold 4 purely to exercise loop mechanics — `docs/findings/S3-smoke.md`). Single source: `crucible/sleep/loop.py` `SLEEP_THRESHOLD_DEFAULT`.
-- **A3 (2026-08-24): sleep serving cycle — stop-serve → train → reload becomes live co-residency + runtime hot-swap.** The stop-serve assumption was measured false: the 1.5B served at gpu-memory-utilization 0.45 (≈8.1 GiB actual hold) plus the trainer at batch 1 + gradient-accumulation 8 + checkpointing (≈5.2 GiB peak) ran four consecutive sleep cycles that trained and hot-loaded (`/v1/load_lora_adapter`) beside the live server (`docs/findings/S3-smoke.md` §2). Old text: explicit stop-serve → train → evaluate → reload cycle. Served identity is still re-asserted after every hot-load (mismatch = infrastructure failure), per this section's identity rule.
-- **A4 (2026-08-24): adapter accept gate — fixed 20-unit regression slice from *excluded* units with Δ_min → min(12, |solved|) holdout slice of the arm's own already-solved stream tasks with ACCEPT_MAX_DROP = 1.** The gate's job is "did consolidation break what the arm could already do", which excluded-unit generality does not measure. Accept iff slice-solved-after ≥ slice-solved-before − 1. Old values: 20 excluded units, Δ_min pass-rate drop. Caveat (recorded in CARRIED-DEBT S3): the slice is graded on hidden suites of solved tasks — acceptable for a weights-gate, never for a score. Single source: `crucible/sleep/loop.py` `SLICE_SIZE`, `ACCEPT_MAX_DROP`.
-- **A5 (2026-08-24): uncertainty instrument — crepes Mondrian conformal (abstain on empty prediction set at α = 0.1, categories by verification state) → stdlib PAVA isotonic calibration per provenance class {hit,nohit}×{p1,p2}, abstain iff calibrated p < 0.2 (inclusive at the threshold: p = 0.2 does not abstain).** crepes is a conformal-regression-interval library — the wrong instrument for calibrating a binary P(hidden pass); per-class PAVA keeps the Mondrian idea (conditional coverage by class) without the dependency (crepes stays a design reference in `THIRD_PARTY.md`, no code). Below MIN_OBS = 10 observations a class is honest passthrough (raw score, no fit). Post-sleep recalibration truncates each class's history to the trailing window, permanently — post-sleep fits never mix pre-sleep pairs (final-review I-1 ruling). Old values: crepes BSD-3 dependency, α = 0.1, verification-state categories {unexecuted, visible_partial, visible_passed}. Single source: `crucible/uncertainty/conformal.py`.
+**Amendments (pre-lock; §12 protocol: date + old value):**
+- **A1 (2026-08-23): `max_new_tokens` 1024 → 2048.** The S4.7 landing pre-check (run on the real 450-task stream before any arm) found the 1024 cap was the *dominant* codec-landing failure: the full-module-rewrite codec (§4.4) asks the model to re-emit the module **and** reproduce the whole visible test harness in one block, which routinely exceeds 1024 tokens, truncating the completion with its fence still open (rejected as `no-fence`). At the pinned 1024, Qwen3.5-2B landed 0.767 and Qwen2.5-Coder-1.5B-Instruct 0.80, both below the 0.95 gate; raising the 1.5B to 2048 lifted landing to 0.92. This is the §4.7-sanctioned "codec fix, before any arm runs." Old value 1024. Evidence: `docs/findings/S2-ceiling-pilot.md`. Single source: `crucible.proposer.client.MAX_NEW_TOKENS`.
+- Sleep is an explicit **stop-serve → train → evaluate adapter → reload** cycle (serving and training cannot co-reside on 14.5 GB usable VRAM) [amended pre-lock; see A3].
+- **A2 (2026-08-24): sleep cadence: task-interval M = 50 → verified-episode threshold N = 16.** The approved S3 spec (R-S3-3, `docs/superpowers/specs/2026-08-24-crucible-s3-memory-design.md`) triggers sleep when 16 NEW verified episodes have accumulated since the last accepted adapter, checked between tasks. Training-set growth, not task count, is what makes retraining worthwhile; a fixed task interval would fire empty or near-empty sleeps on hard stretches. Training is cumulative from the BASE model over ALL verified episodes each sleep (full-rehearsal equivalent; no separate rehearsal buffer). Old value: M = 50 tasks. N = 16 is chosen-not-derived, fixed here, not tuned after any number is seen (the ops smoke used threshold 4 purely to exercise loop mechanics; `docs/findings/S3-smoke.md`). Single source: `crucible/sleep/loop.py` `SLEEP_THRESHOLD_DEFAULT`.
+- **A3 (2026-08-24): sleep serving cycle: stop-serve → train → reload becomes live co-residency + runtime hot-swap.** The stop-serve assumption was measured false: the 1.5B served at gpu-memory-utilization 0.45 (≈8.1 GiB actual hold) plus the trainer at batch 1 + gradient-accumulation 8 + checkpointing (≈5.2 GiB peak) ran four consecutive sleep cycles that trained and hot-loaded (`/v1/load_lora_adapter`) beside the live server (`docs/findings/S3-smoke.md` §2). Old text: explicit stop-serve → train → evaluate → reload cycle. Served identity is still re-asserted after every hot-load (mismatch = infrastructure failure), per this section's identity rule.
+- **A4 (2026-08-24): adapter accept gate: fixed 20-unit regression slice from *excluded* units with Δ_min → min(12, |solved|) holdout slice of the arm's own already-solved stream tasks with ACCEPT_MAX_DROP = 1.** The gate's job is "did consolidation break what the arm could already do", which excluded-unit generality does not measure. Accept iff slice-solved-after ≥ slice-solved-before − 1. Old values: 20 excluded units, Δ_min pass-rate drop. Caveat (recorded in CARRIED-DEBT S3): the slice is graded on hidden suites of solved tasks, acceptable for a weights-gate, never for a score. Single source: `crucible/sleep/loop.py` `SLICE_SIZE`, `ACCEPT_MAX_DROP`.
+- **A5 (2026-08-24): uncertainty instrument: crepes Mondrian conformal (abstain on empty prediction set at α = 0.1, categories by verification state) → stdlib PAVA isotonic calibration per provenance class {hit,nohit}×{p1,p2}, abstain iff calibrated p < 0.2 (inclusive at the threshold: p = 0.2 does not abstain).** crepes is a conformal-regression-interval library, the wrong instrument for calibrating a binary P(hidden pass); per-class PAVA keeps the Mondrian idea (conditional coverage by class) without the dependency (crepes stays a design reference in `THIRD_PARTY.md`, no code). Below MIN_OBS = 10 observations a class is honest passthrough (raw score, no fit). Post-sleep recalibration truncates each class's history to the trailing window, permanently: post-sleep fits never mix pre-sleep pairs (final-review I-1 ruling). Old values: crepes BSD-3 dependency, α = 0.1, verification-state categories {unexecuted, visible_partial, visible_passed}. Single source: `crucible/uncertainty/conformal.py`.
 
 ## 4. Task stream
 
@@ -83,7 +83,7 @@ All arms see the **identical task sequence** (same seeds, same order), the same 
   | VAR | `VariableReplacer`, `VariableInserter` |
   | SDL | ported statement deletion |
 
-- **Valid mutant** := applies cleanly ∧ compiles ∧ differs from the original ∧ is **killed by the visible suite** (≥1 visible test fails — so the agent always has a symptom) within the sandbox limits (§4.5). A mutant that hangs is *killed-by-timeout* and is valid (that is a real bug class) but flagged `kills_by_timeout=true`. Mutants killed only by hidden tests, or not killed at all, are excluded (no symptom / equivalent — no signal); both exclusion reasons are counted in the stream manifest.
+- **Valid mutant** := applies cleanly ∧ compiles ∧ differs from the original ∧ is **killed by the visible suite** (≥1 visible test fails, so the agent always has a symptom) within the sandbox limits (§4.5). A mutant that hangs is *killed-by-timeout* and is valid (that is a real bug class) but flagged `kills_by_timeout=true`. Mutants killed only by hidden tests, or not killed at all, are excluded (no symptom / equivalent, no signal); both exclusion reasons are counted in the stream manifest.
 - **Mutant key** = sha256(unit_src_hash ‖ unified_diff). Keys are identities, not descriptions.
 
 ### 4.3 Classes, exposures, novelty
@@ -94,8 +94,8 @@ All arms see the **identical task sequence** (same seeds, same order), the same 
 - Novel tasks sit after memory has accumulated so negative transfer is measurable.
 
 ### 4.4 What the agent sees and emits
-- Input: the mutated module source, the visible test file, the output of **one free execution** of the visible suite (the symptom), and — A_full only — retrieved memory (§8.3). The agent does not see the hidden tests or the original source.
-- Output: a **full-module rewrite** (the unit is one function; this codec lands ~100% and removes codec-landing as a variable — §4.7), plus `status ∈ {verified_visible, believed, abstain}` and `confidence ∈ [0,1]`.
+- Input: the mutated module source, the visible test file, the output of **one free execution** of the visible suite (the symptom), and (A_full only) retrieved memory (§8.3). The agent does not see the hidden tests or the original source.
+- Output: a **full-module rewrite** (the unit is one function; this codec lands ~100% and removes codec-landing as a variable; §4.7), plus `status ∈ {verified_visible, believed, abstain}` and `confidence ∈ [0,1]`.
 - Test files are hash-locked; a submission that alters them, or touches anything but the module, scores as failure with reason `tampered`.
 
 ### 4.5 Sandbox
@@ -104,7 +104,7 @@ All arms see the **identical task sequence** (same seeds, same order), the same 
 
 ### 4.6 Verification budget (the fair unit)
 - **K = 8** executions of the visible suite (any subset) per task, across the whole search tree, after the one free symptom run. Cached results are free. Hidden tests are never executable by the agent.
-- Wall-clock safety cap 900 s per task — a valve, not a budget. If > 2% of tasks in any arm hit it, that is reported as a confound on that arm.
+- Wall-clock safety cap 900 s per task: a valve, not a budget. If > 2% of tasks in any arm hit it, that is reported as a confound on that arm.
 - Token budgets differ by model size by design; executions are the comparable unit. Tokens, wall time, and GPU-minutes are recorded per task and per arm.
 
 ### 4.7 Codec landing pre-check
@@ -112,26 +112,26 @@ Before lock, run `assay`'s landing probe (already on this box) against each serv
 
 ### 4.8 Structural pre-checks (run before any arm sees a task)
 Computable in seconds; all must pass or the stream is rebuilt:
-1. Phase-1 vs phase-2 `m1`/`m2` sets: identical family distribution (by construction — assert it), and the distributions of (a) number of killing tests, (b) unit source length, (c) `kills_by_timeout` rate lie within 2·SE of each other.
+1. Phase-1 vs phase-2 `m1`/`m2` sets: identical family distribution (by construction; assert it), and the distributions of (a) number of killing tests, (b) unit source length, (c) `kills_by_timeout` rate lie within 2·SE of each other.
 2. Novel units are disjoint from phase-1 units (assert).
 3. Every class has `m1.site ≠ m2.site` (assert). *[Clarified 2026-08-23, per §11, with the rung-1 build (see `2026-08-23-crucible-s2.5-stack2-design.md`): at rung ≥ 1 a task carries a site-**set** (two sites), and this assertion is **disjointness of m1's and m2's site-sets**. Original wording kept above; no threshold changes.]*
 4. **Ceiling / contamination pilot:** run **A_noMem** on a 30-task pilot drawn from phase 1. If success > 0.70, the stream is too easy for E1 to be detectable; apply the **hardening ladder in this order, one rung at a time, re-running the pilot**: (i) two-site mutants; (ii) MBPP+-only seeds; (iii) α-rename identifiers (semantics-preserving); (iv) tier-2 real repos via SWE-smith procedural bugs. The rung reached is recorded and fixed at lock.
-5. **Live control:** A_noMem runs **first and completely**. Its second-minus-first delta must lie within ±Δ_min of zero. If not, the stream is confounded: fix, rebuild, rerun A_noMem from zero. A_full never runs until this passes. (This is why it is a preflight and not a re-roll — no A_full number has been read.)
+5. **Live control:** A_noMem runs **first and completely**. Its second-minus-first delta must lie within ±Δ_min of zero. If not, the stream is confounded: fix, rebuild, rerun A_noMem from zero. A_full never runs until this passes. (This is why it is a preflight and not a re-roll: no A_full number has been read.)
 
 ### 4.9 Realism check (reported, not gating)
 Compare the family distribution of *valid* mutants against HumanEvalPack's human-authored `bug_type` distribution. A large mismatch is a stated limitation of every transfer claim, not a reason to alter the stream after lock.
 
-## 5. Memory, search, value, uncertainty in A_full — behaviour contracts
+## 5. Memory, search, value, uncertainty in A_full: behaviour contracts
 
 These are contracts the implementation must satisfy; the design detail is in §8.
 
 - **Memory is written after every task** (episodic always; semantic claims derived and stamped with provenance; procedural skills scored), never only on success.
 - **Retrieval is structured first**: keyed on (unit, family, failing-test signature); any embedding similarity is a secondary tiebreak only and is logged as such. Retrieved items carry their provenance and verification status into the prompt.
 - **Falsification is re-execution**: a semantic claim used in a task is re-verified by running the test it cites when its `last_verified_at` is older than the unit's last change; a failed re-check marks it `falsified_by=<run>` and it is never retrieved as a fact again (it remains in the ledger).
-- **Sleep every M = 50 tasks** [amended pre-lock — see A2, A3 in §3]: select **verified-only** episodes (hidden-pass ∧ not `tampered`), train a LoRA (PEFT r=16, bf16, gradient checkpointing) with a rehearsal buffer, **evaluate** the adapter on a fixed 20-unit regression slice from the stream's *excluded* units; accept only if the slice's pass rate does not drop by more than Δ_min; reload [slice and gate amended pre-lock — see A4 in §3]. Rejected adapters are kept on disk and logged.
+- **Sleep every M = 50 tasks** [amended pre-lock; see A2, A3 in §3]: select **verified-only** episodes (hidden-pass ∧ not `tampered`), train a LoRA (PEFT r=16, bf16, gradient checkpointing) with a rehearsal buffer, **evaluate** the adapter on a fixed 20-unit regression slice from the stream's *excluded* units; accept only if the slice's pass rate does not drop by more than Δ_min; reload [slice and gate amended pre-lock; see A4 in §3]. Rejected adapters are kept on disk and logged.
 - **Search** = REx Thompson-sampling scheduler over candidate "arms" (each candidate patch is an arm; children are refinements), rewards in [0,1] = fraction of visible tests passing; budget-aware: it must never exceed K executions.
 - **Value function** = predicts P(hidden pass | node features) **before** execution; trained online from outcomes; used to order which candidates get the scarce executions. v0 = logistic/MLP over (visible tests passed/failed so far, failing-test signature class, diff size, proposer mean logprob / self-certainty, retrieved-memory verification status); recorded per node.
-- **Uncertainty** = isotonic-calibrated value score wrapped in Mondrian conformal prediction (crepes, BSD-3). **Mondrian category = the candidate's verification state** ∈ {unexecuted, visible_partial (executed, some visible tests fail), visible_passed}, so coverage is guaranteed conditional on how much the candidate has actually been checked. The per-node `confidence` is recorded **before** each execution. The submission `status` (§4.4) derives from it: `verified_visible` if the final candidate passed the visible suite; `believed` if submitted without a visible pass; **`abstain` if the best candidate's prediction set is empty at α = 0.1**. **Recalibrated after every sleep** on a rolling recent window (exchangeability is violated by design; this is a first-class risk). [Library, α, categories, and abstain rule amended pre-lock — see A5 in §3.]
+- **Uncertainty** = isotonic-calibrated value score wrapped in Mondrian conformal prediction (crepes, BSD-3). **Mondrian category = the candidate's verification state** ∈ {unexecuted, visible_partial (executed, some visible tests fail), visible_passed}, so coverage is guaranteed conditional on how much the candidate has actually been checked. The per-node `confidence` is recorded **before** each execution. The submission `status` (§4.4) derives from it: `verified_visible` if the final candidate passed the visible suite; `believed` if submitted without a visible pass; **`abstain` if the best candidate's prediction set is empty at α = 0.1**. **Recalibrated after every sleep** on a rolling recent window (exchangeability is violated by design; this is a first-class risk). [Library, α, categories, and abstain rule amended pre-lock; see A5 in §3.]
 
 ## 6. Endpoints
 
@@ -155,7 +155,7 @@ Let `succ(arm, S)` be the hidden-suite success rate of an arm over task set S. L
 - **GO** = E1 ∧ E2a ∧ E2b ∧ E3a ∧ (E3b ∨ E3b not exercised). → Full system design + Phase-B pre-registration (§13).
 - **NO-GO** = E1 fails with controls clean. The memory/consolidation story is wrong at this scale. Ship as findings; stop.
 - **PARTIAL** = E1 passes, any of E2a/E2b/E3 fails. Memory helps but small+memory does not reach big+search, or uncertainty is not informative. **Brice rules**; I do not.
-- **CONFOUNDED** = a §4.8 pre-check fails. No verdict. Fix the stream, rebuild, rerun from zero — permitted only because no A_full number has been read (A_noMem runs first).
+- **CONFOUNDED** = a §4.8 pre-check fails. No verdict. Fix the stream, rebuild, rerun from zero, permitted only because no A_full number has been read (A_noMem runs first).
 - **The point estimate decides.** No extension, re-run, corpus change, threshold change, or additional arm after A_full's numbers are seen. Exploratory arms are labelled exploratory in every table and never promote to gating.
 - **Infrastructure kills** (server crash, disk full, power) with no A_full numbers read may be cleanly rerun from zero. Partial data is never spliced; deterministic seeds make resumption byte-identical or the run restarts.
 
@@ -174,7 +174,7 @@ Let `succ(arm, S)` be the hidden-suite success rate of an arm over task set S. L
 
 ## 9. Architecture (interface level)
 
-Python package `crucible/` (uv-managed venv, Python 3.12 — torch/vLLM wheel coverage; sensorium also needs 3.12+). Organised by feature; files ≤ 400 lines typical.
+Python package `crucible/` (uv-managed venv, Python 3.12 for torch/vLLM wheel coverage; sensorium also needs 3.12+). Organised by feature; files ≤ 400 lines typical.
 
 | Module | Responsibility | Key interface / invariant |
 |---|---|---|
@@ -195,16 +195,16 @@ Python package `crucible/` (uv-managed venv, Python 3.12 — torch/vLLM wheel co
 
 Each slice ends with its acceptance tests green, mutation-tested, and a dry run that checks artifacts.
 
-1. **S1 — environment + stream + sandbox + pre-checks.** uv venv (3.12), torch for sm_120 (timeboxed), vLLM-or-llama.cpp serving Qwen3.5-2B with an identity assertion, LoRA-attach smoke test on Qwen3.5-2B (decides the proposer fallback), unit builder, mutant generator + validator, stream composer, §4.8.1–3 pre-checks, sandbox with budget meter, codec-landing probe via assay. **Exit:** `build_stream` deterministic across two runs (same hash); 30-task smoke through the sandbox; pre-checks 1–3 green.
-2. **S2 — search + A_noMem + B arms + ceiling pilot.** Proposer adapters, REx search, value-fn v0 scaffold (untrained: constant), driver, records, lens, analysis for E1/E2 inputs. Run the **ceiling pilot** (§4.8.4) and apply the hardening ladder if needed. **Exit:** A_noMem pilot number recorded; rung fixed; B arms smoke-tested.
-3. **S3 — memory organ + value + uncertainty + sleep → A_full.** Stores, retrieval, writer, falsification, value training, calibration/conformal/abstention, sleep cycle with hot-swap and regression slice. **Exit:** A_full smoke on 10 tasks writes every record type; a forced falsification demo; one sleep cycle accepted or rejected with reasons.
-4. **S4 — lock + run + analysis + verdict.** Compute Δ_min from pilot p0 and actual C; tag `prereg-lock-a`; run A_noMem fully (control check §4.8.5); then A_full, B_search, B_naive; E4 QuixBugs pass; analysis; verdict report with every lens; CARRIED-DEBT.md; withdrawn-claims log if any headline fails to hold.
+1. **S1: environment + stream + sandbox + pre-checks.** uv venv (3.12), torch for sm_120 (timeboxed), vLLM-or-llama.cpp serving Qwen3.5-2B with an identity assertion, LoRA-attach smoke test on Qwen3.5-2B (decides the proposer fallback), unit builder, mutant generator + validator, stream composer, §4.8.1–3 pre-checks, sandbox with budget meter, codec-landing probe via assay. **Exit:** `build_stream` deterministic across two runs (same hash); 30-task smoke through the sandbox; pre-checks 1–3 green.
+2. **S2: search + A_noMem + B arms + ceiling pilot.** Proposer adapters, REx search, value-fn v0 scaffold (untrained: constant), driver, records, lens, analysis for E1/E2 inputs. Run the **ceiling pilot** (§4.8.4) and apply the hardening ladder if needed. **Exit:** A_noMem pilot number recorded; rung fixed; B arms smoke-tested.
+3. **S3: memory organ + value + uncertainty + sleep → A_full.** Stores, retrieval, writer, falsification, value training, calibration/conformal/abstention, sleep cycle with hot-swap and regression slice. **Exit:** A_full smoke on 10 tasks writes every record type; a forced falsification demo; one sleep cycle accepted or rejected with reasons.
+4. **S4: lock + run + analysis + verdict.** Compute Δ_min from pilot p0 and actual C; tag `prereg-lock-a`; run A_noMem fully (control check §4.8.5); then A_full, B_search, B_naive; E4 QuixBugs pass; analysis; verdict report with every lens; CARRIED-DEBT.md; withdrawn-claims log if any headline fails to hold.
 
 Realism check (§4.9) and exploratory arms slot in after S4's gating arms if time allows.
 
 ## 11. Threats to validity (named now)
 
-- **Contamination / memorization.** Small models have seen HumanEval. Mitigations: docstring stripping, hidden tests, the ceiling pilot + hardening ladder, novel-unit tasks (E5), QuixBugs transfer (E4). A GO on E1 alone could still be "it memorized unit answers via LoRA" — E4/E5 and the exploratory split arms are how that is distinguished; the report will say which it was.
+- **Contamination / memorization.** Small models have seen HumanEval. Mitigations: docstring stripping, hidden tests, the ceiling pilot + hardening ladder, novel-unit tasks (E5), QuixBugs transfer (E4). A GO on E1 alone could still be "it memorized unit answers via LoRA". E4/E5 and the exploratory split arms are how that is distinguished; the report will say which it was.
 - **Mutant realism.** §4.9 comparison is reported; no transfer claim beyond the mutant distribution is made without it.
 - **Codec landing.** Removed as a variable by full-module rewrite + §4.7 pre-check.
 - **Ceiling.** §4.8.4.
@@ -222,4 +222,4 @@ Realism check (§4.9) and exploratory arms slot in after S4's gating arms if tim
 
 ## 13. Pre-commitment for Phase B (only on GO)
 
-B-lite per `docs/research/05`: frozen Apache-2.0 code encoder (jina-embeddings-v2-base-code or Qwen3-Embedding-0.6B) + ~100–150M action-conditioned latent predictor (EB-JEPA shape, LeWorldModel two-term objective, SIGReg reimplemented from the paper or lifted from `klindtlab/lejepa-identifiability` — never from the CC-BY-NC `lejepa`) + a grounded head predicting the observable outcome; data from sensorium traces over a CRUXEval-style generated corpus; **mandatory control = `microsoft/codeexecutor` (MIT, 125M, token-space)**; ≈ 6 GB peak VRAM. Kill criterion to be pre-registered then: if B-lite's outcome-prediction AUROC does not exceed the codeexecutor control's by 2·SE on the same held-out traces, B stops.
+B-lite per `docs/research/05`: frozen Apache-2.0 code encoder (jina-embeddings-v2-base-code or Qwen3-Embedding-0.6B) + ~100–150M action-conditioned latent predictor (EB-JEPA shape, LeWorldModel two-term objective, SIGReg reimplemented from the paper or lifted from `klindtlab/lejepa-identifiability`, never from the CC-BY-NC `lejepa`) + a grounded head predicting the observable outcome; data from sensorium traces over a CRUXEval-style generated corpus; **mandatory control = `microsoft/codeexecutor` (MIT, 125M, token-space)**; ≈ 6 GB peak VRAM. Kill criterion to be pre-registered then: if B-lite's outcome-prediction AUROC does not exceed the codeexecutor control's by 2·SE on the same held-out traces, B stops.

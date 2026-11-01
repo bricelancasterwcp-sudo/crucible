@@ -46,35 +46,35 @@
 crucible/
 ├── pyproject.toml
 ├── README.md                       (exists)
-├── THIRD_PARTY.md                  (new: license ledger)
+├── THIRD_PARTY.md                  (new — license ledger)
 ├── docs/CARRIED-DEBT.md            (new)
-├── docs/findings/S1-serving.md     (new: Task 16 findings)
+├── docs/findings/S1-serving.md     (new — Task 16 findings)
 ├── crucible/
 │   ├── __init__.py
-│   ├── cli.py: `crucible stream build|precheck|smoke`
+│   ├── cli.py                      — `crucible stream build|precheck|smoke`
 │   ├── sandbox/
 │   │   ├── __init__.py
-│   │   ├── exec.py: isolated subprocess primitive (tmpdir, sitecustomize, rlimit, kill group)
-│   │   ├── report.py: TestReport + junit parsing
-│   │   ├── runner.py: run_tests(): pytest in the sandbox → TestReport
-│   │   └── budget.py: BudgetMeter / BudgetExhausted
+│   │   ├── exec.py                 — isolated subprocess primitive (tmpdir, sitecustomize, rlimit, kill group)
+│   │   ├── report.py               — TestReport + junit parsing
+│   │   ├── runner.py               — run_tests(): pytest in the sandbox → TestReport
+│   │   └── budget.py               — BudgetMeter / BudgetExhausted
 │   ├── stream/
 │   │   ├── __init__.py
-│   │   ├── evalplus.py: fetch/verify/load the two JSONL.gz; full_source()
-│   │   ├── units.py: Unit dataclass, strip_docstrings, module_name_for
-│   │   ├── oracle.py: expected outputs from the canonical solution (in sandbox)
-│   │   ├── testgen.py: visible/hidden pytest files from (inputs, expected)
-│   │   ├── build.py: build_unit(): assemble + self-check + drop reasons
-│   │   ├── families.py: operator name → family; EXCLUDED; completeness assert
-│   │   ├── sdl.py: StatementDeletion operator (cosmic-ray Operator ABC)
-│   │   ├── mutants.py: enumerate/apply/make mutants; MutantSpec/Mutant
-│   │   ├── validate.py: sandbox-kill validation; Validation
-│   │   ├── compose.py: classes/phases/novel → StreamManifest; hashing
-│   │   ├── store.py: write/read a stream directory
-│   │   └── precheck.py: §4.8.1–3 checks → PrecheckReport
+│   │   ├── evalplus.py             — fetch/verify/load the two JSONL.gz; full_source()
+│   │   ├── units.py                — Unit dataclass, strip_docstrings, module_name_for
+│   │   ├── oracle.py               — expected outputs from the canonical solution (in sandbox)
+│   │   ├── testgen.py              — visible/hidden pytest files from (inputs, expected)
+│   │   ├── build.py                — build_unit(): assemble + self-check + drop reasons
+│   │   ├── families.py             — operator name → family; EXCLUDED; completeness assert
+│   │   ├── sdl.py                  — StatementDeletion operator (cosmic-ray Operator ABC)
+│   │   ├── mutants.py              — enumerate/apply/make mutants; MutantSpec/Mutant
+│   │   ├── validate.py             — sandbox-kill validation; Validation
+│   │   ├── compose.py              — classes/phases/novel → StreamManifest; hashing
+│   │   ├── store.py                — write/read a stream directory
+│   │   └── precheck.py             — §4.8.1–3 checks → PrecheckReport
 │   └── proposer/
 │       ├── __init__.py
-│       └── identity.py: served-model identity assertion (vLLM + llama.cpp)
+│       └── identity.py             — served-model identity assertion (vLLM + llama.cpp)
 └── tests/
     ├── conftest.py
     ├── sandbox/test_exec.py test_report.py test_runner.py test_budget.py

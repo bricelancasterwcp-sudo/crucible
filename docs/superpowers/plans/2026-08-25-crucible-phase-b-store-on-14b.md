@@ -36,7 +36,7 @@
     assert spec.extra_args[spec.extra_args.index("--max-model-len") + 1] == "16384"
 ```
 
-and extend the docstring: `8192 → 16384 (2026-08-25, Phase-B prereg §4.4): B_mem's memory-augmented refinement prompts exceed 8192−2048. This is the same overflow that infra-killed A_full's first gate attempt at task 184. Pure KV capacity; sampling-neutral.`
+and extend the docstring: `8192 → 16384 (2026-08-25, Phase-B prereg §4.4): B_mem's memory-augmented refinement prompts exceed 8192−2048 — the same overflow that infra-killed A_full's first gate attempt at task 184. Pure KV capacity; sampling-neutral.`
 
 - [ ] **Step 2: Run it. It must FAIL** (spec still says 8192): `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/run/test_serving.py -q` → 1 failed.
 - [ ] **Step 3: Implement.** In `crucible/run/serving.py`, in the 14B `ServeSpec`, change `"--max-model-len", "8192"` to `"--max-model-len", "16384"` and add a comment line citing Phase-B prereg §4.4 and the A_full task-184 overflow.
@@ -309,7 +309,7 @@ def test_cli_arm_run_b_mem_wires_store_only_hooks(_stream, tmp_path, monkeypatch
 - [ ] **Step 2: Run both files. Expect FAIL** (ImportError: MemHooks).
 - [ ] **Step 3: Implement** as specified above.
 - [ ] **Step 4: Run `tests/run/test_full.py tests/test_cli.py`. All pass.**
-- [ ] **Step 5: Commit:** `git commit -am "feat: MemHooks + B_mem CLI wiring: the store and nothing else (prereg §4.2)"`
+- [ ] **Step 5: Commit:** `git commit -am "feat: MemHooks + B_mem CLI wiring — the store and nothing else (prereg §4.2)"`
 
 ### Task 7: mutation checks + full suite
 

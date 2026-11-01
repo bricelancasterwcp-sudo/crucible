@@ -151,7 +151,7 @@ def test_exemplar_rule_unchanged_under_symptom_mode(...):
     # class-exact verified episode, no lessons anywhere: block contains the exemplar
     # regardless of tau; a stranger unit gets no exemplar
 ```
-- [ ] **Step 2: RED**, **Step 3: implement**, **Step 4: GREEN** (`tests/memory/test_retrieve.py`. ALL existing tests must still pass, they are the net for the assembly refactor), **Step 5: commit** `feat: retrieve_symptom: cross-unit lessons with tau-silence (Phase-C prereg §4.2)`.
+- [ ] **Step 2: RED**, **Step 3: implement**, **Step 4: GREEN** (`tests/memory/test_retrieve.py`. ALL existing tests must still pass, they are the net for the assembly refactor), **Step 5: commit** `feat: retrieve_symptom — cross-unit lessons with tau-silence (Phase-C prereg §4.2)`.
 
 ### Task 4: hooks symptom mode + the uncharged probe
 

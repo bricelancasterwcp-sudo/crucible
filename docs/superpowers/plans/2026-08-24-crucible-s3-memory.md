@@ -40,7 +40,7 @@
 - [ ] **Step 1: Write failing tests:** round-trip equality for both types (`from_dict(to_dict(x)) == x` through `json.dumps`), schema-completeness (`set(to_dict()) == {f.name for f in fields(cls)}`), `content_id` stability (same identity fields ⇒ same id; different ⇒ different; insertion order of the dict irrelevant), `episode_verified(None, False) is False`, `episode_verified(True, True) is False`, `episode_verified(True, False) is True`. Write the fixtures concretely: no factories, literal values.
 - [ ] **Step 2: RED.** `.venv/bin/python -m pytest tests/memory/test_schema.py -v` → ImportError.
 - [ ] **Step 3: Implement.** Follow the repo's frozen-dataclass idiom exactly (`compose.py` `TaskSpec` is the template: `asdict`-based `to_dict` with explicit tuple↔list conversions, `from_dict` restoring tuple shapes). Module docstring states the MemOS/Graphiti/MIRIX field provenance (schema ported, no code vendored) and the identity-not-description key rule.
-- [ ] **Step 4: GREEN**, then **Step 5: Commit** `feat(s3): memory schema: episodic + semantic records, content-addressed ids`.
+- [ ] **Step 4: GREEN**, then **Step 5: Commit** `feat(s3): memory schema — episodic + semantic records, content-addressed ids`.
 
 ---
 
@@ -56,7 +56,7 @@
 
 - [ ] **Step 1: Failing tests:** create in `tmp_path`; write/read round-trip both types with dataclass equality; `episodes(verified_only=True)` returns only `verified` episodes; `semantic_for` exact-match vs `semantic_family` superset; `mark_falsified` then `semantic_for` still RETURNS the item but with `falsified_by` set (filtering is the retriever's job; the store is honest storage); idempotent re-open of an existing db; `verified_count` arithmetic; procedural table exists (`sqlite_master` query) and a `write_procedural` method does NOT exist (`not hasattr`).
 - [ ] **Step 2: RED. Step 3: Implement** (stdlib `sqlite3`, `check_same_thread=False` NOT needed, because it is single-threaded by design, say so in the docstring). **Step 4: GREEN.**
-- [ ] **Step 5: Mutation check:** break `verified_only` filtering (drop the WHERE): the verified-only test must FAIL; restore, purge pycache, re-run. Commit `feat(s3): memory store: sqlite typed stores, honest payload round-trip`.
+- [ ] **Step 5: Mutation check:** break `verified_only` filtering (drop the WHERE): the verified-only test must FAIL; restore, purge pycache, re-run. Commit `feat(s3): memory store — sqlite typed stores, honest payload round-trip`.
 
 ---
 
@@ -83,7 +83,7 @@
   The template string is a module constant `LESSON_TEMPLATE`, a spec-locked prompt surface. Say so in its docstring.
 
 - [ ] **Step 1: Failing tests:** distill on a verified episode produces a SemanticItem whose `landed_diff` contains the `-`/`+` lines of a known one-line change and whose `cited_episode_id` is the episode's id; `ValueError` on `verified=False` and on `landed_module=None`; `render_lesson` output contains the family, the diff fence, and the flipped test names, and is byte-stable for identical items (call twice, compare).
-- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Mutation check: make `distill` accept non-verified episodes (drop the guard): the ValueError test must FAIL. Commit `feat(s3): mechanical distiller: verified episodes only, one fixed lesson template`.
+- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Mutation check: make `distill` accept non-verified episodes (drop the guard): the ValueError test must FAIL. Commit `feat(s3): mechanical distiller — verified episodes only, one fixed lesson template`.
 
 ---
 
@@ -99,7 +99,7 @@
 - Header line of a non-None block: `## Prior experience with this code` followed by the rendered items.
 
 - [ ] **Step 1: Failing tests:** exact-class beats family-wide (seed a store with both; retrieved ids prove it); falsified items never appear; ranking (three items with distinct `last_verified_at`, assert order); budget drop order (construct oversized items: exemplar dropped first, then lesson 2; a single oversized lesson ⇒ `block=None`); determinism (two calls, equal results); empty store ⇒ `RetrievedBlock(None, ())`.
-- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Mutation checks: (a) remove the falsified filter → killed; (b) invert the drop order → killed. Commit `feat(s3): retrieval: class-then-family, ranked, hard char budget`.
+- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Mutation checks: (a) remove the falsified filter → killed; (b) invert the drop order → killed. Commit `feat(s3): retrieval — class-then-family, ranked, hard char budget`.
 
 ---
 
@@ -115,7 +115,7 @@
 - These executions are NEVER charged to any task budget. There is no BudgetMeter in this module at all; state that in the module docstring and pin it by asserting the module source does not import `budget` (a one-line test: `"budget" not in Path(falsify.__file__).read_text()`, crude but honest).
 
 - [ ] **Step 1: Failing tests:** use a tiny real unit (follow `tests/stream/test_stack.py::_unit`'s idiom): a lesson whose landed module genuinely passes its flipped test ⇒ True + `last_verified_at` bumped; a lesson whose stored module now fails (construct by storing a broken module) ⇒ False + `falsified_by` set; infra path (monkeypatch `run` to return a report with `infra_error="boom"`) ⇒ item untouched; tally arithmetic.
-- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN** (single-file run needs no cap unless you run the whole suite). **Step 5:** Mutation check: flip the infra branch to falsify on infra: the infra test must FAIL. Commit `feat(s3): falsification: re-execution of cited tests, infra never falsifies`.
+- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN** (single-file run needs no cap unless you run the whole suite). **Step 5:** Mutation check: flip the infra branch to falsify on infra: the infra test must FAIL. Commit `feat(s3): falsification — re-execution of cited tests, infra never falsifies`.
 
 ---
 
@@ -149,7 +149,7 @@
 - No numpy needed beyond stdlib math; determinism test mandatory.
 
 - [ ] **Step 1: Failing tests:** score in [0,1] and deterministic (two calls equal); update moves the score toward the outcome (score before < score after for outcome=True on same node); `begin_task` changes features (same node scores differently under different family/hit context. Construct two contexts, assert different scores after some training); `update_by_id` on unseen id returns False; snapshot/restore round-trip equality of subsequent scores; protocol conformance `isinstance(OnlineValue(), Value)`.
-- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Mutation check: freeze the update (no-op body): the moves-toward-outcome test must FAIL. Commit `feat(s3): online value v1: logistic P(hidden pass), task-context features`.
+- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Mutation check: freeze the update (no-op body): the moves-toward-outcome test must FAIL. Commit `feat(s3): online value v1 — logistic P(hidden pass), task-context features`.
 
 ---
 
@@ -165,7 +165,7 @@
 - All state in-memory within a run; observations recorded via the arm records anyway (no separate persistence).
 
 - [ ] **Step 1: Failing tests:** `provenance_class` mapping (4 cases); cold-start passthrough (`confidence == score` before MIN_OBS); after observing 20 pairs where high scores always succeed and low always fail, `confidence(0.9, cls) > confidence(0.1, cls)` and both differ from raw; classes are independent (training one class leaves another at passthrough); `should_abstain` threshold boundary (p=0.2 exactly does NOT abstain. That is an inclusive gate like §4.7's; document it); `recalibrate(window)` drops influence of old observations (construct a flip: old data says high-good, recent window says high-bad; after recalibrate, ordering flips); snapshot/restore.
-- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Commit `feat(s3): uncertainty: per-class isotonic confidence + abstention + recalibrate hook` (include the pyproject change; note crepes-vs-PAVA decision in the commit body).
+- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Commit `feat(s3): uncertainty — per-class isotonic confidence + abstention + recalibrate hook` (include the pyproject change; note crepes-vs-PAVA decision in the commit body).
 
 ---
 
@@ -203,7 +203,7 @@
 - No BudgetMeter anywhere in `crucible/sleep/` (same crude source-scan pin as Task 5).
 
 - [ ] **Step 1: Failing tests** (all with fakes): below-threshold returns None and calls nothing; at threshold: full pipeline fires, record fields all set, accept path calls `server.load` exactly once and resets the counter (next call below threshold returns None); reject path (`FakeSliceRunner` scripted to drop 2): server NOT called, counter NOT reset (a subsequent call with 0 new episodes still fires. Pin this by asserting the second `maybe_sleep` trains again); slice determinism (same seed+index ⇒ same slice keys); `min(SLICE_SIZE, ...)` with 5 solved tasks ⇒ slice of 5; SleepRecord round-trip + completeness.
-- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Mutation checks: (a) reset counter on reject → the trains-again test must FAIL; (b) call server on reject → killed; (c) accept rule off-by-one (`< ACCEPT_MAX_DROP`) → add/verify a boundary test (drop of exactly 1 accepts). Commit `feat(s3): sleep loop: threshold trigger, regression gate, honest SleepRecord`.
+- [ ] **Step 2: RED. Step 3: Implement. Step 4: GREEN. Step 5:** Mutation checks: (a) reset counter on reject → the trains-again test must FAIL; (b) call server on reject → killed; (c) accept rule off-by-one (`< ACCEPT_MAX_DROP`) → add/verify a boundary test (drop of exactly 1 accepts). Commit `feat(s3): sleep loop — threshold trigger, regression gate, honest SleepRecord`.
 
 ---
 
@@ -223,7 +223,7 @@
 - `cli.py`: `arm run --arm A_full` grows `--memory-db PATH` (default `runs/<arm>/memory.sqlite3`) and `--sleep-threshold INT` (default 16; the smoke's N=4 override, spec §9); wiring constructs FullHooks with the REAL trainer/server/slice-runner for A_full and passes hooks=None for every other arm (pin: `--arm A_noMem` never constructs a store. Use a monkeypatch test).
 
 - [ ] **Step 1: Failing tests:** hooks=None equivalence; FullHooks with an in-memory store + FakeTrainer/FakeServerAdapter/FakeSliceRunner over a 3-task fixture drive: episode written per task (verified and not), semantic written ONLY for verified, record stamped with retrieved_ids on a task where the store had a lesson, value.update called exactly once per measured task (spy), sleep fires when threshold crossed between tasks; records/lens round-trip + completeness with the new fields; CLI flags parse and `A_noMem` builds no store.
-- [ ] **Step 2: RED. Step 3: Implement** (including the small Task-6 follow-through: `SearchResult.symptom_failed` trailing field + `_naive_attempt` setting it. If Task 6 already landed without it, add it here with its own round-trip guard). **Step 4: GREEN**, then the capped FULL suite. **Step 5:** Mutation checks: (a) distill on unverified episodes → killed by the semantic-only-verified test; (b) stamp retrieved_ids always-empty → killed; (c) hooks invoked for A_noMem → killed by the no-store test. Commit `feat(s3): A_full: hooks wiring, stamped records, lens adapters, CLI`.
+- [ ] **Step 2: RED. Step 3: Implement** (including the small Task-6 follow-through: `SearchResult.symptom_failed` trailing field + `_naive_attempt` setting it. If Task 6 already landed without it, add it here with its own round-trip guard). **Step 4: GREEN**, then the capped FULL suite. **Step 5:** Mutation checks: (a) distill on unverified episodes → killed by the semantic-only-verified test; (b) stamp retrieved_ids always-empty → killed; (c) hooks invoked for A_noMem → killed by the no-store test. Commit `feat(s3): A_full — hooks wiring, stamped records, lens adapters, CLI`.
 
 ---
 

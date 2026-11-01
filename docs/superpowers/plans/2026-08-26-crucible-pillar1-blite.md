@@ -150,7 +150,7 @@ def blite_loss(...) -> tuple[Tensor, dict]            # pred + LAMBDA_ISO*iso + 
 ```
 The frozen jina encoder is loaded ONLY in ops/training code (`transformers`, revision-pinned, `requires_grad_(False)`); model.py never downloads.
 - [ ] Tests (CPU, tiny dims via constructor args): shapes; `prediction_loss` is 0 for identical vectors and >0 for orthogonal (mutation pin: cosine sign); `isotropy_loss` is ~0 for an isotropic Gaussian batch and large for a collapsed (rank-1) batch (THE collapse pin. It kills a mutant that returns 0); grounded gradients flow to StateEncoder+Predictor but a param registered as frozen stays frozen (simulate with a frozen linear stand-in for the code encoder: after `loss.backward()`, its `.grad` is None, the frozen-encoder pin); causal masking (perturbing a LATER snapshot does not change an EARLIER step's prediction, a mutation pin for the mask).
-- [ ] RED → implement → GREEN → commit `feat: B-lite model: LeWM two-term objective + grounded head (prereg §3/§5.2)`.
+- [ ] RED → implement → GREEN → commit `feat: B-lite model — LeWM two-term objective + grounded head (prereg §3/§5.2)`.
 
 ### Task 6: training harness (`crucible/latent/train.py`)
 

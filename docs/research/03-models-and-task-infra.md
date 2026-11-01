@@ -457,7 +457,7 @@ gh api repos/google-research/google-research → Apache-2.0     (MBPP origin)
 gh api repos/bigcode-project/bigcodebench → Apache-2.0, 519★, 2026-01-03
 gh api repos/princeton-nlp/SWE-bench → MIT, 5689★, 2026-08-18   (harness only)
 gh api repos/SWE-bench/SWE-smith     → MIT, 748★, 2026-08-17
-gh api repos/SWE-Gym/SWE-Gym         → Apache-2.0, 723★       ⚠️ vs HF card "mit": MISMATCH
+gh api repos/SWE-Gym/SWE-Gym         → Apache-2.0, 723★       ⚠️ vs HF card "mit" — MISMATCH
 gh api repos/R2E-Gym/R2E-Gym         → Apache-2.0, 323★, 2025-07-13
 gh api repos/Leolty/RepoBench        → CC-BY-4.0, 212★, 2024-08-16
 gh api repos/LiveCodeBench/LiveCodeBench → MIT, 934★, 2025-07-16
@@ -475,7 +475,7 @@ curl HF api SWE-bench/SWE-bench_Multilingual → {"license":"mit"}  | _Multimoda
 curl HF api SWE-Gym/SWE-Gym → {"license":"mit"}   ⚠️ repo says Apache-2.0
 curl HF api R2E-Gym/R2E-Gym-Subset → {"license":"apache-2.0"} | nebius/SWE-rebench → {"license":"cc-by-4.0"}
 curl HF api SWE-Perf/SWE-Perf → {"license":"apache-2.0"} | tianyang/repobench_python_v1.1 → {"license":"cc"}
-curl HF raw livecodebench/code_generation_lite/README.md → front-matter "license: cc": bare, no version   ⚠️
+curl HF raw livecodebench/code_generation_lite/README.md → front-matter "license: cc" — bare, no version   ⚠️
 datasets-server/size: humanevalplus 164 | mbppplus 378 | humanevalpack python 164 | bigcodebench 1140 |
      SWE-bench_Verified 500 | _Lite 323 | _Multilingual 300 | _Multimodal 480+100 | SWE-smith 59136 |
      R2E-Gym-Subset 4578 | SWE-rebench 21336/6542 | SWE-Perf 140

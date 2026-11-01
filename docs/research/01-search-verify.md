@@ -1,4 +1,4 @@
-# Pillar 3 — Search + Verify-by-Execution: open-source component survey
+# Pillar 3: Search + Verify-by-Execution: open-source component survey
 
 Survey date: **2026-08-23**. All license/star/push facts below were read from the GitHub API
 during this survey (see **Evidence log**); none are from memory.
@@ -13,10 +13,10 @@ during this survey (see **Evidence log**); none are from memory.
   function trained on real execution outcomes.
 - Adopt outright: `REx` (45-line Thompson-sampling refinement scheduler, MIT),
   `mini-swe-agent` (~200-line agent loop + local/Docker exec env, MIT),
-  `SWE-smith` (procedural mutation bug-injection + validation harness, MIT) — SWE-smith's
+  `SWE-smith` (procedural mutation bug-injection + validation harness, MIT): SWE-smith's
   `bug_gen/procedural` **is** our task generator for mutation-injected Python bugs.
 - Port pieces: `moatless-tools`/`moatless-tree-search` (UCT selector, node/tree, pytest log
-  parsers, local swebench runtime — Apache-2.0/MIT) and `Code-AI-Tree-Search` (P-UCT with an
+  parsers, local swebench runtime (Apache-2.0/MIT)) and `Code-AI-Tree-Search` (P-UCT with an
   actual value-model head and pass-rate reward, MIT).
 - Reference-only on license: **AlphaCodium (AGPL-3.0)**, **SWE-RL (CC-BY-NC-4.0)**,
   **auto-code-rover (Sonar Source-Available, non-compete)**, **ReST-MCTS\* (no LICENSE file)**,
@@ -38,10 +38,10 @@ during this survey (see **Evidence log**); none are from memory.
 | moatless-tree-search (SWE-Search) | https://github.com/aorwall/moatless-tree-search | Apache-2.0 | 142 | 2025-06-06 | Reference MCTS impl for SWE-bench: `search_tree.py` (853 L), `selector/selector.py` UCT + 12 bonus/penalty terms, `value_function/coding.py` | **PORT-PIECES** |
 | Code-AI-Tree-Search (PG-TD) | https://github.com/shunzh/Code-AI-Tree-Search | MIT | 118 | 2024-07-17 | Token-level P-UCT MCTS where reward = **actual test pass-rate** (`eval/compute_reward.py`), with an optional learned `value_model` head | **PORT-PIECES** |
 | rStar-Math (branch `rStar-math`) | https://github.com/microsoft/rStar/tree/rStar-math | MIT (LICENSE on that branch) | 1,425 (repo) | 2025-09-12 (main) | `rstar_deepthink/agents/{mcts,beam_search,tree}.py`, `nodes/mcts_node.py`, `tools/python_tool.py`; PPM trained from MCTS Q-values | **PORT-PIECES** |
-| SWE-bench (harness) | https://github.com/SWE-bench/SWE-bench | MIT | 5,689 | 2026-08-18 | `harness/{grading.py,log_parsers/,run_evaluation.py}` — the canonical F2P/P2P resolution logic and per-framework test-log parsers | **PORT-PIECES** |
+| SWE-bench (harness) | https://github.com/SWE-bench/SWE-bench | MIT | 5,689 | 2026-08-18 | `harness/{grading.py,log_parsers/,run_evaluation.py}`: the canonical F2P/P2P resolution logic and per-framework test-log parsers | **PORT-PIECES** |
 | CodeTree | https://github.com/SalesforceAIResearch/CodeTree | Apache-2.0 | 38 | 2026-06-02 | Agent-guided tree search (`strategy.py`, `bfs.py`, `dfs_real.py`) with a real `executors/py_executor.py` (subprocess + timeout) | **PORT-PIECES** |
 | SWE-Gym | https://github.com/SWE-Gym/SWE-Gym | Apache-2.0 | 723 | 2025-07-29 | 2.4K executable Python repo tasks + the *verifier* recipe (train a reranker on rollout outcomes) | **REFERENCE-ONLY** (data/recipe) |
-| LATS | https://github.com/lapisrocks/LanguageAgentTreeSearch | MIT | 852 | 2024-07-30 | `programming/mcts.py` + `executors/` — MCTS over agent trajectories; reward blends self-reflection with generated tests | **REFERENCE-ONLY** (stale, LLM-judge reward) |
+| LATS | https://github.com/lapisrocks/LanguageAgentTreeSearch | MIT | 852 | 2024-07-30 | `programming/mcts.py` + `executors/`: MCTS over agent trajectories; reward blends self-reflection with generated tests | **REFERENCE-ONLY** (stale, LLM-judge reward) |
 | ReST-MCTS\* | https://github.com/THUDM/ReST-MCTS | **No LICENSE file** (`.license` null; root listing has none) | 711 | 2025-01-20 | Process-reward-guided tree search + self-training loop | **REFERENCE-ONLY** (unlicensed) |
 | AlphaCodium | https://github.com/Codium-ai/AlphaCodium | **AGPL-3.0** | 3,965 | 2024-11-25 | Test-anchored iterative flow engineering (generate tests → iterate on public/AI tests) | **REFERENCE-ONLY** (copyleft) |
 | SWE-RL | https://github.com/facebookresearch/swe-rl | **NOASSERTION → CC-BY-NC-4.0** (LICENSE text reads "Attribution-NonCommercial 4.0 International") | 719 | 2025-03-16 | RL on software evolution with a similarity reward | **REFERENCE-ONLY** (non-commercial) |
@@ -56,25 +56,25 @@ during this survey (see **Evidence log**); none are from memory.
 | OpenHands | OpenHands/OpenHands | MIT | 84,822 / 2026-08-22 | Full IDE-grade agent platform; wrong altitude for a research spike. |
 | Agentless | OpenAutoCoder/Agentless | MIT | 2,101 / 2024-12-22 | No tree search; localize→repair→rerank pipeline. Its reproduction-test reranking is a useful idea only. |
 | Reflexion | noahshinn/reflexion | MIT | 3,239 / 2025-01-14 | Linear self-refine, no tree, no learned value. Baseline only. |
-| Tree of Thoughts | princeton-nlp/tree-of-thought-llm | MIT | 6,052 / 2025-01-16 | Toy-task BFS/DFS with LLM self-evaluation — no execution. |
+| Tree of Thoughts | princeton-nlp/tree-of-thought-llm | MIT | 6,052 / 2025-01-16 | Toy-task BFS/DFS with LLM self-evaluation. No execution. |
 | RepairAgent | sola-st/RepairAgent | NOASSERTION → **MIT** (LICENSE text) | 106 / 2026-05-31 | Java/Defects4J, single-trajectory FSM agent, no search. |
 | verl / rllm / SkyRL | verl-project/verl, rllm-org/rllm, NovaSky-AI/SkyRL | Apache-2.0 / Apache-2.0 / Apache-2.0 | 23,082 / 5,796 / 2,187, all pushed 2026-08-2x | Correct home for unit-test-reward GRPO later; far too heavy for one 16 GB 5080. Cloud-rental phase only. |
 | augment-swebench-agent | augmentcode/augment-swebench-agent | NOASSERTION → **MIT** (LICENSE text) | 882 / 2026-08-21 | Ensembling + majority vote, no tree search or value model. |
 
 ---
 
-## Top picks — detail
+## Top picks: detail
 
-### 1. REx — `haotang1995/REx` (MIT) — the search policy we should start with
+### 1. REx (`haotang1995/REx`, MIT): the search policy we should start with
 
 **Architecture.** `acr/run.py` picks a domain and a scheduler. A scheduler is a bare function over a
 `_Domain` (`acr/domains/base.py`, 24 lines) exposing `reset(problem_id) -> [(idx, name, heuristic)]`,
 `step(idx) -> (reward, done, new_actions)`, `get_metrics()`. `acr/scheduler/rex.py` (45 lines) keeps a
-flat list of "arms" — every program ever produced is an arm whose refinement can be sampled — each
+flat list of "arms" (every program ever produced is an arm whose refinement can be sampled), each
 with Beta(α, β) parameters seeded from the program's heuristic reward (test pass rate:
 `alpha = smoothing + C*h`, `beta = smoothing + C*(1-h)`). Each step: `argmax` of a Beta draw, run the
 refine action, execute tests, update α/β with the observed reward, append the children as new arms.
-Baselines `greedy.py`, `bfs.py`, `fw.py` share the same interface — free ablations.
+Baselines `greedy.py`, `bfs.py`, `fw.py` share the same interface: free ablations.
 
 **Reuse.** `acr/scheduler/*.py` (all four, ~170 lines total) and `acr/domains/base.py` verbatim.
 `acr/domains/apps/main.py` as the template for a `MutationRepairDomain`.
@@ -84,11 +84,11 @@ frozen proposer for a patch, apply, run pytest, return `reward = fraction of tar
 Replace `acr/utils/llm` (OpenAI/tiktoken) with a local vLLM/llama.cpp client.
 
 **Gotchas.** conda `environment.yml` only, no pyproject. Caching via `dill` pickles keyed on prompt
-strings — fine locally, brittle across model swaps. Reward must be in [0,1] or the Beta update breaks.
+strings: fine locally, brittle across model swaps. Reward must be in [0,1] or the Beta update breaks.
 No tree structure is materialized; if we want provenance edges (pillar 1) we must add the parent
-pointer ourselves — it's 3 lines.
+pointer ourselves. It's 3 lines.
 
-### 2. mini-swe-agent — `SWE-agent/mini-swe-agent` (MIT) — the execution harness
+### 2. mini-swe-agent (`SWE-agent/mini-swe-agent`, MIT): the execution harness
 
 **Architecture.** Three orthogonal protocols: `Model`, `Environment`, `Agent`. `agents/default.py`
 (8,043 bytes) is a `while True: step()` loop with a Jinja2 `StrictUndefined` template for the system and
@@ -103,14 +103,14 @@ per-node rollout body, `exceptions.py`, `utils/serialize.py`.
 
 **Change.** The agent currently *is* the whole trajectory; for crucible each search node needs one
 bounded rollout, so we call `step()` from our own tree loop rather than `run()`. Swap the `Model`
-implementation for a local frozen 1.5–3B (the protocol is tiny — one `query()` + `format_message()`).
+implementation for a local frozen 1.5–3B (the protocol is tiny: one `query()` + `format_message()`).
 
 **Gotchas.** Hard dependency on `litellm >= 1.75.5` even for local models (they do route local via
 litellm's `openai/` provider, so a vLLM OpenAI-compatible server works). Python ≥3.10. `LocalEnvironment`
-runs commands **on the host with `os.environ`** — for mutation-repair on real repos we must use the
+runs commands **on the host with `os.environ`**. For mutation-repair on real repos we must use the
 Docker env or run inside our own container. Default timeout is 30 s.
 
-### 3. SWE-smith — `SWE-bench/SWE-smith` (MIT) — the task generator
+### 3. SWE-smith (`SWE-bench/SWE-smith`, MIT): the task generator
 
 **Architecture.** `swesmith/bug_gen/` has three bug sources: `procedural/` (AST-level modifiers),
 `llm/` (model-written bugs), `combine/` (multi-hunk). `procedural/base.py` defines
@@ -125,13 +125,13 @@ to its Docker image and test command.
 `profiles/` as the shape of our repo registry.
 
 **Change.** We only need the Python modifiers; drop the 8 other language dirs. We want the mutant's
-*ground-truth* fix (the inverse patch), which SWE-smith records as `BugRewrite` — good enough.
+*ground-truth* fix (the inverse patch), which SWE-smith records as `BugRewrite`. Good enough.
 
-**Gotchas.** Docker is mandatory and the authors state Linux-only (Ubuntu 22.04 tested) — fine on this
+**Gotchas.** Docker is mandatory and the authors state Linux-only (Ubuntu 22.04 tested). Fine on this
 box. Python ≥3.10. The published 52k-instance dataset pulls per-repo Docker images from
-`SWE-smith-envs` (250+ images) — do **not** pull all of them; build 3–5 repos ourselves.
+`SWE-smith-envs` (250+ images). Do **not** pull all of them; build 3–5 repos ourselves.
 
-### 4. moatless-tools / moatless-tree-search — `aorwall/*` (MIT / Apache-2.0) — the tree machinery
+### 4. moatless-tools / moatless-tree-search (`aorwall/*`, MIT / Apache-2.0): the tree machinery
 
 **Architecture.** `moatless-tree-search` is the SWE-Search paper code: `search_tree.py` implements the
 literal MCTS loop (`_select` → `_expand` → `_simulate` → `_backpropagate`, plus
@@ -144,16 +144,16 @@ literal MCTS loop (`_select` → `_expand` → `_simulate` → `_backpropagate`,
 `flow/trajectory_tree.py`, a slimmer `selector/{base,simple}.py`, a **`runtime/local.py`** that runs
 swebench tests without Kubernetes, and standalone `testing/python/{pytest,django,sympy,seaborn}_parser.py`.
 
-**Reuse.** `runtime/runtime.py` (`TestResult`/`TestStatus`/`RuntimeEnvironment` — steal verbatim, it is
+**Reuse.** `runtime/runtime.py` (`TestResult`/`TestStatus`/`RuntimeEnvironment`: steal verbatim, it is
 the right seam), the UCT term decomposition in `selector/selector.py`, the select/expand/backprop
 skeleton of `search_tree.py`, and **`moatless/testing/python/*_parser.py`** from moatless-tools (a
 genuinely reusable pytest-output → structured-result parser).
 
 **Change.** The value function is the problem. `value_function/base.py` requires a `completion_model`
-and prompts an LLM for the reward — i.e. an **LLM judge**, exactly what we're rejecting.
+and prompts an LLM for the reward, i.e. an **LLM judge**, exactly what we're rejecting.
 `value_function/coding.py` only contributes deterministic bonuses/penalties for action-level failures
 (`FAILURE_VALUES = {"MAJOR": -50, "MINOR": -25}`) plus test outcomes. And moatless-tools'
-`value_function/swebench.py` is oracle-contaminated by construction — it reads `expected_spans` from the
+`value_function/swebench.py` is oracle-contaminated by construction. It reads `expected_spans` from the
 benchmark instance and its own docstring says *"intended for evaluation purposes only. Using it outside
 of an evaluation scenario may contaminate the results."* We must replace the whole `ValueFunction` with
 an execution-outcome model.
@@ -165,33 +165,33 @@ an execution-outcome model.
 `opentelemetry-*`. moatless-tree-search additionally needs a **Voyage AI key** for its pre-embedded
 vector stores. Take files, not the package. Python <3.14, ≥3.10. Pydantic v2 throughout.
 
-### 5. Code-AI-Tree-Search (PG-TD) — `shunzh/Code-AI-Tree-Search` (MIT) — the only real execution-trained value function
+### 5. Code-AI-Tree-Search (PG-TD) (`shunzh/Code-AI-Tree-Search`, MIT): the only real execution-trained value function
 
 **Architecture.** `generate/program_env.py` is a Gym-style env whose state is a token list, action is a
-token, and *reward is the test pass rate of the completed program* — `get_reward` → `eval/compute_reward.py`
+token, and *reward is the test pass rate of the completed program*: `get_reward` → `eval/compute_reward.py`
 → `check_correctness()` which forks a `multiprocessing.Process` with a 10 s global timeout around
 `eval/testing_util.py:run_test`. Returns `pass_rate` plus `{compile_error, runtime_error}` fractions.
 `dyna_gym/agents/{uct,mcts}.py` (from SuReLI/dyna-gym) provide `uct` / `p_uct` / `var_p_uct` tree
 policies. `generate/default_pi.py:APPSHeuristic` is the LLM prior: `get_top_k_predict` supplies the
 policy prior, and `get_value(state)` runs an optional **separate `value_model` transformer** that scores
-a partial program — trained on real APPS pass rates, which is precisely pillar-3 item 2.
+a partial program, trained on real APPS pass rates, which is precisely pillar-3 item 2.
 
 **Reuse.** `eval/compute_reward.py` + the `ProgramEnv` reward/transition contract; `dyna_gym/agents/uct.py`
 tree-policy variants; the `use_value` + `new_token_num` shortened-horizon pattern (rollout `k` tokens,
-then bootstrap from the value head) — this is the correct shape for our budgeted value function.
+then bootstrap from the value head). This is the correct shape for our budgeted value function.
 
 **Change.** Everything token-level must become patch-level: our action is a candidate patch, not a token,
 so `transition` and `get_top_k_predict` get replaced by "sample N patches from the frozen proposer".
 `testing_util.run_test` is APPS-specific (stdin/stdout + `assert` call modes); swap for pytest.
 
-**Gotchas.** Pinned `torch==1.12.1+cu116`, `transformers` unpinned, `gym` (not gymnasium), and `pyext`
-— this will **not** install as-is on a 5080 (sm_120); treat as a source of algorithms, not a runnable
+**Gotchas.** Pinned `torch==1.12.1+cu116`, `transformers` unpinned, `gym` (not gymnasium), and `pyext`.
+This will **not** install as-is on a 5080 (sm_120); treat as a source of algorithms, not a runnable
 package. Fine-tuned GPT-2 1.5B / GPT-Neo 2.7B weights come from a Google Drive link. Last push
 2024-07-17. Superseded ergonomics live in the same author's `shunzh/mcts-for-llm`.
 
 ---
 
-## Gaps — what we must build
+## Gaps: what we must build
 
 1. **An execution-outcome value function for repair.** Nothing here trains a value model on
    *repair* rollouts. PG-TD's value head is competition-codegen and token-level; ReST-MCTS\*'s PRM is
@@ -211,7 +211,7 @@ package. Fine-tuned GPT-2 1.5B / GPT-Neo 2.7B weights come from a Google Drive l
    deterministic seed policy so search is reproducible.
 5. **A cheap local test runner with a per-node budget.** SWE-bench's harness is one Docker build per
    instance; that is far too slow for hundreds of tree nodes. We need warm containers with the repo
-   pre-installed, `pytest --last-failed`-style target selection, and a hard per-node wall-clock budget —
+   pre-installed, `pytest --last-failed`-style target selection, and a hard per-node wall-clock budget,
    assembled from mini-swe-agent's `DockerEnvironment` + moatless' pytest parser + SWE-bench's
    grading semantics.
 6. **Budget accounting for the baseline comparison.** The thesis needs "same verification budget"
@@ -243,7 +243,7 @@ returned zero rows; effective form was `gh search repos <terms> --match name,des
 - `gh search repos "tree search" code --match name,description --sort stars --limit 15` → **shunzh/Code-AI-Tree-Search**, kohjingyu/search-agents, OSU-NLP-Group/llm-planning-eval, nicoladainese96/code-world-models.
 - `gh search repos "process reward model" --match name,description` → RyanLiu112/Awesome-Process-Reward-Models, mukhal/ThinkPRM, CJReinforce/PURE, WindyLee0822/Process_Q_Model (all math/VLM, none code-execution).
 - `gh search repos SWE-RL --match name,description` → facebookresearch/swe-rl, zhenyuhe00/SWE-Swiss.
-- `gh search repos "unit test" reward RL code --match description` → THUDM/CodeRM-NT ("Reward Model for Code RL **without** Unit Tests" — opposite of what we want).
+- `gh search repos "unit test" reward RL code --match description` → THUDM/CodeRM-NT ("Reward Model for Code RL **without** Unit Tests", opposite of what we want).
 - `gh search repos "moatless tree search"` → aorwall/moatless-tree-search.
 - `gh search code "class MCTS code repair language:python" --limit 15` → huyuelin/agentless_MCTS, **iSEngLab/Psearch** (`swe_mcts.py`, `vul4j_mcts.py`), StevenZHB/DVO, DhanHaidar/auto_code_repair.
 - `gh search code "uct_score pytest reward language:python" --limit 15` → **aorwall/moatless-tree-search:tests/test_selector.py `test_uct_score`**, AutoGPT `prompt_strategies/lats.py`, NumberChiffre/mcts-llm.
@@ -288,7 +288,7 @@ iSEngLab/Psearch                     null           2     2026-07-09T06:32:55Z
 ```
 
 **null / NOASSERTION resolution** (fetched the actual LICENSE)
-- `gh api repos/THUDM/ReST-MCTS/contents --jq '.[].name'` → `.DS_Store CoT MCTS PRM README.md ToT assets data eval_vm.py evaluate.py figures models requirements_*.txt self_train tasks utils` — **no LICENSE file**. `gh api repos/THUDM/ReST-MCTS/license` → HTTP 404. ⇒ unlicensed, NOT adoptable.
+- `gh api repos/THUDM/ReST-MCTS/contents --jq '.[].name'` → `.DS_Store CoT MCTS PRM README.md ToT assets data eval_vm.py evaluate.py figures models requirements_*.txt self_train tasks utils`. **No LICENSE file**. `gh api repos/THUDM/ReST-MCTS/license` → HTTP 404. ⇒ unlicensed, NOT adoptable.
 - `gh api repos/sola-st/RepairAgent/contents/LICENSE --jq .content | base64 -d | head -20` → `MIT License / Copyright (c) 2024 ISLEM BOUZENIA @ SOLA-ST`. ⇒ **MIT**.
 - `gh api repos/AutoCodeRoverSG/auto-code-rover/license ... | base64 -d | head -12` → `SONAR Source-Available License v1.0 ... "Competing" means marketing a product or service as a substitute for the functionality or value of SonarQube`. ⇒ **not open source**, reference-only.
 - `gh api repos/augmentcode/augment-swebench-agent/license ... | base64 -d | head -12` → `MIT License / Copyright (c) 2025 Augment Code`. ⇒ **MIT**.
@@ -331,4 +331,4 @@ iSEngLab/Psearch                     null           2     2026-07-09T06:32:55Z
 
 **Web**
 - WebSearch "REx refine explore exploit LLM code repair Tang bandit Thompson sampling github" → NeurIPS 2024 paper `arXiv:2405.17503`, official repo **github.com/haotang1995/REx** (confirmed via API above).
-- WebSearch "2026 open source MCTS program repair execution reward github" → **CodePilot**, `arXiv:2602.00129` (submitted 2026-01-28), MCTS + execution-feedback reward, 24.67% on SWE-bench Lite with open-weight models — **no public repo found**; tracked as a paper-only reference.
+- WebSearch "2026 open source MCTS program repair execution reward github" → **CodePilot**, `arXiv:2602.00129` (submitted 2026-01-28), MCTS + execution-feedback reward, 24.67% on SWE-bench Lite with open-weight models. **No public repo found**; tracked as a paper-only reference.

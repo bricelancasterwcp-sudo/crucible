@@ -1,16 +1,16 @@
-# crucible S2 — Search, Arms, Ceiling Pilot — Implementation Plan
+# crucible S2: Search, Arms, Ceiling Pilot Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the proposer→search→verify loop and the arm driver, then run the 30-task ceiling pilot that tells us whether the S1 stream is calibrated for Phase A.
 
-**Architecture:** A frozen small LLM (Qwen3.5-2B, served by vLLM — proven in S1) proposes a **full-module rewrite** to repair a mutated function; a ported **REx Thompson-sampling scheduler** spends a budget of **K=8** visible-suite executions across a refinement tree, re-prompting with test feedback; a **value-fn v0** (untrained constant) orders candidates; a **driver** runs an *arm* (A_noMem = 2B+search, B_search = 9B+search, B_naive = 9B single-shot) over a task set, scores the final submission against the **hidden** suite, and writes per-execution + per-task records; a **lens** reduces records to success-by-phase for E1/E2. This slice has **no memory, no A_full, no sleep, no uncertainty** — those are S3. Arms serve one model at a time (2B and 9B do not co-reside in 16 GiB), swapping via a serving harness.
+**Architecture:** A frozen small LLM (Qwen3.5-2B, served by vLLM, proven in S1) proposes a **full-module rewrite** to repair a mutated function; a ported **REx Thompson-sampling scheduler** spends a budget of **K=8** visible-suite executions across a refinement tree, re-prompting with test feedback; a **value-fn v0** (untrained constant) orders candidates; a **driver** runs an *arm* (A_noMem = 2B+search, B_search = 9B+search, B_naive = 9B single-shot) over a task set, scores the final submission against the **hidden** suite, and writes per-execution + per-task records; a **lens** reduces records to success-by-phase for E1/E2. This slice has **no memory, no A_full, no sleep, no uncertainty**. Those are S3. Arms serve one model at a time (2B and 9B do not co-reside in 16 GiB), swapping via a serving harness.
 
 **Tech Stack:** Python 3.12, uv venv, pytest + pytest-timeout, vLLM 0.27.1 (served with `VLLM_USE_FLASHINFER_SAMPLER=0`), the S1 `crucible/` package (stream, sandbox, proposer/identity). REx (MIT, ported). No new heavyweight deps beyond what S1 + the `serve` extra already declare.
 
-**Spec:** `docs/superpowers/specs/2026-08-23-crucible-phase-a-prereg.md` — read §4.4 (agent I/O), §4.5 (sandbox), §4.6 (budget), §4.7 (codec landing), §4.8.4 (ceiling pilot), §5 (search/value contracts — memory/uncertainty parts are S3), §6 (endpoints), §9 (architecture/interfaces), §10 (slice 2 scope).
+**Spec:** `docs/superpowers/specs/2026-08-23-crucible-phase-a-prereg.md`. Read §4.4 (agent I/O), §4.5 (sandbox), §4.6 (budget), §4.7 (codec landing), §4.8.4 (ceiling pilot), §5 (search/value contracts; memory/uncertainty parts are S3), §6 (endpoints), §9 (architecture/interfaces), §10 (slice 2 scope).
 
-**Serving facts (measured in S1, `docs/findings/S1-serving.md`):** vLLM serves `Qwen/Qwen3.5-2B` with n-best + logprobs; the FlashInfer sampler JIT needs `ninja`+`nvcc` (absent) so launch with `VLLM_USE_FLASHINFER_SAMPLER=0`. `Qwen3.5-2B` bf16 = 9.6 GiB @ 138 tok/s; `lovedheart/Qwen3.5-9B-FP8` = 14.2 GiB @ 57 tok/s, needs `--enforce-eager --gpu-memory-utilization 0.90 --max-model-len 4096`. Port 8001 is taken on this box — use **8010**. Real stream at `streams/full/dd5912cddedc` (450 tasks, passes all pre-checks).
+**Serving facts (measured in S1, `docs/findings/S1-serving.md`):** vLLM serves `Qwen/Qwen3.5-2B` with n-best + logprobs; the FlashInfer sampler JIT needs `ninja`+`nvcc` (absent) so launch with `VLLM_USE_FLASHINFER_SAMPLER=0`. `Qwen3.5-2B` bf16 = 9.6 GiB @ 138 tok/s; `lovedheart/Qwen3.5-9B-FP8` = 14.2 GiB @ 57 tok/s, needs `--enforce-eager --gpu-memory-utilization 0.90 --max-model-len 4096`. Port 8001 is taken on this box. Use **8010**. Real stream at `streams/full/dd5912cddedc` (450 tasks, passes all pre-checks).
 
 ## Global Constraints
 
@@ -52,7 +52,7 @@
       # the OUTCOME oracle: runs the HIDDEN suite against a final submission. Driver-only; the agent never calls this.
   ```
 
-- [ ] **Step 1: Failing tests** — `tests/run/test_types.py`:
+- [ ] **Step 1: Failing tests:** `tests/run/test_types.py`:
 ```python
 from crucible.run.types import Candidate
 
@@ -65,7 +65,7 @@ def test_candidate_allows_none_scores():
     c = Candidate("x", None, None)
     assert c.mean_logprob is None and Candidate.from_dict(c.to_dict()) == c
 ```
-`tests/sandbox/test_task_run.py` (WRAP with systemd-run — touches the sandbox):
+`tests/sandbox/test_task_run.py` (WRAP with systemd-run; touches the sandbox):
 ```python
 from crucible.sandbox.task_run import run, run_hidden
 from crucible.stream.units import Unit, sha256_text
@@ -87,7 +87,7 @@ def test_run_hidden_is_the_outcome_oracle():
     assert run_hidden(U, SRC).all_passed
     assert not run_hidden(U, "def add(a, b):\n    return a - b\n").all_passed
 ```
-- [ ] **Step 2: RED** — `systemd-run --user --scope -q -p MemoryMax=4G -p MemorySwapMax=0 -- .venv/bin/python -m pytest tests/sandbox/test_task_run.py`; unwrapped for `tests/run/test_types.py`. Expect import errors.
+- [ ] **Step 2: RED:** `systemd-run --user --scope -q -p MemoryMax=4G -p MemorySwapMax=0 -- .venv/bin/python -m pytest tests/sandbox/test_task_run.py`; unwrapped for `tests/run/test_types.py`. Expect import errors.
 - [ ] **Step 3: Implement** `crucible/run/types.py` (dataclass with `dataclasses.asdict` in `to_dict`, `cls(**d)` in `from_dict`) and `crucible/sandbox/task_run.py`:
 ```python
 from ..stream.units import Unit
@@ -101,9 +101,9 @@ def run_hidden(unit, patch, *, per_test_timeout_s=5.0, wall_cap_s=60.0):
     return run_tests(unit.module_name, patch, unit.hidden_test_src,
                      subset=None, per_test_timeout_s=per_test_timeout_s, wall_cap_s=wall_cap_s)
 ```
-- [ ] **Step 4: GREEN** — both test files pass (sandbox one wrapped).
-- [ ] **Step 5: Mutation check** — in `task_run.run`, swap `unit.visible_test_src` → `unit.hidden_test_src`; `test_run_executes_visible_only` still passes but `test_run_reports_failure_for_a_bad_patch` behaviour changes — if neither fails, add an assertion that `run` and `run_hidden` give DIFFERENT results for a patch that passes visible but fails hidden (craft `return a + b if a else 1`). Purge `__pycache__`, restore, re-green.
-- [ ] **Step 6: Commit** — `feat(run): Candidate type and visible/hidden sandbox run wrappers`
+- [ ] **Step 4: GREEN:** both test files pass (sandbox one wrapped).
+- [ ] **Step 5: Mutation check:** in `task_run.run`, swap `unit.visible_test_src` → `unit.hidden_test_src`; `test_run_executes_visible_only` still passes but `test_run_reports_failure_for_a_bad_patch` behaviour changes. If neither fails, add an assertion that `run` and `run_hidden` give DIFFERENT results for a patch that passes visible but fails hidden (craft `return a + b if a else 1`). Purge `__pycache__`, restore, re-green.
+- [ ] **Step 6: Commit:** `feat(run): Candidate type and visible/hidden sandbox run wrappers`
 
 ---
 
@@ -123,7 +123,7 @@ def run_hidden(unit, patch, *, per_test_timeout_s=5.0, wall_cap_s=60.0):
   MODULE_FENCE = "```python"   # the codec: model must return one fenced python block = the full module
   ```
 
-- [ ] **Step 1: Failing test** — `tests/proposer/test_prompt.py` (no sandbox, unwrapped):
+- [ ] **Step 1: Failing test:** `tests/proposer/test_prompt.py` (no sandbox, unwrapped):
 ```python
 from crucible.proposer.prompt import build_prompt
 from crucible.sandbox.runner import TestReport
@@ -143,12 +143,12 @@ def test_feedback_is_included_on_refinement():
     p = build_prompt(U, SYM, feedback="attempt 1 still failed test_v0")
     assert "attempt 1 still failed test_v0" in p
 ```
-- [ ] **Step 2: RED** (unwrapped). **Step 3: Implement** `build_prompt` — a deterministic f-string template: system-style preamble ("You are repairing a single Python function. Return the COMPLETE corrected module in one ```python block, nothing else."), then the module source, the visible test file, a rendered symptom line (`failed: test_v0`), and the optional feedback block. No randomness. **Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — delete the `feedback` interpolation → `test_feedback_is_included_on_refinement` FAILS; restore. **Step 6: Commit** — `feat(proposer): full-module-rewrite repair prompt`
+- [ ] **Step 2: RED** (unwrapped). **Step 3: Implement** `build_prompt`: a deterministic f-string template: system-style preamble ("You are repairing a single Python function. Return the COMPLETE corrected module in one ```python block, nothing else."), then the module source, the visible test file, a rendered symptom line (`failed: test_v0`), and the optional feedback block. No randomness. **Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** delete the `feedback` interpolation → `test_feedback_is_included_on_refinement` FAILS; restore. **Step 6: Commit:** `feat(proposer): full-module-rewrite repair prompt`
 
 ---
 
-### Task 3: Codec — extract the full module + landing check
+### Task 3: Codec: extract the full module + landing check
 
 **Files:**
 - Create: `crucible/proposer/codec.py`, `tests/proposer/test_codec.py`
@@ -166,7 +166,7 @@ def test_feedback_is_included_on_refinement():
   def landing_rate(texts: list[str]) -> float   # fraction of `texts` that land — the §4.7 pre-check statistic
   ```
 
-- [ ] **Step 1: Failing test** — `tests/proposer/test_codec.py`:
+- [ ] **Step 1: Failing test:** `tests/proposer/test_codec.py`:
 ```python
 from crucible.proposer.codec import extract_module, landing_rate
 
@@ -185,8 +185,8 @@ def test_no_fence_falls_back_to_whole_text_if_it_parses():
 def test_landing_rate():
     assert landing_rate(["```python\ndef f():\n    return 1\n```", "prose only, no code {"]) == 0.5
 ```
-- [ ] **Step 2: RED. Step 3: Implement** — regex for ```` ```python … ``` ```` blocks (take the last), fall back to whole text; `ok = bool(stripped) and compiles`, guarding `compile()` under `warnings.catch_warnings(); simplefilter("ignore", SyntaxWarning)` (R-T11-1 lesson — do not let a SyntaxWarning become a landing failure under `-W error`). `landing_rate` = mean of `extract_module(t).ok`. **Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — change "last fence" to "first fence" → `test_takes_last_fence_when_multiple` FAILS; drop the `compile()` guard → `test_unparseable_does_not_land` FAILS. Restore. **Step 6: Commit** — `feat(proposer): codec extraction and landing check`
+- [ ] **Step 2: RED. Step 3: Implement:** regex for ```` ```python … ``` ```` blocks (take the last), fall back to whole text; `ok = bool(stripped) and compiles`, guarding `compile()` under `warnings.catch_warnings(); simplefilter("ignore", SyntaxWarning)` (R-T11-1 lesson: do not let a SyntaxWarning become a landing failure under `-W error`). `landing_rate` = mean of `extract_module(t).ok`. **Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** change "last fence" to "first fence" → `test_takes_last_fence_when_multiple` FAILS; drop the `compile()` guard → `test_unparseable_does_not_land` FAILS. Restore. **Step 6: Commit:** `feat(proposer): codec extraction and landing check`
 
 ---
 
@@ -211,9 +211,9 @@ def test_landing_rate():
       # self_certainty = mean over tokens of the top-token prob (from logprobs) — a cheap pre-execution prior.
   ```
 
-- [ ] **Step 1: Failing test** — `tests/proposer/test_client.py` uses a **fake HTTP server** (like `tests/proposer/test_identity.py`) serving `/v1/models` (for the identity assert) and `/v1/completions` returning a canned 2-choice response with `logprobs.token_logprobs`. Assert: `generate(...,n=2)` returns 2 `Candidate`s, each `text` is the codec-extracted module, `mean_logprob` equals the mean of the canned logprobs, `self_certainty` in [0,1]. No GPU, no sandbox → unwrapped.
+- [ ] **Step 1: Failing test:** `tests/proposer/test_client.py` uses a **fake HTTP server** (like `tests/proposer/test_identity.py`) serving `/v1/models` (for the identity assert) and `/v1/completions` returning a canned 2-choice response with `logprobs.token_logprobs`. Assert: `generate(...,n=2)` returns 2 `Candidate`s, each `text` is the codec-extracted module, `mean_logprob` equals the mean of the canned logprobs, `self_certainty` in [0,1]. No GPU, no sandbox → unwrapped.
 - [ ] **Step 2: RED. Step 3: Implement** `VLLMProposer` with `urllib` (stdlib, like identity.py); constructor calls `assert_identity(base_url, model)`. **Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — make `generate` ignore `n` (always request 1) → the 2-candidate test FAILS; drop `extract_module` (return raw `text`) → a test asserting the fenced block is stripped FAILS. Restore. **Step 6: Commit** — `feat(proposer): Proposer protocol and vLLM adapter with logprob capture`
+- [ ] **Step 5: Mutation check:** make `generate` ignore `n` (always request 1) → the 2-candidate test FAILS; drop `extract_module` (return raw `text`) → a test asserting the fenced block is stripped FAILS. Restore. **Step 6: Commit:** `feat(proposer): Proposer protocol and vLLM adapter with logprob capture`
 
 ---
 
@@ -235,7 +235,7 @@ def test_landing_rate():
       def update(self, arm_id, reward: float) -> None                     # alpha += reward ; beta += (1 - reward)
   ```
 
-- [ ] **Step 1: Failing test** — `tests/search/test_rex.py` (pure math, unwrapped):
+- [ ] **Step 1: Failing test:** `tests/search/test_rex.py` (pure math, unwrapped):
 ```python
 import random
 from crucible.search.rex import RexScheduler
@@ -255,7 +255,7 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
     assert picks.count("x") > picks.count("y") * 3
 ```
 - [ ] **Step 2: RED. Step 3: Implement** the 45-line Beta-Thompson scheduler verbatim (only injecting `rng`), add the `THIRD_PARTY.md` row (`REx | github.com/haotang1995/REx | MIT | gh api repos/haotang1995/REx --jq .license.spdx_id | <date> | Thompson scheduler ported to crucible/search/rex.py`). **Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — change `update` to `alpha += reward` only (drop the `beta += 1-reward`) → `test_reward_shifts_selection_toward_the_rewarded_arm` still passes (both grow) — so ALSO assert that after only-failures on "y", selecting favours "x"; break the beta update → that assertion FAILS. Restore. **Step 6: Commit** — `feat(search): port REx Thompson scheduler (MIT)`
+- [ ] **Step 5: Mutation check:** change `update` to `alpha += reward` only (drop the `beta += 1-reward`) → `test_reward_shifts_selection_toward_the_rewarded_arm` still passes (both grow), so ALSO assert that after only-failures on "y", selecting favours "x"; break the beta update → that assertion FAILS. Restore. **Step 6: Commit:** `feat(search): port REx Thompson scheduler (MIT)`
 
 ---
 
@@ -283,12 +283,12 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
       def best_visible(self) -> Node        # highest visible_reward, ties → highest self_certainty
   ```
 
-- [ ] **Step 1: Failing tests** — `test_node.py` (unwrapped): `visible_reward` = passed / (passed+failed+timed_out+errored) from a `TestReport`; `status` classification; `best_visible` tie-break. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — make `visible_reward` count only `passed` in the numerator but total tests wrong (e.g. divide by passed) → a mixed-report test FAILS. Restore. **Step 6: Commit** — `feat(search): search node and refinement tree`
+- [ ] **Step 1: Failing tests:** `test_node.py` (unwrapped): `visible_reward` = passed / (passed+failed+timed_out+errored) from a `TestReport`; `status` classification; `best_visible` tie-break. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** make `visible_reward` count only `passed` in the numerator but total tests wrong (e.g. divide by passed) → a mixed-report test FAILS. Restore. **Step 6: Commit:** `feat(search): search node and refinement tree`
 
 ---
 
-### Task 7: Search loop — propose→execute→refine under the budget
+### Task 7: Search loop: propose→execute→refine under the budget
 
 **Files:**
 - Create: `crucible/search/loop.py`, `tests/search/test_loop.py`
@@ -315,8 +315,8 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
       #    best landed reward is below an abstain threshold AND value confidence low; else believed.
   ```
 
-- [ ] **Step 1: Failing test** — `tests/search/test_loop.py` (WRAP — touches the sandbox). Use a **fake in-process Proposer** (returns scripted candidates, no network) + a real `Unit` fixture whose canonical repair is known. Assert: (a) a proposer that returns the correct module on the first candidate yields `status=="verified_visible"`, `visible_reward==1.0`, `executions_charged<=k`; (b) a proposer that never lands a passing patch exhausts at most `k` charged executions and returns `believed`/`abstain` with `executions_charged<=k` (the budget is never exceeded — pin `BudgetExhausted` is not raised past k); (c) a proposer whose FIRST candidate fails and SECOND (a refinement child) passes yields `verified_visible` with `executions_charged>=2` (proves refinement + feedback works). **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — remove the `k`-budget guard (loop forever until solved) → test (b) FAILS (executions exceed k) — pin `executions_charged<=k` hard. Remove the "free symptom run is not charged" exemption → test (a)'s `executions_charged` count FAILS. Restore. **Step 6: Commit** — `feat(search): budgeted propose-execute-refine loop`
+- [ ] **Step 1: Failing test:** `tests/search/test_loop.py` (WRAP; touches the sandbox). Use a **fake in-process Proposer** (returns scripted candidates, no network) + a real `Unit` fixture whose canonical repair is known. Assert: (a) a proposer that returns the correct module on the first candidate yields `status=="verified_visible"`, `visible_reward==1.0`, `executions_charged<=k`; (b) a proposer that never lands a passing patch exhausts at most `k` charged executions and returns `believed`/`abstain` with `executions_charged<=k` (the budget is never exceeded; pin `BudgetExhausted` is not raised past k); (c) a proposer whose FIRST candidate fails and SECOND (a refinement child) passes yields `verified_visible` with `executions_charged>=2` (proves refinement + feedback works). **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** remove the `k`-budget guard (loop forever until solved) → test (b) FAILS (executions exceed k). Pin `executions_charged<=k` hard. Remove the "free symptom run is not charged" exemption → test (a)'s `executions_charged` count FAILS. Restore. **Step 6: Commit:** `feat(search): budgeted propose-execute-refine loop`
 
 ---
 
@@ -337,8 +337,8 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
       def update(self, node, outcome) -> None        # no-op (training is S3); records the call count for a test
   ```
 
-- [ ] **Step 1: Failing test** — `score` returns the constant regardless of node; `update` is a no-op but increments an observable counter (so S3 can prove it's wired). Unwrapped. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — make `score` return `node.something` instead of the constant → the constancy test FAILS. Restore. **Step 6: Commit** — `feat(value): v0 constant value scaffold`
+- [ ] **Step 1: Failing test:** `score` returns the constant regardless of node; `update` is a no-op but increments an observable counter (so S3 can prove it's wired). Unwrapped. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** make `score` return `node.something` instead of the constant → the constancy test FAILS. Restore. **Step 6: Commit:** `feat(value): v0 constant value scaffold`
 
 ---
 
@@ -369,8 +369,8 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
   def read_task_records(path: Path) -> list[TaskRecord]
   ```
 
-- [ ] **Step 1: Failing tests** — round-trip both dataclasses through JSON; `hidden_pass` may be None; `tampered`/`infra_error` present; `write_records`/`read_task_records` round-trip through a real `tmp_path`. Unwrapped. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — drop `hidden_pass` from `to_dict` → completeness test FAILS. Restore. **Step 6: Commit** — `feat(run): per-execution and per-task record schema`
+- [ ] **Step 1: Failing tests:** round-trip both dataclasses through JSON; `hidden_pass` may be None; `tampered`/`infra_error` present; `write_records`/`read_task_records` round-trip through a real `tmp_path`. Unwrapped. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** drop `hidden_pass` from `to_dict` → completeness test FAILS. Restore. **Step 6: Commit:** `feat(run): per-execution and per-task record schema`
 
 ---
 
@@ -399,8 +399,8 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
       # files are untouched). Fills the TaskRecord (hidden_pass from run_hidden.all_passed).
   ```
 
-- [ ] **Step 1: Failing test** — WRAP. Fake in-process proposer + a real `Unit`+`TaskSpec`. Assert: (a) A_noMem attempt on a unit whose repair the fake proposer knows → `hidden_pass True`, `status verified_visible`; (b) B_naive (single-shot) makes exactly ONE generate call and no refinement (`executions_charged<=1`); (c) a submission that passes VISIBLE but fails HIDDEN → `hidden_pass False` while `visible_reward==1.0` (the honest-measurement core: visible pass ≠ hidden pass). **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — compute `hidden_pass` from the VISIBLE report instead of `run_hidden` → test (c) FAILS (fabricated success). This is the single most important mutation in S2 — pin it hard. Restore. **Step 6: Commit** — `feat(run): arm configs and per-task attempt with hidden-suite outcome`
+- [ ] **Step 1: Failing test:** WRAP. Fake in-process proposer + a real `Unit`+`TaskSpec`. Assert: (a) A_noMem attempt on a unit whose repair the fake proposer knows → `hidden_pass True`, `status verified_visible`; (b) B_naive (single-shot) makes exactly ONE generate call and no refinement (`executions_charged<=1`); (c) a submission that passes VISIBLE but fails HIDDEN → `hidden_pass False` while `visible_reward==1.0` (the honest-measurement core: visible pass ≠ hidden pass). **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** compute `hidden_pass` from the VISIBLE report instead of `run_hidden` → test (c) FAILS (fabricated success). This is the single most important mutation in S2. Pin it hard. Restore. **Step 6: Commit:** `feat(run): arm configs and per-task attempt with hidden-suite outcome`
 
 ---
 
@@ -424,11 +424,11 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
   ```
 - Note: the actual start/stop of a live server is an OPERATIONAL step run by the ceiling-pilot runner (Task 14), NOT inside the unit tests. `test_serving.py` covers `wait_ready`'s polling logic against a **fake** server (readiness detection + pid-death detection), and asserts `SERVE` carries the S1-measured launch flags verbatim (incl. `VLLM_USE_FLASHINFER_SAMPLER=0` in the script). Unwrapped (fake server, no GPU).
 
-- [ ] **Step 1: Failing test** → **Step 4: GREEN** as above. **Step 5: Mutation check** — remove `VLLM_USE_FLASHINFER_SAMPLER=0` from the script → a test asserting the env var is present FAILS (this is the S1 gotcha; must not regress). Restore. **Step 6: Commit** — `feat(run): model-serving harness with S1 launch flags`
+- [ ] **Step 1: Failing test** → **Step 4: GREEN** as above. **Step 5: Mutation check:** remove `VLLM_USE_FLASHINFER_SAMPLER=0` from the script → a test asserting the env var is present FAILS (this is the S1 gotcha; must not regress). Restore. **Step 6: Commit:** `feat(run): model-serving harness with S1 launch flags`
 
 ---
 
-### Task 12: Driver — run an arm over a task set
+### Task 12: Driver: run an arm over a task set
 
 **Files:**
 - Create: `crucible/run/driver.py`, `tests/run/test_driver.py`
@@ -447,12 +447,12 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
       # n phase-1 task_keys drawn with random.Random(f"{seed}:pilot") — never "first N".
   ```
 
-- [ ] **Step 1: Failing test** — WRAP. Build a tiny real stream in `tmp_path` (reuse `stream.pipeline.build_stream` on the 3-record fixture from `tests/stream/test_pipeline.py`), run `run_arm` with a fake in-process proposer over 2 task_keys; assert both task records written, `.DONE` present, resumability (second call skips done tasks — assert the proposer isn't called again). `select_pilot_tasks` is seeded (two calls same seed → same list; different seed → different) and only returns phase-1 keys. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — make `select_pilot_tasks` return `phase1[:n]` (first-N) → the seed-sensitivity test FAILS; drop the resumability skip → the "proposer not called again" test FAILS. Restore. **Step 6: Commit** — `feat(run): arm driver with resumable records and seeded pilot sampling`
+- [ ] **Step 1: Failing test:** WRAP. Build a tiny real stream in `tmp_path` (reuse `stream.pipeline.build_stream` on the 3-record fixture from `tests/stream/test_pipeline.py`), run `run_arm` with a fake in-process proposer over 2 task_keys; assert both task records written, `.DONE` present, resumability (second call skips done tasks; assert the proposer isn't called again). `select_pilot_tasks` is seeded (two calls same seed → same list; different seed → different) and only returns phase-1 keys. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** make `select_pilot_tasks` return `phase1[:n]` (first-N) → the seed-sensitivity test FAILS; drop the resumability skip → the "proposer not called again" test FAILS. Restore. **Step 6: Commit:** `feat(run): arm driver with resumable records and seeded pilot sampling`
 
 ---
 
-### Task 13: Lens — records → success by phase/exposure (E1/E2 inputs)
+### Task 13: Lens: records → success by phase/exposure (E1/E2 inputs)
 
 **Files:**
 - Create: `crucible/run/lens.py`, `tests/run/test_lens.py`
@@ -473,8 +473,8 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
       # phase1 = kind=="first"; second = kind=="second"; novel = kind=="novel".
   ```
 
-- [ ] **Step 1: Failing test** — a mixed list of `TaskRecord`s (some infra/None hidden_pass, some pass/fail across kinds) → assert `succ_overall` EXCLUDES the infra ones, and the per-kind rates match hand-computed values. Unwrapped. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — include `hidden_pass is None` as `False` in `succ_overall` (charging infra as a failure) → the infra-exclusion test FAILS. Restore. **Step 6: Commit** — `feat(run): lens computing success by phase/exposure`
+- [ ] **Step 1: Failing test:** a mixed list of `TaskRecord`s (some infra/None hidden_pass, some pass/fail across kinds) → assert `succ_overall` EXCLUDES the infra ones, and the per-kind rates match hand-computed values. Unwrapped. **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** include `hidden_pass is None` as `False` in `succ_overall` (charging infra as a failure) → the infra-exclusion test FAILS. Restore. **Step 6: Commit:** `feat(run): lens computing success by phase/exposure`
 
 ---
 
@@ -499,8 +499,8 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
   #   crucible arm run <stream_dir> --arm A_noMem --base-url URL [--tasks all|phase1|<file>] [--out DIR]
   ```
 
-- [ ] **Step 1: Failing test** — WRAP. With a fake in-process proposer scripted so a known fraction of the pilot tasks get a hidden-passing repair, assert `ceiling_pilot` computes `p0` = that fraction and sets `too_easy` correctly at the 0.70 boundary (test both a 0.5 case → proceed and a 0.8 case → too_easy with a rung recommendation). CLI: `python -m crucible.cli arm --help` exits 0 and lists `pilot`/`run` (subprocess test, no sandbox). **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
-- [ ] **Step 5: Mutation check** — change the threshold to `>= 0.70` vs `> 0.70` and pin the boundary at exactly 0.70 (spec says >0.70 → too easy, so 0.70 exactly = proceed) with a test; flip it → FAILS. Restore. **Step 6: Commit** — `feat(run): ceiling-pilot runner and arm CLI`
+- [ ] **Step 1: Failing test:** WRAP. With a fake in-process proposer scripted so a known fraction of the pilot tasks get a hidden-passing repair, assert `ceiling_pilot` computes `p0` = that fraction and sets `too_easy` correctly at the 0.70 boundary (test both a 0.5 case → proceed and a 0.8 case → too_easy with a rung recommendation). CLI: `python -m crucible.cli arm --help` exits 0 and lists `pilot`/`run` (subprocess test, no sandbox). **Step 2: RED. Step 3: Implement. Step 4: GREEN.**
+- [ ] **Step 5: Mutation check:** change the threshold to `>= 0.70` vs `> 0.70` and pin the boundary at exactly 0.70 (spec says >0.70 → too easy, so 0.70 exactly = proceed) with a test; flip it → FAILS. Restore. **Step 6: Commit:** `feat(run): ceiling-pilot runner and arm CLI`
 
 ---
 
@@ -523,7 +523,7 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
       # baseline proposer (Qwen2.5-Coder-1.5B) — recorded, not automated here.
   ```
 
-- [ ] **Step 1: Failing test** — fake proposer that lands a set fraction; assert `rate` and the 0.95 gate (0.96 → passes, 0.9 → fails). WRAP only if it touches the sandbox (it doesn't — landing is pure parse; unwrapped, fake proposer). **Step 2–4.** **Step 5: Mutation check** — flip the `>= 0.95` gate → boundary test FAILS. Restore. **Step 6: Commit** — `feat(run): codec-landing pre-check`
+- [ ] **Step 1: Failing test:** fake proposer that lands a set fraction; assert `rate` and the 0.95 gate (0.96 → passes, 0.9 → fails). WRAP only if it touches the sandbox (it doesn't; landing is pure parse; unwrapped, fake proposer). **Step 2–4.** **Step 5: Mutation check:** flip the `>= 0.95` gate → boundary test FAILS. Restore. **Step 6: Commit:** `feat(run): codec-landing pre-check`
 
 ---
 
@@ -533,20 +533,20 @@ def test_reward_shifts_selection_toward_the_rewarded_arm():
 - Create: `docs/findings/S2-ceiling-pilot.md`
 - Modify: `docs/CARRIED-DEBT.md`
 
-This task is **operational, not unit-tested** — it runs the real vLLM server + real proposer against the real stream `streams/full/dd5912cddedc`, in capped scopes.
+This task is **operational, not unit-tested**. It runs the real vLLM server + real proposer against the real stream `streams/full/dd5912cddedc`, in capped scopes.
 
 - [ ] **Step 1:** Serve `Qwen/Qwen3.5-2B` (S1 flags, `VLLM_USE_FLASHINFER_SAMPLER=0`, port 8010) in its own scope; `assert_identity`.
 - [ ] **Step 2:** Run `landing_precheck` on 30 smoke tasks → record the landing rate; require ≥ 95% (else fall back to the 1.5B baseline and record it).
-- [ ] **Step 3:** Run `crucible arm pilot streams/full/dd5912cddedc --base-url http://127.0.0.1:8010 --model Qwen/Qwen3.5-2B --n 30` under a cgroup cap (`systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0`), detached, monitored. This does 30 tasks × up to K=8 sandboxed executions each — expect tens of minutes.
+- [ ] **Step 3:** Run `crucible arm pilot streams/full/dd5912cddedc --base-url http://127.0.0.1:8010 --model Qwen/Qwen3.5-2B --n 30` under a cgroup cap (`systemd-run --user --scope -p MemoryMax=8G -p MemorySwapMax=0`), detached, monitored. This does 30 tasks × up to K=8 sandboxed executions each. Expect tens of minutes.
 - [ ] **Step 4:** Record in `docs/findings/S2-ceiling-pilot.md`: landing rate, **p0**, per-family success, whether `p0 > 0.70` (too-easy → name the hardening-ladder rung to apply, which loops back to the S1 builder), tokens/wall/GPU-minutes. No fabricated numbers.
 - [ ] **Step 5:** Stop the server (by recorded PID), restart ollama, free VRAM.
-- [ ] **Step 6: Commit** — `docs(run): S2 ceiling-pilot findings (p0=<measured>)`
+- [ ] **Step 6: Commit:** `docs(run): S2 ceiling-pilot findings (p0=<measured>)`
 
 ---
 
 ## Self-Review notes (for the executor)
 
-- **Spec coverage:** §4.4 codec = Task 2/3/10; §4.5 sandbox = Task 1 (reuses S1); §4.6 budget K=8 + free symptom = Task 7 (pinned by mutation); §4.7 landing = Task 3/15/16; §4.8.4 ceiling pilot + 0.70 gate = Task 14/16; §5 search/value contracts (memory/uncertainty EXCLUDED — S3) = Task 7/8; §6 E1/E2 inputs = Task 13 lens; §9 interfaces = each task's Produces block; §10 slice-2 scope (A_noMem + B arms, no A_full) = Task 10 ARMS. **Out of scope (S3), do not build:** `memory/`, `sleep/`, `uncertainty/`, the A_full arm, value training.
-- **The one mutation that matters most:** Task 10 — `hidden_pass` MUST come from `run_hidden`, never the visible report. A regression there fabricates the entire experiment's primary endpoint with green unit tests.
+- **Spec coverage:** §4.4 codec = Task 2/3/10; §4.5 sandbox = Task 1 (reuses S1); §4.6 budget K=8 + free symptom = Task 7 (pinned by mutation); §4.7 landing = Task 3/15/16; §4.8.4 ceiling pilot + 0.70 gate = Task 14/16; §5 search/value contracts (memory/uncertainty EXCLUDED; S3) = Task 7/8; §6 E1/E2 inputs = Task 13 lens; §9 interfaces = each task's Produces block; §10 slice-2 scope (A_noMem + B arms, no A_full) = Task 10 ARMS. **Out of scope (S3), do not build:** `memory/`, `sleep/`, `uncertainty/`, the A_full arm, value training.
+- **The one mutation that matters most:** Task 10: `hidden_pass` MUST come from `run_hidden`, never the visible report. A regression there fabricates the entire experiment's primary endpoint with green unit tests.
 - **R-T2-6 wrapping:** Tasks 1,7,10,12,14,16 touch the sandbox → wrap every pytest run. Tasks 2,3,4,5,6,8,9,11,13,15 are pure → unwrapped.
 - **Serving gotchas carried from S1 (do not rediscover):** `VLLM_USE_FLASHINFER_SAMPLER=0`, port 8010, 9B needs `--enforce-eager --gpu-memory-utilization 0.90`, stop servers by recorded PID (never `pkill -f 'vllm serve'`).

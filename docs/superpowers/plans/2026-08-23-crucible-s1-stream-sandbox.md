@@ -1,14 +1,14 @@
-# crucible S1 — Environment, Sandbox, Task Stream, Pre-checks — Implementation Plan
+# crucible S1: Environment, Sandbox, Task Stream, Pre-checks (Implementation Plan)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the deterministic mutation-injected task stream, the isolated test sandbox with a verification-budget meter, the §4.8.1–3 structural pre-checks, and settle the serving/LoRA environment — everything Phase A's arms stand on.
+**Goal:** Build the deterministic mutation-injected task stream, the isolated test sandbox with a verification-budget meter, the §4.8.1–3 structural pre-checks, and settle the serving/LoRA environment: everything Phase A's arms stand on.
 
 **Architecture:** A `crucible/` Python package (uv-managed, Python 3.12). `sandbox/` executes code in a fresh temp dir with no network, memory limit, per-test and per-run wall-clock kills, and returns an honest `TestReport`. `stream/` turns EvalPlus records into units (module + visible/hidden pytest files), enumerates mutants with cosmic-ray (+ a ported statement-deletion operator), validates them in the sandbox (valid = killed by the *visible* suite), composes phase-1/phase-2/novel tasks into a content-hashed `StreamManifest`, and runs the pre-checks. A `cli.py` drives it. One exploratory task settles torch/vLLM-or-llama.cpp serving and whether LoRA attaches to Qwen3.5-2B.
 
 **Tech Stack:** Python 3.12, uv, pytest + pytest-timeout, cosmic-ray 8.7 (MIT) + parso, numpy (MBPP+ tests), stdlib only otherwise. Environment task: torch (cu128+), vLLM or llama.cpp, transformers + peft.
 
-**Spec:** `docs/superpowers/specs/2026-08-23-crucible-phase-a-prereg.md` — read §4 (task stream), §4.5 (sandbox), §4.6 (budget), §4.8 (pre-checks), §8 (instrument honesty), §9 (architecture), §10 S1 exit criteria.
+**Spec:** `docs/superpowers/specs/2026-08-23-crucible-phase-a-prereg.md`: read §4 (task stream), §4.5 (sandbox), §4.6 (budget), §4.8 (pre-checks), §8 (instrument honesty), §9 (architecture), §10 S1 exit criteria.
 
 ## Global Constraints
 
@@ -24,19 +24,19 @@
 
 ## Pre-lock spec amendments recorded by this plan (footnote in the spec at lock)
 
-- **A1** §4.5: `RLIMIT_AS` is **4 GiB**, not 1 GiB — numpy/OpenBLAS reserve several GiB of *virtual* address space at import and a 1 GiB cap breaks MBPP+ tests that import numpy. It remains a runaway guard, not a tight bound.
-- **A2** §4.2: the **VAR** family (`VariableReplacer`, `VariableInserter`) is **excluded** — those two are the only cosmic-ray operators that require per-variable constructor arguments (`cause_variable`, `effect_variable`); 8 families remain. The family map asserts every one of the 213 core operator names is either mapped or explicitly excluded.
+- **A1** §4.5: `RLIMIT_AS` is **4 GiB**, not 1 GiB: numpy/OpenBLAS reserve several GiB of *virtual* address space at import and a 1 GiB cap breaks MBPP+ tests that import numpy. It remains a runaway guard, not a tight bound.
+- **A2** §4.2: the **VAR** family (`VariableReplacer`, `VariableInserter`) is **excluded**. Those two are the only cosmic-ray operators that require per-variable constructor arguments (`cause_variable`, `effect_variable`); 8 families remain. The family map asserts every one of the 213 core operator names is either mapped or explicitly excluded.
 - **A3** §4.7: the codec-landing probe moves to S2 (it needs the proposer adapter and prompt format that S2 builds); it still runs before lock.
 - **A4** §4.1: hidden tests are capped at **100 per unit** (plus_input has up to 1000 inputs; median 972 for HumanEval+), sampled deterministically with the stream seed; inputs whose `repr` exceeds 2000 chars, whose value does not round-trip through `eval(repr(x)) == x`, or on which the canonical solution raises or times out are **dropped and counted** per unit.
 
 ## Facts verified on 2026-08-23 (do not re-derive; cite)
 
-- cosmic-ray API (verified by running): `from cosmic_ray.mutating import mutate_code` — `mutate_code(code: str, operator_instance, occurrence: int) -> str | None`; `from cosmic_ray import plugins` — `plugins.operator_names()` returns 213 names prefixed `core/`; `plugins.get_operator(name)` returns a **class** (instantiate with `()`; only `VariableReplacer`/`VariableInserter` need args); `from cosmic_ray.ast import get_ast, ast_nodes` — `ast_nodes(get_ast(src))` yields parso nodes in the **same pre-order** `MutationVisitor` walks, so occurrence *i* of operator `op` is `[p for node in ast_nodes(tree) for p in op.mutation_positions(node)][i]`. `Operator` ABC (`cosmic_ray.operators.operator.Operator`) requires `mutation_positions(self, node)`, `mutate(self, node, index)`, and classmethod `examples(cls)`.
+- cosmic-ray API (verified by running): `from cosmic_ray.mutating import mutate_code`: `mutate_code(code: str, operator_instance, occurrence: int) -> str | None`; `from cosmic_ray import plugins`: `plugins.operator_names()` returns 213 names prefixed `core/`; `plugins.get_operator(name)` returns a **class** (instantiate with `()`; only `VariableReplacer`/`VariableInserter` need args); `from cosmic_ray.ast import get_ast, ast_nodes`: `ast_nodes(get_ast(src))` yields parso nodes in the **same pre-order** `MutationVisitor` walks, so occurrence *i* of operator `op` is `[p for node in ast_nodes(tree) for p in op.mutation_positions(node)][i]`. `Operator` ABC (`cosmic_ray.operators.operator.Operator`) requires `mutation_positions(self, node)`, `mutate(self, node, index)`, and classmethod `examples(cls)`.
 - Operator name groups (213): `ReplaceBinaryOperator_*` 132, `ReplaceComparisonOperator_*` 56, `ReplaceUnaryOperator_*` 12, and singletons `AddNot ExceptionReplacer NumberReplacer RemoveDecorator ReplaceAndWithOr ReplaceOrWithAnd ReplaceTrueWithFalse ReplaceFalseWithTrue ReplaceBreakWithContinue ReplaceContinueWithBreak ZeroIterationForLoop VariableInserter VariableReplacer`.
 - parso shapes: a function body is a `suite` node whose children are `newline` then `simple_stmt` nodes; a `simple_stmt`'s first leaf `.prefix` is its indentation (e.g. `'    '`); `parso.parse("pass\n").children[0]` is a `simple_stmt` with children `[keyword, newline]`.
 - EvalPlus data (URLs return 200; digests verified):
-  - `https://github.com/evalplus/humanevalplus_release/releases/download/v0.1.10/HumanEvalPlus.jsonl.gz` sha256 `272720b90ac375502c8ed23cd791c2a93dfb22a911641a494da74a426c09f101` — 164 records, keys `atol base_input canonical_solution contract entry_point plus_input prompt task_id test`; `prompt` = imports + signature + docstring, `canonical_solution` = indented body ⇒ full source = `prompt + canonical_solution`.
-  - `https://github.com/evalplus/mbppplus_release/releases/download/v0.2.0/MbppPlus.jsonl.gz` sha256 `af43697e8791c4c149bdfd6b489d8b5412507551ac20e28a439f650b8225db63` — 378 records, keys `assertion atol base_input canonical_solution contract entry_point plus_input prompt task_id`; `prompt` = a docstring string, `canonical_solution` = full `def` ⇒ full source = `prompt + canonical_solution` (the docstring is then stripped).
+  - `https://github.com/evalplus/humanevalplus_release/releases/download/v0.1.10/HumanEvalPlus.jsonl.gz` sha256 `272720b90ac375502c8ed23cd791c2a93dfb22a911641a494da74a426c09f101`: 164 records, keys `atol base_input canonical_solution contract entry_point plus_input prompt task_id test`; `prompt` = imports + signature + docstring, `canonical_solution` = indented body ⇒ full source = `prompt + canonical_solution`.
+  - `https://github.com/evalplus/mbppplus_release/releases/download/v0.2.0/MbppPlus.jsonl.gz` sha256 `af43697e8791c4c149bdfd6b489d8b5412507551ac20e28a439f650b8225db63`: 378 records, keys `assertion atol base_input canonical_solution contract entry_point plus_input prompt task_id`; `prompt` = a docstring string, `canonical_solution` = full `def` ⇒ full source = `prompt + canonical_solution` (the docstring is then stripped).
   - `base_input` / `plus_input` are lists of argument lists (call as `fn(*args)`); `atol` is 0 or a float tolerance.
 - Box: 16 cores, RTX 5080 (sm_120), driver 595.84, **no torch anywhere**, `uv` at `~/.local/bin/uv`, `~/llama.cpp` checkout at `4988f6e` (2026-06-13, has `qwen35`), Ollama 0.32.13 installed (must be stopped before serving: it holds VRAM).
 
@@ -46,35 +46,35 @@
 crucible/
 ├── pyproject.toml
 ├── README.md                       (exists)
-├── THIRD_PARTY.md                  (new — license ledger)
+├── THIRD_PARTY.md                  (new: license ledger)
 ├── docs/CARRIED-DEBT.md            (new)
-├── docs/findings/S1-serving.md     (new — Task 16 findings)
+├── docs/findings/S1-serving.md     (new: Task 16 findings)
 ├── crucible/
 │   ├── __init__.py
-│   ├── cli.py                      — `crucible stream build|precheck|smoke`
+│   ├── cli.py: `crucible stream build|precheck|smoke`
 │   ├── sandbox/
 │   │   ├── __init__.py
-│   │   ├── exec.py                 — isolated subprocess primitive (tmpdir, sitecustomize, rlimit, kill group)
-│   │   ├── report.py               — TestReport + junit parsing
-│   │   ├── runner.py               — run_tests(): pytest in the sandbox → TestReport
-│   │   └── budget.py               — BudgetMeter / BudgetExhausted
+│   │   ├── exec.py: isolated subprocess primitive (tmpdir, sitecustomize, rlimit, kill group)
+│   │   ├── report.py: TestReport + junit parsing
+│   │   ├── runner.py: run_tests(): pytest in the sandbox → TestReport
+│   │   └── budget.py: BudgetMeter / BudgetExhausted
 │   ├── stream/
 │   │   ├── __init__.py
-│   │   ├── evalplus.py             — fetch/verify/load the two JSONL.gz; full_source()
-│   │   ├── units.py                — Unit dataclass, strip_docstrings, module_name_for
-│   │   ├── oracle.py               — expected outputs from the canonical solution (in sandbox)
-│   │   ├── testgen.py              — visible/hidden pytest files from (inputs, expected)
-│   │   ├── build.py                — build_unit(): assemble + self-check + drop reasons
-│   │   ├── families.py             — operator name → family; EXCLUDED; completeness assert
-│   │   ├── sdl.py                  — StatementDeletion operator (cosmic-ray Operator ABC)
-│   │   ├── mutants.py              — enumerate/apply/make mutants; MutantSpec/Mutant
-│   │   ├── validate.py             — sandbox-kill validation; Validation
-│   │   ├── compose.py              — classes/phases/novel → StreamManifest; hashing
-│   │   ├── store.py                — write/read a stream directory
-│   │   └── precheck.py             — §4.8.1–3 checks → PrecheckReport
+│   │   ├── evalplus.py: fetch/verify/load the two JSONL.gz; full_source()
+│   │   ├── units.py: Unit dataclass, strip_docstrings, module_name_for
+│   │   ├── oracle.py: expected outputs from the canonical solution (in sandbox)
+│   │   ├── testgen.py: visible/hidden pytest files from (inputs, expected)
+│   │   ├── build.py: build_unit(): assemble + self-check + drop reasons
+│   │   ├── families.py: operator name → family; EXCLUDED; completeness assert
+│   │   ├── sdl.py: StatementDeletion operator (cosmic-ray Operator ABC)
+│   │   ├── mutants.py: enumerate/apply/make mutants; MutantSpec/Mutant
+│   │   ├── validate.py: sandbox-kill validation; Validation
+│   │   ├── compose.py: classes/phases/novel → StreamManifest; hashing
+│   │   ├── store.py: write/read a stream directory
+│   │   └── precheck.py: §4.8.1–3 checks → PrecheckReport
 │   └── proposer/
 │       ├── __init__.py
-│       └── identity.py             — served-model identity assertion (vLLM + llama.cpp)
+│       └── identity.py: served-model identity assertion (vLLM + llama.cpp)
 └── tests/
     ├── conftest.py
     ├── sandbox/test_exec.py test_report.py test_runner.py test_budget.py
@@ -156,7 +156,7 @@ def test_package_imports():
 """crucible — research spike on learning-in-the-loop AI (see docs/superpowers/specs)."""
 __version__ = "0.0.1"
 ```
-Empty `__init__.py` for `sandbox/`, `stream/`, `proposer/`. **Also** create empty `tests/__init__.py`, `tests/sandbox/__init__.py`, `tests/stream/__init__.py`, `tests/proposer/__init__.py` — Task 15's tests import a helper from `tests.stream.test_compose`, which needs the tests tree to be a package.
+Empty `__init__.py` for `sandbox/`, `stream/`, `proposer/`. **Also** create empty `tests/__init__.py`, `tests/sandbox/__init__.py`, `tests/stream/__init__.py`, `tests/proposer/__init__.py`. Task 15's tests import a helper from `tests.stream.test_compose`, which needs the tests tree to be a package.
 
 - [ ] **Step 4: Run the tests**
 
@@ -374,7 +374,7 @@ def execute(argv: list[str], files: dict[str, str], *, wall_cap_s: float = 60.0,
 - [ ] **Step 4: Run the tests**
 
 Run: `.venv/bin/python -m pytest tests/sandbox/test_exec.py -q`
-Expected: `6 passed`. (If `test_network_is_blocked` fails because the host has no route and raises before our shim, that is still `BLOCKED` — the assert is on the string; if it prints `OPEN`, the shim is not loading: check `PYTHONPATH` is the workdir.)
+Expected: `6 passed`. (If `test_network_is_blocked` fails because the host has no route and raises before our shim, that is still `BLOCKED`: the assert is on the string; if it prints `OPEN`, the shim is not loading: check `PYTHONPATH` is the workdir.)
 
 - [ ] **Step 5: Mutation check (load-bearing: wall cap and env hygiene)**
 
@@ -386,7 +386,7 @@ Break: in `_env`, delete the line `env.pop("PYTEST_ADDOPTS", None)` and change t
 git add crucible/sandbox/exec.py tests/sandbox/test_exec.py && git commit -m "feat(sandbox): isolated execution primitive with network block, rlimit, wall cap"
 ```
 
-> **Amended after Task 2 review (rulings R-T2-1..5 in the SDD ledger):** the shipped `exec.py` differs from the Step 3 code above — stdout/stderr are captured to files in the workdir (not pipes) and read back capped at 1 MiB with `errors="replace"`; the child is awaited with `proc.wait(timeout)` and `killpg`'d (a `setsid` grandchild can no longer stall the cap); resource limits are applied through a `prlimit` wrapper (`--as`, `--fsize=16MiB`, `--core=0`) with `preexec_fn` only as a fallback (thread-safety); `env_extra` cannot override sandbox keys. The Python-level socket shim is accepted for S1 with its threat model documented (accidental network use, not adversarial); OS-level isolation is deferred in CARRIED-DEBT.
+> **Amended after Task 2 review (rulings R-T2-1..5 in the SDD ledger):** the shipped `exec.py` differs from the Step 3 code above: stdout/stderr are captured to files in the workdir (not pipes) and read back capped at 1 MiB with `errors="replace"`; the child is awaited with `proc.wait(timeout)` and `killpg`'d (a `setsid` grandchild can no longer stall the cap); resource limits are applied through a `prlimit` wrapper (`--as`, `--fsize=16MiB`, `--core=0`) with `preexec_fn` only as a fallback (thread-safety); `env_extra` cannot override sandbox keys. The Python-level socket shim is accepted for S1 with its threat model documented (accidental network use, not adversarial); OS-level isolation is deferred in CARRIED-DEBT.
 
 ---
 
@@ -610,12 +610,12 @@ def _classify(rc: int | None, timed_out: bool, xml: str | None, stderr: str, wal
     return TestReport(passed, failed, t_out, errored, wall_s, None)
 ```
 
-Note the subtlety the tests pin: a **broken test file** also collects with errors (rc=2) — but then the junit `<error>` is on the test module, not the unit. Distinguish by checking the error's classname: if `parse_junit` reports errored entries whose name equals the test module (`test_unit`), that is an infra error. Update `parse_junit` consumers: in `_classify`, before the rc==2 branch add:
+Note the subtlety the tests pin: a **broken test file** also collects with errors (rc=2), but then the junit `<error>` is on the test module, not the unit. Distinguish by checking the error's classname: if `parse_junit` reports errored entries whose name equals the test module (`test_unit`), that is an infra error. Update `parse_junit` consumers: in `_classify`, before the rc==2 branch add:
 ```python
     if rc == 2 and errored and all(n in ("test_unit", "test_unit.py") for n in errored) and "unit_" not in (stderr or ""):
         pass  # fallthrough; see below
 ```
-Rather than string-sniffing, use a deterministic rule: **run the test file's own import first.** In `run_tests`, before pytest, execute `python -c "import ast,sys; ast.parse(open('test_unit.py').read())"` via `execute` (cheap) — if it fails, return `infra_error="test file does not parse"`. Then an rc=2 with a collection error can only come from the unit module. Add that pre-step:
+Rather than string-sniffing, use a deterministic rule: **run the test file's own import first.** In `run_tests`, before pytest, execute `python -c "import ast,sys; ast.parse(open('test_unit.py').read())"` via `execute` (cheap). If it fails, return `infra_error="test file does not parse"`. Then an rc=2 with a collection error can only come from the unit module. Add that pre-step:
 
 ```python
     probe = execute([python, "-c", "import ast; ast.parse(open('test_unit.py', encoding='utf-8').read())"],
@@ -635,7 +635,7 @@ Rather than string-sniffing, use a deterministic rule: **run the test file's own
 git add crucible/sandbox/runner.py tests/sandbox/test_runner.py crucible/sandbox/report.py && git commit -m "feat(sandbox): pytest runner with honest hang/collection/infra classification"
 ```
 
-> **Amended after Task 3 implementation + review (rulings R-T3-1..7 in the SDD ledger):** the shipped `runner.py` probe is `pytest --collect-only -q test_unit.py` run in the sandbox with the unit replaced by a PEP 562 `__getattr__` stub (infra message `"test file does not collect: …"`), NOT `ast.parse` — the plan's own case `this is not python` parses (a `Name is not Name` comparison) and only fails at import, and an import-only probe still let a malformed `parametrize` through to be charged to the unit; import ⊂ collection, so the probe collects. Any test file that fails to collect standalone is infra; an rc=2 collection error after a passing probe can then only be the unit's fault. Further: rc=2 with ANY collected results ⇒ infra `"pytest interrupted (rc=2)"`; the rc guard runs before `parse_junit`, `ET.ParseError` ⇒ infra `"junit unparseable"`, junit is read with `errors="replace"`; `wall_s` = probe + pytest wall (bound `wall_cap_s + 10`); `module_name` must be an identifier and ≠ `test_unit` (else `ValueError`). `test_runner.py` has 14 tests, not 7. `_classify`'s rc condition is written as `rc not in (0, 1, 2)`.
+> **Amended after Task 3 implementation + review (rulings R-T3-1..7 in the SDD ledger):** the shipped `runner.py` probe is `pytest --collect-only -q test_unit.py` run in the sandbox with the unit replaced by a PEP 562 `__getattr__` stub (infra message `"test file does not collect: …"`), NOT `ast.parse`: the plan's own case `this is not python` parses (a `Name is not Name` comparison) and only fails at import, and an import-only probe still let a malformed `parametrize` through to be charged to the unit; import ⊂ collection, so the probe collects. Any test file that fails to collect standalone is infra; an rc=2 collection error after a passing probe can then only be the unit's fault. Further: rc=2 with ANY collected results ⇒ infra `"pytest interrupted (rc=2)"`; the rc guard runs before `parse_junit`, `ET.ParseError` ⇒ infra `"junit unparseable"`, junit is read with `errors="replace"`; `wall_s` = probe + pytest wall (bound `wall_cap_s + 10`); `module_name` must be an identifier and ≠ `test_unit` (else `ValueError`). `test_runner.py` has 14 tests, not 7. `_classify`'s rc condition is written as `rc not in (0, 1, 2)`.
 
 ---
 
@@ -715,7 +715,7 @@ class BudgetMeter:
 
 - [ ] **Step 3: Run → `3 passed`. Mutation check: change `>=` to `>` in `check`; purge; expect `test_ninth_execution_is_refused` FAILS; restore. Change `charge` to always increment `charged`; expect `test_infra_is_counted_but_not_charged` FAILS; restore; rerun green.**
 
-- [ ] **Step 4: Commit** — `git add crucible/sandbox/budget.py tests/sandbox/test_budget.py && git commit -m "feat(sandbox): verification budget meter"`
+- [ ] **Step 4: Commit**: `git add crucible/sandbox/budget.py tests/sandbox/test_budget.py && git commit -m "feat(sandbox): verification budget meter"`
 
 ---
 
@@ -885,9 +885,9 @@ def source_of(task_id: str) -> str:
 - [ ] **Step 5: One real fetch, outside the test suite, to populate the cache (network):**
 Run: `.venv/bin/python -c "from crucible.stream import evalplus as ep; print(len(ep.load('humaneval')), len(ep.load('mbpp')))"` → `164 378`.
 
-- [ ] **Step 6: Commit** — `git add crucible/stream/evalplus.py tests/stream/test_evalplus.py tests/fixtures && git commit -m "feat(stream): EvalPlus loader with pinned digests"`
+- [ ] **Step 6: Commit**: `git add crucible/stream/evalplus.py tests/stream/test_evalplus.py tests/fixtures && git commit -m "feat(stream): EvalPlus loader with pinned digests"`
 
-> **Amended after Task 5 review (rulings R-T5-1..2 in the SDD ledger):** the shipped `evalplus.py` differs from the Step 3 code above in two bodies — `cache_dir()` treats an empty/whitespace `$CRUCIBLE_CACHE` as unset and applies `expandvars`+`expanduser` to a set value (an empty variable had made CWD the dataset cache); `fetch()` downloads to `<filename>.part` and `os.replace`s it onto the final path only after the full body, unlinking the `.part` on any exception (the original created the final file before reading a byte, so a mid-transfer failure poisoned the cache until hand-deleted); `DigestMismatch` names the path and says to delete it. Signatures, `DATASETS`, pins and the original four tests are unchanged; the test file has 11 tests (download branch now covered by monkeypatching `urllib.request.urlopen` — still no network).
+> **Amended after Task 5 review (rulings R-T5-1..2 in the SDD ledger):** the shipped `evalplus.py` differs from the Step 3 code above in two bodies: `cache_dir()` treats an empty/whitespace `$CRUCIBLE_CACHE` as unset and applies `expandvars`+`expanduser` to a set value (an empty variable had made CWD the dataset cache); `fetch()` downloads to `<filename>.part` and `os.replace`s it onto the final path only after the full body, unlinking the `.part` on any exception (the original created the final file before reading a byte, so a mid-transfer failure poisoned the cache until hand-deleted); `DigestMismatch` names the path and says to delete it. Signatures, `DATASETS`, pins and the original four tests are unchanged; the test file has 11 tests (download branch now covered by monkeypatching `urllib.request.urlopen`, still no network).
 
 ---
 
@@ -1008,9 +1008,9 @@ def strip_docstrings(src: str) -> str:
     return ast.unparse(tree) + "\n"
 ```
 
-- [ ] **Step 3: Run → `4 passed`. Commit** — `git add crucible/stream/units.py tests/stream/test_units.py && git commit -m "feat(stream): Unit dataclass, docstring stripping, module naming"`
+- [ ] **Step 3: Run → `4 passed`. Commit**: `git add crucible/stream/units.py tests/stream/test_units.py && git commit -m "feat(stream): Unit dataclass, docstring stripping, module naming"`
 
-> **Amended after Task 6 review (rulings R-T6-1..2 in the SDD ledger):** `strip_docstrings` strips leading string-literal statements with a `while` loop (not `if`) so it is idempotent — a residual leading literal is never promoted into a new docstring, which keeps `src_hash` stable under re-stripping; `test_unit_round_trip` uses distinguishable visible/hidden values (`"vis"`/`"hid"`, 2/3) and asserts them by name after the round-trip, pinning the positional field order that Tasks 7–14 depend on; the three-kinds test also covers `async def`. `test_units.py` has 6 tests (brief's 4 + a literal sha256 pin + an idempotence test).
+> **Amended after Task 6 review (rulings R-T6-1..2 in the SDD ledger):** `strip_docstrings` strips leading string-literal statements with a `while` loop (not `if`) so it is idempotent: a residual leading literal is never promoted into a new docstring, which keeps `src_hash` stable under re-stripping; `test_unit_round_trip` uses distinguishable visible/hidden values (`"vis"`/`"hid"`, 2/3) and asserts them by name after the round-trip, pinning the positional field order that Tasks 7–14 depend on; the three-kinds test also covers `async def`. `test_units.py` has 6 tests (brief's 4 + a literal sha256 pin + an idempotence test).
 
 ---
 
@@ -1129,7 +1129,7 @@ def compute_expected(module_name: str, module_src: str, entry_point: str, inputs
     return [Expected(r["index"], r["ok"], r["value_repr"], r["reason"]) for r in json.loads(res.stdout)]
 ```
 
-- [ ] **Step 3: Run → `2 passed`. Commit** — `git add crucible/stream/oracle.py tests/stream/test_oracle.py && git commit -m "feat(stream): sandboxed oracle for expected outputs"`
+- [ ] **Step 3: Run → `2 passed`. Commit**: `git add crucible/stream/oracle.py tests/stream/test_oracle.py && git commit -m "feat(stream): sandboxed oracle for expected outputs"`
 
 - [ ] **Step 4: Failing testgen tests**
 
@@ -1194,9 +1194,9 @@ def render_tests(module_name: str, entry_point: str, inputs: list[list], expecte
     return "".join(lines), dropped
 ```
 
-- [ ] **Step 6: Run → `2 passed`. Mutation check: in `render_tests`, make `if not e.ok:` into `if False:`; purge; expect the first test FAILS (test_v1 present / dropped wrong). Restore; rerun green. Commit** — `git add crucible/stream/testgen.py tests/stream/test_testgen.py && git commit -m "feat(stream): pytest file generation from oracle outputs"`
+- [ ] **Step 6: Run → `2 passed`. Mutation check: in `render_tests`, make `if not e.ok:` into `if False:`; purge; expect the first test FAILS (test_v1 present / dropped wrong). Restore; rerun green. Commit**: `git add crucible/stream/testgen.py tests/stream/test_testgen.py && git commit -m "feat(stream): pytest file generation from oracle outputs"`
 
-> **Amended after Task 7 implementation + review (rulings R-T7-1..6 in the SDD ledger):** `compute_expected` wraps the driver result — on `timed_out`, non-zero rc, or non-JSON/truncated stdout (exec.py caps stdout at 1 MiB) it raises `OracleError(RuntimeError)` carrying module_name, rc, timed_out and the stderr tail (Task 8 maps it to a dropped unit); it also guards record count/order and validates `module_name` as an identifier. `render_tests` drops any INPUT whose repr does not round-trip under `ast.literal_eval` (e.g. `inf`/`nan` render as bare names; `range(0,3)`) with the existing reason `"no-roundtrip"`, original test numbering preserved (measured: Mbpp/404 went from a wholesale drop to 111 hidden tests + 12 input drops); it guards its arguments (`len(inputs)==len(expected)`, `expected[i].index==i`, `ok` ⇒ `value_repr` not None, else ValueError). The generated file does NOT use `pytest.approx` (which cannot compare nested structures) and the controller never evaluates a value repr: it emits `import math`, `ATOL = <atol or 1e-6>`, and a module-level recursive `_eq(a, b)` (EvalPlus-compatible: list/tuple pairwise with type preserved, dict by keys, non-bool numbers via `math.isclose(rel_tol=1e-7, abs_tol=ATOL)` when either is float, else `==`); each test asserts `_eq(candidate(*args), <literal>)`. `_is_floaty` no longer exists. `test_testgen.py` has 11 tests, `test_oracle.py` 7.
+> **Amended after Task 7 implementation + review (rulings R-T7-1..6 in the SDD ledger):** `compute_expected` wraps the driver result: on `timed_out`, non-zero rc, or non-JSON/truncated stdout (exec.py caps stdout at 1 MiB) it raises `OracleError(RuntimeError)` carrying module_name, rc, timed_out and the stderr tail (Task 8 maps it to a dropped unit); it also guards record count/order and validates `module_name` as an identifier. `render_tests` drops any INPUT whose repr does not round-trip under `ast.literal_eval` (e.g. `inf`/`nan` render as bare names; `range(0,3)`) with the existing reason `"no-roundtrip"`, original test numbering preserved (measured: Mbpp/404 went from a wholesale drop to 111 hidden tests + 12 input drops); it guards its arguments (`len(inputs)==len(expected)`, `expected[i].index==i`, `ok` ⇒ `value_repr` not None, else ValueError). The generated file does NOT use `pytest.approx` (which cannot compare nested structures) and the controller never evaluates a value repr: it emits `import math`, `ATOL = <atol or 1e-6>`, and a module-level recursive `_eq(a, b)` (EvalPlus-compatible: list/tuple pairwise with type preserved, dict by keys, non-bool numbers via `math.isclose(rel_tol=1e-7, abs_tol=ATOL)` when either is float, else `==`); each test asserts `_eq(candidate(*args), <literal>)`. `_is_floaty` no longer exists. `test_testgen.py` has 11 tests, `test_oracle.py` 7.
 
 ---
 
@@ -1335,7 +1335,7 @@ def build_units(recs: list[dict], *, seed: int, max_hidden: int = 100, jobs: int
     return units, dropped
 ```
 
-- [ ] **Step 3: Run → `4 passed` (the canonical-fails test: `add2` with `a - b` fails visible `[1,2]→3`). Commit** — `git add crucible/stream/build.py tests/stream/test_build.py && git commit -m "feat(stream): build units with sandboxed self-check and drop reasons"`
+- [ ] **Step 3: Run → `4 passed` (the canonical-fails test: `add2` with `a - b` fails visible `[1,2]→3`). Commit**: `git add crucible/stream/build.py tests/stream/test_build.py && git commit -m "feat(stream): build units with sandboxed self-check and drop reasons"`
 
 - [ ] **Step 4: Real-data smoke (not a test): build 10 real units and report drops.**
 Run:
@@ -1349,9 +1349,9 @@ print(len(units), "units;", [ (d.unit_id, d.reason) for d in dropped ])
 for u in units[:3]: print(u.unit_id, u.n_visible, u.n_hidden, len(u.dropped_inputs))
 EOF
 ```
-Expected: ≥ 8 units; any drops have a named reason. If MBPP units drop with `canonical-fails-*` because their solutions import `math`/`re`/numpy at module level and the oracle driver cannot import them — inspect `reason`; numpy is installed in the venv so it should be available inside the sandbox (same interpreter). Record anything surprising in `docs/CARRIED-DEBT.md` under S1 → Process lessons.
+Expected: ≥ 8 units; any drops have a named reason. If MBPP units drop with `canonical-fails-*` because their solutions import `math`/`re`/numpy at module level and the oracle driver cannot import them, inspect `reason`; numpy is installed in the venv so it should be available inside the sandbox (same interpreter). Record anything surprising in `docs/CARRIED-DEBT.md` under S1 → Process lessons.
 
-> **Amended after Task 8 implementation + review (rulings R-T8-1..3 in the SDD ledger):** `build_unit` catches `OracleError` and `ValueError` from `compute_expected`/`render_tests` and returns `Dropped(uid, "oracle-error:<detail>")` / `Dropped(uid, "render-error:…")` (an escaping exception would kill the `build_units` thread pool); `build_units` returns units and dropped in RECORD order (as `pool.map` yields) — the trailing `units.sort`/`dropped.sort` of the Step 2 code are NOT shipped (lexicographic `unit_id` order puts `HumanEval/10` before `HumanEval/2`; Tasks 13/16 sort what they need themselves). `test_build.py` has 11 tests: the brief's 4 plus seeded-sampling content, record-order, oracle-error drop, render-error drop, and one test each for `visible-too-slow`, `no-visible-tests` and `canonical-fails-hidden` (a real sandbox run whose canonical misbehaves only on the seed-0 hidden sample).
+> **Amended after Task 8 implementation + review (rulings R-T8-1..3 in the SDD ledger):** `build_unit` catches `OracleError` and `ValueError` from `compute_expected`/`render_tests` and returns `Dropped(uid, "oracle-error:<detail>")` / `Dropped(uid, "render-error:…")` (an escaping exception would kill the `build_units` thread pool); `build_units` returns units and dropped in RECORD order (as `pool.map` yields). The trailing `units.sort`/`dropped.sort` of the Step 2 code are NOT shipped (lexicographic `unit_id` order puts `HumanEval/10` before `HumanEval/2`; Tasks 13/16 sort what they need themselves). `test_build.py` has 11 tests: the brief's 4 plus seeded-sampling content, record-order, oracle-error drop, render-error drop, and one test each for `visible-too-slow`, `no-visible-tests` and `canonical-fails-hidden` (a real sandbox run whose canonical misbehaves only on the seed-0 hidden sample).
 
 ---
 
@@ -1454,7 +1454,7 @@ def check_complete() -> list[str]:
     return [n for n in core_operator_names() if family_of(n) is None and n not in EXCLUDED]
 ```
 
-- [ ] **Step 3: Run → `3 passed`. Mutation check: remove `"RemoveDecorator": "EXC"` from `_EXACT`; purge; expect `test_every_core_operator_is_mapped_or_excluded` FAILS; restore; rerun green. Commit** — `git add crucible/stream/families.py tests/stream/test_families.py && git commit -m "feat(stream): operator family map with completeness check"`
+- [ ] **Step 3: Run → `3 passed`. Mutation check: remove `"RemoveDecorator": "EXC"` from `_EXACT`; purge; expect `test_every_core_operator_is_mapped_or_excluded` FAILS; restore; rerun green. Commit**: `git add crucible/stream/families.py tests/stream/test_families.py && git commit -m "feat(stream): operator family map with completeness check"`
 
 ---
 
@@ -1464,7 +1464,7 @@ def check_complete() -> list[str]:
 - Create: `crucible/stream/sdl.py`, `tests/stream/test_sdl.py`
 
 **Interfaces:**
-- Produces: `class StatementDeletion(cosmic_ray.operators.operator.Operator)` — deletes one `simple_stmt` inside an indented `suite` by replacing it with `pass` (keeps indentation), usable with `cosmic_ray.mutating.mutate_code(src, StatementDeletion(), occurrence)`.
+- Produces: `class StatementDeletion(cosmic_ray.operators.operator.Operator)`, which deletes one `simple_stmt` inside an indented `suite` by replacing it with `pass` (keeps indentation), usable with `cosmic_ray.mutating.mutate_code(src, StatementDeletion(), occurrence)`.
 - Invariants: never targets docstrings, statements that are already `pass`, or statements outside a `suite` (module-level imports/defs); mutated source always compiles.
 
 - [ ] **Step 1: Failing tests**
@@ -1542,7 +1542,7 @@ class StatementDeletion(Operator):
         return ()
 ```
 
-- [ ] **Step 3: Run → `4 passed`. Add the THIRD_PARTY row check: the ledger already lists MutPy (Task 1). Commit** — `git add crucible/stream/sdl.py tests/stream/test_sdl.py && git commit -m "feat(stream): statement-deletion operator on cosmic-ray ABC"`
+- [ ] **Step 3: Run → `4 passed`. Add the THIRD_PARTY row check: the ledger already lists MutPy (Task 1). Commit**: `git add crucible/stream/sdl.py tests/stream/test_sdl.py && git commit -m "feat(stream): statement-deletion operator on cosmic-ray ABC"`
 
 ---
 
@@ -1727,9 +1727,9 @@ def sample_specs(specs: list[MutantSpec], *, per_family: int, rng: random.Random
     return out
 ```
 
-- [ ] **Step 3: Run → `4 passed`. Mutation check: in `make_mutant`, drop the `mutated == unit.module_src` guard; purge; run; if nothing fails, add a test that asserts `make_mutant` returns `None` for a spec whose operator is a no-op on the source (e.g. `ReplaceTrueWithFalse` has no positions → enumerate returns []; so instead mutate `_unified` to return `""` and assert the key test fails). Restore; rerun green. Commit** — `git add crucible/stream/mutants.py tests/stream/test_mutants.py && git commit -m "feat(stream): mutant enumeration, application, content-hash keys"`
+- [ ] **Step 3: Run → `4 passed`. Mutation check: in `make_mutant`, drop the `mutated == unit.module_src` guard; purge; run; if nothing fails, add a test that asserts `make_mutant` returns `None` for a spec whose operator is a no-op on the source (e.g. `ReplaceTrueWithFalse` has no positions → enumerate returns []; so instead mutate `_unified` to return `""` and assert the key test fails). Restore; rerun green. Commit**: `git add crucible/stream/mutants.py tests/stream/test_mutants.py && git commit -m "feat(stream): mutant enumeration, application, content-hash keys"`
 
-> **Amended after Task 11 review (rulings R-T11-1..2 in the SDD ledger):** `make_mutant`'s `compile()` guard runs under `warnings.catch_warnings()` + `simplefilter("ignore", SyntaxWarning)` — 114/17,836 real mutants (e.g. `x is 'a'`) emit `SyntaxWarning`, and under `-W error` CPython turns it into `SyntaxError`, which would silently drop valid mutants (note: `catch_warnings` is process-global — do not call `make_mutant` from a thread pool). `test_mutants.py` has 10 tests: the brief's plus pinned `mutated_src` and full diff text, a two-occurrence fixture pinning global occurrence numbering and per-occurrence span content, a `per_family=2` distinct-span case, the natural SyntaxError case (HumanEval/76: `ReplaceUnaryOperator_USub_Not` turns `if n == -1:` into `if n == not 1:`), and the SyntaxWarning case. Observed on the full EvalPlus corpus: 17,836 mutants, 0 key collisions, EXC family yields ZERO mutants on either dataset.
+> **Amended after Task 11 review (rulings R-T11-1..2 in the SDD ledger):** `make_mutant`'s `compile()` guard runs under `warnings.catch_warnings()` + `simplefilter("ignore", SyntaxWarning)`: 114/17,836 real mutants (e.g. `x is 'a'`) emit `SyntaxWarning`, and under `-W error` CPython turns it into `SyntaxError`, which would silently drop valid mutants (note: `catch_warnings` is process-global. Do not call `make_mutant` from a thread pool). `test_mutants.py` has 10 tests: the brief's plus pinned `mutated_src` and full diff text, a two-occurrence fixture pinning global occurrence numbering and per-occurrence span content, a `per_family=2` distinct-span case, the natural SyntaxError case (HumanEval/76: `ReplaceUnaryOperator_USub_Not` turns `if n == -1:` into `if n == not 1:`), and the SyntaxWarning case. Observed on the full EvalPlus corpus: 17,836 mutants, 0 key collisions, EXC family yields ZERO mutants on either dataset.
 
 ---
 
@@ -1859,7 +1859,7 @@ def validate_many(unit: Unit, mutants: list[Mutant], *, jobs: int = 8) -> list[V
         return list(pool.map(lambda m: validate_mutant(unit, m), mutants))
 ```
 
-- [ ] **Step 3: Run → `5 passed`. Mutation check: make `valid=True` for the `hidden-only` branch; purge; expect `test_hidden_only_kill_is_not_valid` FAILS; restore; rerun green. Commit** — `git add crucible/stream/validate.py tests/stream/test_validate.py && git commit -m "feat(stream): sandbox validation — valid means killed by the visible suite"`
+- [ ] **Step 3: Run → `5 passed`. Mutation check: make `valid=True` for the `hidden-only` branch; purge; expect `test_hidden_only_kill_is_not_valid` FAILS; restore; rerun green. Commit**: `git add crucible/stream/validate.py tests/stream/test_validate.py && git commit -m "feat(stream): sandbox validation — valid means killed by the visible suite"`
 
 ---
 
@@ -2103,9 +2103,9 @@ def compose(units: list[Unit], validated: dict[str, list[tuple[Mutant, Validatio
     return StreamManifest(h, seed, C, n_nov, rung, unit_ids, tasks, classes, tuple(dropped), counts)
 ```
 
-- [ ] **Step 3: Run → `4 passed`. Mutation check: in `_pick_pair`, return `(m1, pool[1])` without the span check; purge; expect `test_compose_shapes_and_invariants` FAILS (spans equal) — if it passes by luck of data, the fixture has same-span pairs; adjust `_world` so ARITH has two mutants on the same line plus one on another, rerun; restore; green. Commit** — `git add crucible/stream/compose.py tests/stream/test_compose.py && git commit -m "feat(stream): compose phases/novel into a content-hashed manifest"`
+- [ ] **Step 3: Run → `4 passed`. Mutation check: in `_pick_pair`, return `(m1, pool[1])` without the span check; purge; expect `test_compose_shapes_and_invariants` FAILS (spans equal). If it passes by luck of data, the fixture has same-span pairs; adjust `_world` so ARITH has two mutants on the same line plus one on another, rerun; restore; green. Commit**: `git add crucible/stream/compose.py tests/stream/test_compose.py && git commit -m "feat(stream): compose phases/novel into a content-hashed manifest"`
 
-> **Amended after Task 13 review (rulings R-T13-1..3 in the SDD ledger; R-T13-1 is SPEC over plan):** `_pick_pair` keeps the non-timeout preference for WHICH two mutants form a class, but which member becomes `first` (phase 1) vs `second` (phase 2) is decided by a seeded coin flip drawn from the compose rng AFTER the pair is chosen — the Step 2 code above always made `m1` the non-timeout member, so `kills_by_timeout(m2) ≥ kills_by_timeout(m1)` held by construction (measured first-rate 0.000 / second-rate 1.000) and spec §4.8.1(1c)'s 2·SE balance pre-check (Task 15 `timeout-rate-band`) would trip with no lever to fix; observed first-task timeout fraction 0.54 over 600 tasks. `dropped` is emitted in sorted order per segment (unit-no-valid by unit_id, ineligible-class by (unit, family), unit-unused by unit_id) so the manifest is independent of caller input order. `counts` are honest: `eligible_classes` is a CENSUS over all class-units (C-independent, no rng), `ineligible-class` likewise with every ineligible class named in `dropped`, plus `classes_taken` (= C) and `units-unused` (class-units never reached by the quota walk, named in `dropped` as `unit-unused`); `EXCLUSION_REASONS` setdefaults (Task 15's compose tweak) are already in. The hash input is unchanged. `test_compose.py` has 15 tests; `_world(n_units=6, n_dead=0)` keeps its Task-15 contract.
+> **Amended after Task 13 review (rulings R-T13-1..3 in the SDD ledger; R-T13-1 is SPEC over plan):** `_pick_pair` keeps the non-timeout preference for WHICH two mutants form a class, but which member becomes `first` (phase 1) vs `second` (phase 2) is decided by a seeded coin flip drawn from the compose rng AFTER the pair is chosen. The Step 2 code above always made `m1` the non-timeout member, so `kills_by_timeout(m2) ≥ kills_by_timeout(m1)` held by construction (measured first-rate 0.000 / second-rate 1.000) and spec §4.8.1(1c)'s 2·SE balance pre-check (Task 15 `timeout-rate-band`) would trip with no lever to fix; observed first-task timeout fraction 0.54 over 600 tasks. `dropped` is emitted in sorted order per segment (unit-no-valid by unit_id, ineligible-class by (unit, family), unit-unused by unit_id) so the manifest is independent of caller input order. `counts` are honest: `eligible_classes` is a CENSUS over all class-units (C-independent, no rng), `ineligible-class` likewise with every ineligible class named in `dropped`, plus `classes_taken` (= C) and `units-unused` (class-units never reached by the quota walk, named in `dropped` as `unit-unused`); `EXCLUSION_REASONS` setdefaults (Task 15's compose tweak) are already in. The hash input is unchanged. `test_compose.py` has 15 tests; `_world(n_units=6, n_dead=0)` keeps its Task-15 contract.
 
 ---
 
@@ -2125,7 +2125,7 @@ def compose(units: list[Unit], validated: dict[str, list[tuple[Mutant, Validatio
   def read_mutant(d: Path, key: str) -> Mutant
   def read_validations(d: Path) -> list[Validation]
   ```
-- Layout: `manifest.json`; `units/<module_name>/{module.py,test_visible.py,test_hidden.py,unit.json}`; `mutants/<key>.json`; `validations.jsonl` (all, including invalid — provenance).
+- Layout: `manifest.json`; `units/<module_name>/{module.py,test_visible.py,test_hidden.py,unit.json}`; `mutants/<key>.json`; `validations.jsonl` (all, including invalid, for provenance).
 
 - [ ] **Step 1: Failing test**
 
@@ -2207,7 +2207,7 @@ def read_validations(d: Path) -> list[Validation]:
         return [Validation.from_dict(json.loads(line)) for line in fh if line.strip()]
 ```
 
-- [ ] **Step 3: Run → `1 passed`. Commit** — `git add crucible/stream/store.py tests/stream/test_store.py && git commit -m "feat(stream): on-disk stream store"`
+- [ ] **Step 3: Run → `1 passed`. Commit**: `git add crucible/stream/store.py tests/stream/test_store.py && git commit -m "feat(stream): on-disk stream store"`
 
 ---
 
@@ -2231,13 +2231,13 @@ def read_validations(d: Path) -> list[Validation]:
   def mean_band(xs: list[float], ys: list[float]) -> tuple[float, float, bool]
   ```
 - Checks (names fixed; every one appears in the report, passed or not):
-  1. `family-distribution-identical` — multiset of families for `first` tasks == for `second` tasks.
-  2. `killing-count-band` — mean `n_killing_visible` of first vs second within 2·SE (Welch).
-  3. `unit-length-identical` — for each class, the unit is the same ⇒ assert multiset of unit src lengths equal.
-  4. `timeout-rate-band` — `kills_by_timeout` rate first vs second within 2·SE (two-proportion, pooled).
-  5. `novel-disjoint` — novel unit ids ∩ first-task unit ids == ∅.
-  6. `distinct-sites` — every class: span(m1) != span(m2).
-  7. `counts-named` — `manifest.counts` contains keys `hidden-only equivalent infra syntax ineligible-class unit-no-valid eligible_classes valid_mutants` (None-vs-zero: absent is a failure; zero is fine).
+  1. `family-distribution-identical`: multiset of families for `first` tasks == for `second` tasks.
+  2. `killing-count-band`: mean `n_killing_visible` of first vs second within 2·SE (Welch).
+  3. `unit-length-identical`: for each class, the unit is the same ⇒ assert multiset of unit src lengths equal.
+  4. `timeout-rate-band`: `kills_by_timeout` rate first vs second within 2·SE (two-proportion, pooled).
+  5. `novel-disjoint`: novel unit ids ∩ first-task unit ids == ∅.
+  6. `distinct-sites`: every class: span(m1) != span(m2).
+  7. `counts-named`: `manifest.counts` contains keys `hidden-only equivalent infra syntax ineligible-class unit-no-valid eligible_classes valid_mutants` (None-vs-zero: absent is a failure; zero is fine).
 
 - [ ] **Step 1: Failing tests**
 
@@ -2372,7 +2372,7 @@ def precheck(manifest: StreamManifest, units_by_id: dict[str, Unit]) -> Precheck
     return PrecheckReport(tuple(checks))
 ```
 
-- [ ] **Step 3: Run → `4 passed`. Also make `compose` emit every `REQUIRED_COUNTS` key (zero when unobserved): in `compose`, before building the manifest add `for k in ("hidden-only","equivalent","infra","syntax","unit-no-valid"): counts.setdefault(k, 0)`; then the `_full_counts` helper in the tests becomes a no-op — keep it anyway. Mutation check: in `precheck`, make `distinct-sites` always pass; purge; expect the second test FAILS; restore; green. Commit** — `git add crucible/stream/precheck.py tests/stream/test_precheck.py crucible/stream/compose.py && git commit -m "feat(stream): structural pre-checks 4.8.1-3"`
+- [ ] **Step 3: Run → `4 passed`. Also make `compose` emit every `REQUIRED_COUNTS` key (zero when unobserved): in `compose`, before building the manifest add `for k in ("hidden-only","equivalent","infra","syntax","unit-no-valid"): counts.setdefault(k, 0)`; then the `_full_counts` helper in the tests becomes a no-op. Keep it anyway. Mutation check: in `precheck`, make `distinct-sites` always pass; purge; expect the second test FAILS; restore; green. Commit**: `git add crucible/stream/precheck.py tests/stream/test_precheck.py crucible/stream/compose.py && git commit -m "feat(stream): structural pre-checks 4.8.1-3"`
 
 ---
 
@@ -2397,7 +2397,7 @@ def precheck(manifest: StreamManifest, units_by_id: dict[str, Unit]) -> Precheck
   #         `crucible stream precheck <dir>`   (exit 0 iff ok; prints report JSON)
   #         `crucible stream smoke <dir> [--n 30]`
   ```
-- Invariants: `build_stream` is deterministic for fixed `cfg` and inputs (same `stream_hash`); `limit_units` samples units with `random.Random(f"{seed}:units")` — never "the first N"; the build log names counts of units built/dropped and mutants valid/invalid by reason.
+- Invariants: `build_stream` is deterministic for fixed `cfg` and inputs (same `stream_hash`); `limit_units` samples units with `random.Random(f"{seed}:units")`, never "the first N"; the build log names counts of units built/dropped and mutants valid/invalid by reason.
 
 - [ ] **Step 1: Failing tests**
 
@@ -2567,7 +2567,7 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 3: Run → `3 passed`. Commit** — `git add crucible/stream/pipeline.py crucible/cli.py tests/stream/test_pipeline.py tests/test_cli.py && git commit -m "feat: stream build pipeline and CLI"`
+- [ ] **Step 3: Run → `3 passed`. Commit**: `git add crucible/stream/pipeline.py crucible/cli.py tests/stream/test_pipeline.py tests/test_cli.py && git commit -m "feat: stream build pipeline and CLI"`
 
 - [ ] **Step 4: Exit-criterion run (real data, smoke scale).** Build twice with a 40-unit seeded subset and compare hashes; precheck; smoke 30:
 ```bash
@@ -2577,14 +2577,14 @@ ls streams/smoke-a streams/smoke-b          # same 12-char dir name ⇒ same str
 .venv/bin/crucible stream precheck streams/smoke-a/*/
 .venv/bin/crucible stream smoke streams/smoke-a/*/ --n 30
 ```
-Expected: identical hashes; precheck `ok: true`; smoke `{"ran": 30, "killed": 30, "not_killed": 0, "infra": 0}`. If the hashes differ, diff the two `validations.jsonl` — a mutant flipping between `killed-visible` (by timeout) and not is the flake class; record it in CARRIED-DEBT and, if it recurs, raise `per_test_timeout_s` for validation only to 10 s (record the amendment). If `NotEnoughClasses` is raised with 40 units, raise `--limit-units` to 80 — this also tells us the eligible-class yield per unit for sizing the full build (record the number).
+Expected: identical hashes; precheck `ok: true`; smoke `{"ran": 30, "killed": 30, "not_killed": 0, "infra": 0}`. If the hashes differ, diff the two `validations.jsonl`. A mutant flipping between `killed-visible` (by timeout) and not is the flake class; record it in CARRIED-DEBT and, if it recurs, raise `per_test_timeout_s` for validation only to 10 s (record the amendment). If `NotEnoughClasses` is raised with 40 units, raise `--limit-units` to 80. This also tells us the eligible-class yield per unit for sizing the full build (record the number).
 
-- [ ] **Step 5: Full build (background, OS-detached — it takes tens of minutes).**
+- [ ] **Step 5: Full build (background, OS-detached: it takes tens of minutes).**
 ```bash
 mkdir -p runs && setsid nohup bash -c '.venv/bin/crucible stream build --seed 0 --C 200 --n-nov 50 --jobs 12 --out streams/full > runs/stream-build.log 2>&1; touch runs/stream-build.DONE' > /dev/null 2>&1 &
 echo $! > runs/stream-build.pid
 ```
-Then watch `runs/stream-build.log`; when `.DONE` exists run `precheck` and `smoke --n 30` on the produced dir, and record `stream_hash`, `counts`, wall time, and the eligible-class yield in `docs/CARRIED-DEBT.md` (S1 → Settled). Commit the manifest? **No** — `streams/` is git-ignored (size); record the hash + the exact command in CARRIED-DEBT; the manifest is reproducible by construction (that is what Step 4 verified).
+Then watch `runs/stream-build.log`; when `.DONE` exists run `precheck` and `smoke --n 30` on the produced dir, and record `stream_hash`, `counts`, wall time, and the eligible-class yield in `docs/CARRIED-DEBT.md` (S1 → Settled). Commit the manifest? **No**. `streams/` is git-ignored (size); record the hash + the exact command in CARRIED-DEBT; the manifest is reproducible by construction (that is what Step 4 verified).
 
 ---
 
@@ -2700,7 +2700,7 @@ def assert_identity(base_url: str, expected_model: str) -> ServedIdentity:
     return ident
 ```
 
-- [ ] **Step 3: Run → `3 passed`. Commit** — `git add crucible/proposer/identity.py tests/proposer/test_identity.py && git commit -m "feat(proposer): served-model identity probe for vLLM and llama.cpp"`
+- [ ] **Step 3: Run → `3 passed`. Commit**: `git add crucible/proposer/identity.py tests/proposer/test_identity.py && git commit -m "feat(proposer): served-model identity probe for vLLM and llama.cpp"`
 
 - [ ] **Step 4: torch for sm_120 (timebox starts).** Stop Ollama first (`systemctl --user stop ollama 2>/dev/null || pkill -f 'ollama serve'`; verify `nvidia-smi` shows < 1 GB used). Then, in the project venv:
 ```bash
@@ -2708,7 +2708,7 @@ def assert_identity(base_url: str, expected_model: str) -> ServedIdentity:
 uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu128
 .venv/bin/python -c "import torch;print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_capability()); import torch as t; a=t.randn(2048,2048,device='cuda'); print((a@a).sum().item())"
 ```
-Expected: `True`, capability `(12, 0)`, a finite number. If `is_available()` is False or the matmul errors with "no kernel image": try the next-newer CUDA index (cu129/cu130) once; if still failing, record and fall back to llama.cpp for serving (LoRA *training* then needs a CPU-offloaded torch or a rental — record as S3 risk).
+Expected: `True`, capability `(12, 0)`, a finite number. If `is_available()` is False or the matmul errors with "no kernel image": try the next-newer CUDA index (cu129/cu130) once; if still failing, record and fall back to llama.cpp for serving (LoRA *training* then needs a CPU-offloaded torch or a rental; record as S3 risk).
 
 - [ ] **Step 5: vLLM serve attempt (same timebox).**
 ```bash
@@ -2748,7 +2748,7 @@ print("loss:", float(out.loss), "| peak VRAM GB:", torch.cuda.max_memory_allocat
 pm.save_pretrained("runs/lora-smoke"); print("saved runs/lora-smoke")
 ```
 Run: `uv pip install --python .venv/bin/python transformers peft accelerate bitsandbytes && .venv/bin/python scripts/lora_attach_smoke.py Qwen/Qwen3.5-2B`.
-Then load the adapter into the server (vLLM: `curl -X POST :8001/v1/load_lora_adapter -d '{"lora_name":"smoke","lora_path":"runs/lora-smoke"}'`; llama.cpp needs a GGUF-converted adapter via `convert_lora_to_gguf.py` — record if that conversion works for Qwen3.5's architecture) and sample once with the adapter active.
+Then load the adapter into the server (vLLM: `curl -X POST :8001/v1/load_lora_adapter -d '{"lora_name":"smoke","lora_path":"runs/lora-smoke"}'`; llama.cpp needs a GGUF-converted adapter via `convert_lora_to_gguf.py`; record if that conversion works for Qwen3.5's architecture) and sample once with the adapter active.
 **Decision rule (record it):** if attach + fwd/bwd + save + server-load all succeed ⇒ proposer = Qwen3.5-2B. If any step fails and cannot be fixed within the timebox ⇒ run the same script with `Qwen/Qwen2.5-Coder-1.5B-Instruct`; proposer for all small arms = Qwen2.5-Coder-1.5B-Instruct (spec §2 fallback), and write that in `docs/findings/S1-serving.md` + CARRIED-DEBT.
 
 - [ ] **Step 7: Write `docs/findings/S1-serving.md`** with: torch version/index used and result; server chosen (vLLM version or llama.cpp commit) with startup time, VRAM, tok/s at 256 tokens for Qwen3.5-2B and the baseline Qwen3.5-9B Q6_K (or Q4_K_M if Q6 does not leave ≥ 4 GB free); LoRA attach outcome and the proposer decision; exact commands; measured free VRAM on idle desktop. Add THIRD_PARTY rows (verify each license with `gh api repos/<owner>/<repo> --jq .license.spdx_id` or the HF API and paste the output). Commit:
@@ -2758,7 +2758,7 @@ git add docs/findings/S1-serving.md scripts/lora_attach_smoke.py THIRD_PARTY.md 
 
 ---
 
-## S1 exit criteria (from spec §10) — all must be true before S2's plan is written
+## S1 exit criteria (from spec §10): all must be true before S2's plan is written
 
 - [ ] `uv run pytest` green, every load-bearing test mutation-checked as its task specifies.
 - [ ] `crucible stream build` run twice on the same 40-unit seeded subset produced the **same `stream_hash`**.
@@ -2771,7 +2771,7 @@ git add docs/findings/S1-serving.md scripts/lora_attach_smoke.py THIRD_PARTY.md 
 ## Plan self-review (done by the author before handoff)
 
 - **Spec coverage:** §4.1 units (T5–T8), §4.2 mutants + families + SDL (T9–T11), validity = visible kill (T12), §4.3 classes/phases/novel (T13), §4.5 sandbox (T2–T3), §4.6 budget (T4), §4.8.1–3 (T15), §8 None-vs-zero/infra/keys/round-trips (T3, T4, T8, T12, T13, T15), §9 package layout (all), §10 S1 exit (above), §3 identity assertion (T17). §4.7 codec probe → S2 (amendment A3). §4.8.4 pilot and §4.8.5 live control → S2/S4 by design.
-- **Placeholders:** none — every step has runnable content or an exact command; T17's exploratory steps carry explicit decision rules and what to record.
+- **Placeholders:** none. Every step has runnable content or an exact command; T17's exploratory steps carry explicit decision rules and what to record.
 - **Type consistency:** `TestReport` fields (`passed/failed/timed_out/errored/wall_s/infra_error`) used identically in T3, T4, T8, T12, T16; `Mutant.key == TaskSpec.task_key` (T11/T13/T14/T16); `Validation.reason` vocabulary (`killed-visible|hidden-only|equivalent|infra|syntax`) consistent between T12, T13 (`counts`), T15 (`REQUIRED_COUNTS`); `Span` tuple shape identical in T11/T13; `module_name_for` used for unit dirs in T14 and imports in T7; `run_tests(module_name, module_src, test_src, subset=..)` signature identical everywhere.
-- **Known soft spot called out for the executor:** T11's SDL position count in `test_enumerate_add_sub_and_lt_gte` was corrected in-line to 2; T15's `counts-named` relies on the `compose` tweak added in T15 Step 3 — do both.
+- **Known soft spot called out for the executor:** T11's SDL position count in `test_enumerate_add_sub_and_lt_gte` was corrected in-line to 2; T15's `counts-named` relies on the `compose` tweak added in T15 Step 3. Do both.
 

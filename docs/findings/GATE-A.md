@@ -1,4 +1,4 @@
-# Phase-A gating runs — pre-registered verdict: **PARTIAL** (Brice rules)
+# Phase-A gating runs, pre-registered verdict: **PARTIAL** (Brice rules)
 
 **Date:** 2026-08-25. **Lock:** `prereg-lock-a` (6bc3da0). All §6 endpoints computed
 exactly as written after all arms completed; no number was read before its arm finished,
@@ -26,12 +26,12 @@ infra at 8192, so no request it made was affected; the window is pure KV capacit
 | **E2a** beats big on repeats | A_full second 0.5750 vs B_search second 0.7850 | ≥ | **FAIL** |
 | **E2b** competitive on new | A_full p1∪novel 0.4360 vs B_search 0.7720 − 0.0884 = 0.6836 | ≥ | **FAIL** |
 | **E3a** uncertainty informative | AUROC **0.5880** (n+ = 224, n− = 226); bar 0.5 + 2·SE_HM = 0.5535 | ≥ | **PASS** |
-| **E3b** abstention honest | abstained-task failure rate **0.9787** (46/47); bar = 2 × overall failure 0.5022 = **1.0044** | ≥ | **FAIL** (bar > 1.0 — see §4) |
-| E4 (non-gating) | QuixBugs held-out | — | **not run** |
-| E5 (non-gating, report) | A_full novel − A_noMem novel = 0.4400 − 0.5000 = **−0.0600** | — | reported |
-| E6 (non-gating, report) | B_search 0.7778 vs B_naive 0.7222 overall (+5.6 pp for search) | — | reported |
+| **E3b** abstention honest | abstained-task failure rate **0.9787** (46/47); bar = 2 × overall failure 0.5022 = **1.0044** | ≥ | **FAIL** (bar > 1.0: see §4) |
+| E4 (non-gating) | QuixBugs held-out | n/a | **not run** |
+| E5 (non-gating, report) | A_full novel − A_noMem novel = 0.4400 − 0.5000 = **−0.0600** | n/a | reported |
+| E6 (non-gating, report) | B_search 0.7778 vs B_naive 0.7222 overall (+5.6 pp for search) | n/a | reported |
 
-**§7 verdict: PARTIAL** — E1 passes with the control clean, E2a/E2b/E3b fail.
+**§7 verdict: PARTIAL.** E1 passes with the control clean, E2a/E2b/E3b fail.
 Per the pre-registration: *Brice rules; I do not.* Nothing was extended, re-run, or
 re-thresholded after these numbers were read.
 
@@ -45,9 +45,9 @@ re-thresholded after these numbers were read.
   ~21 pp on repeats and ~34 pp on first exposures. E2's premise (that memory could close
   a ~10× parameter gap on this stream) is answered: not at 1.5B vs 14B.
 - **E5 is mildly negative (−6.0 pp on novel, n=50):** consistent with the exemplar
-  file-familiarity caveat — memory helps re-exposures, not novel units.
-- A_full also ran **faster** than A_noMem (3019 s vs 4723 s of task wall) — retrieval
-  shortens search — while spending 1139 s of measured sleep GPU time (§3 asymmetry:
+  file-familiarity caveat: memory helps re-exposures, not novel units.
+- A_full also ran **faster** than A_noMem (3019 s vs 4723 s of task wall: retrieval
+  shortens search) while spending 1139 s of measured sleep GPU time (§3 asymmetry:
   A_full total ≈ 69 min GPU vs A_noMem 79 min).
 
 ## 4. Instrument honesty notes (lenses, named)
@@ -57,7 +57,7 @@ re-thresholded after these numbers were read.
   candidate, so per-node hidden outcomes were never measured by the built instrument.
   This is the only endpoint whose lens narrows the pre-reg text; recorded here, not
   silently.
-- **E3b's bar saturated:** 2 × overall failure (0.5022) = 1.0044 > 1.0 — the pass
+- **E3b's bar saturated:** 2 × overall failure (0.5022) = 1.0044 > 1.0. The pass
   condition as written is unsatisfiable whenever overall failure ≥ 50%. The point
   estimate decides, so E3b is reported FAIL as written; the un-thresholded observation
   (recorded, not substituted): abstained tasks failed at 97.9% vs 50.2% overall, a 1.95×
@@ -72,9 +72,9 @@ re-thresholded after these numbers were read.
 | Arm | Task wall | Sleep GPU (measured `gpu_s`) |
 |---|---|---|
 | A_full | 3019 s | **1139 s** (14 sleeps, 14 accepted) |
-| A_noMem | 4723 s | — |
-| B_search | 2237 s | — |
-| B_naive | 1716 s | — |
+| A_noMem | 4723 s | n/a |
+| B_search | 2237 s | n/a |
+| B_naive | 1716 s | n/a |
 
 ## 6. Not run (labelled per §7)
 

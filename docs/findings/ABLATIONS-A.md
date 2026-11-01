@@ -1,9 +1,9 @@
-# Phase-A exploratory ablations — A_mem−sleep / A_sleep−mem (protocol)
+# Phase-A exploratory ablations: A_mem−sleep / A_sleep−mem (protocol)
 
 **Status: EXPLORATORY, NON-GATING.** Pre-registered as such (prereg §"Exploratory",
 line: *"A_mem−sleep (explicit memory, no LoRA) and A_sleep−mem (LoRA, no explicit
-store) — separates the store from the weights"*). The §7 gate verdict — **PARTIAL**,
-recorded in [GATE-A.md](GATE-A.md) — is final and is not affected by anything below.
+store): separates the store from the weights"*). The §7 gate verdict (**PARTIAL**,
+recorded in [GATE-A.md](GATE-A.md)) is final and is not affected by anything below.
 Per the lock: *"Exploratory arms are labelled exploratory in every table and never
 promote to gating."*
 
@@ -18,7 +18,7 @@ the +14.0 pp second-exposure gain?
 
 ## 2. Arms
 
-Each ablation is **A_full minus exactly one mechanism** (never "A_noMem plus one" —
+Each ablation is **A_full minus exactly one mechanism** (never "A_noMem plus one":
 the value model and calibrator stay in both, as in A_full):
 
 | Arm name in records | Prereg name | Retrieval (prompt) | Sleep (LoRA) | Value v1 + calibrated abstain |
@@ -39,13 +39,13 @@ For each arm, from its `lens.json` (the same `build_lens` the gate used):
    landing_rate; **Δ_second = succ_second − succ_phase1**.
 2. Comparison against the frozen GATE-A rows: A_full Δ = +0.1400 (0.4350 → 0.5750),
    A_noMem Δ = −0.0050 (0.4250 → 0.4200).
-3. Task wall-time per arm (A_full 3019 s vs A_noMem 4723 s — does retrieval alone
+3. Task wall-time per arm (A_full 3019 s vs A_noMem 4723 s: does retrieval alone
    reproduce the speedup?); for A_sleep_nomem, sleep count / accept rate / gpu_s.
 
 Reading guide, stated in advance: Δ(A_mem_nosleep) ≈ +0.14 → the store carries the
 gain; Δ(A_sleep_nomem) ≈ +0.14 → the weights carry it; both ≪ +0.14 → the gain needs
 the interaction (or the value/abstain column). These are descriptive reads on n=200
-per exposure class (SE of a single rate ≈ 3.5 pp) — no verdict is attached.
+per exposure class (SE of a single rate ≈ 3.5 pp). No verdict is attached.
 
 ## 4. Run discipline
 
@@ -67,7 +67,7 @@ Records + `lens.json` under `runs/abl-mem-nosleep/`, `runs/abl-sleep-nomem/`
 
 | Arm | phase-1 | second | **Δ second** | novel | overall | abstain | task wall | sleeps (acc) | sleep gpu_s |
 |---|---|---|---|---|---|---|---|---|---|
-| A_noMem *(gate)* | 0.4250 | 0.4200 | −0.0050 | 0.5000 | 0.4311 | 0.000 | 4723 s | — | — |
+| A_noMem *(gate)* | 0.4250 | 0.4200 | −0.0050 | 0.5000 | 0.4311 | 0.000 | 4723 s | n/a | n/a |
 | A_full *(gate)* | 0.4350 | 0.5750 | **+0.1400** | 0.4400 | 0.4978 | 0.104 | 3019 s | 14 (14) | 1139 |
 | A_mem_nosleep | 0.4250 | 0.5600 | **+0.1350** | 0.4000 | 0.4822 | 0.087 | 4990 s | 0 (by construction) | 0 |
 | A_sleep_nomem | 0.4350 | 0.4450 | **+0.0100** | 0.4400 | 0.4400 | 0.067 | 3858 s | 12 (12) | 636 |
@@ -76,7 +76,7 @@ Readings, in the §3 pre-declared frame (descriptive; single-rate SE ≈ 3.5 pp 
 n=200, ≈ 7 pp for novel at n=50):
 
 1. **The store carries the E1 gain.** Retrieval without any weight consolidation
-   reproduces +13.5 pp of A_full's +14.0 pp second-exposure gain — ~96% of the
+   reproduces +13.5 pp of A_full's +14.0 pp second-exposure gain: ~96% of the
    effect at zero sleep GPU.
 2. **Weights alone do not move repeats.** A_sleep_nomem's Δ = +1.0 pp, within
    control noise (A_noMem −0.5 pp), despite 12/12 sleeps accepted and every
@@ -99,6 +99,6 @@ untouched by every mechanism tried.
 
 *Ops note (instrument honesty):* an initial hand-rolled count in the session used
 `status == "abstained"` and read abstain = 0.0 for both arms; the recorded status
-string is `abstain`. The lens (`build_lens`) — the instrument §3 committed to —
+string is `abstain`. The lens (`build_lens`), the instrument §3 committed to,
 was used for every number above. The named bug class strikes again; the protocol's
 "name the instrument" rule is what caught it.
